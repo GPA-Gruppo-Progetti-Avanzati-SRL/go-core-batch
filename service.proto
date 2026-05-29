@@ -1,0 +1,27 @@
+syntax = "proto3";
+option go_package="./batch/grpc/proto";
+
+package distribution;
+
+service DistributionChannel{
+   rpc DistribuiteSimpleTask(SampleTaskMessage) returns (TaskStatus){}
+   rpc DistribuiteTask(TaskMessage) returns(TaskStatus){}
+}
+message SampleTaskMessage {
+  string TaskId = 1 ;
+  string JobId = 2;
+}
+
+message TaskMessage {
+
+  string TaskId = 1 ;
+  string JobId = 2;
+  string ObjectId = 3;
+  string TaskType = 4;
+}
+
+
+message TaskStatus {
+    string Status = 1;
+    string Hostname = 2;
+}
