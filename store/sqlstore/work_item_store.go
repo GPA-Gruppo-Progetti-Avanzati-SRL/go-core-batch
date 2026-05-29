@@ -50,17 +50,24 @@ func (d *WorkItemDataSQL) FindPending(ctx context.Context, workType, destination
 // ClaimPending atomically selects up to limit PENDING items of workType,
 // marks them IN_PROGRESS with locked_at = now, and returns the full records.
 // Uses SELECT FOR UPDATE SKIP LOCKED — safe across multiple replicas.
-func (d *WorkItemDataSQL) ClaimPending(ctx context.Context, workType string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *WorkItemDataSQL) ClaimPending(ctx context.Context, workType, destination, objectType string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
 	now := time.Now()
 	var items []*store.WorkItem
 	err := d.DB.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if err := tx.NewRaw(`
-			SELECT * FROM workitems
-			WHERE type = ? AND status = ?
-			ORDER BY create_time ASC
-			LIMIT ?
-			FOR UPDATE SKIP LOCKED
-		`, workType, store.StatusPending, limit).Scan(ctx, &items); err != nil {
+		q := `SELECT * FROM work_items WHERE type = ? AND status = ?
+			  AND (next_run_at IS NULL OR next_run_at <= NOW())`
+		args := []any{workType, store.StatusPending}
+		if destination != "" {
+			q += ` AND destination = ?`
+			args = append(args, destination)
+		}
+		if objectType != "" {
+			q += ` AND object_type = ?`
+			args = append(args, objectType)
+		}
+		q += ` ORDER BY next_run_at ASC NULLS FIRST, create_time ASC LIMIT ? FOR UPDATE SKIP LOCKED`
+		args = append(args, limit)
+		if err := tx.NewRaw(q, args...).Scan(ctx, &items); err != nil {
 			return err
 		}
 		if len(items) == 0 {
@@ -72,7 +79,7 @@ func (d *WorkItemDataSQL) ClaimPending(ctx context.Context, workType string, lim
 			it.Status = store.StatusInProgress
 			it.LockedAt = &now
 		}
-		_, err := tx.NewUpdate().TableExpr("workitems").
+		_, err := tx.NewUpdate().TableExpr(store.TableWorkItems).
 			Set("status = ?", store.StatusInProgress).
 			Set("locked_at = ?", now).
 			Set("update_time = ?", now).
@@ -90,23 +97,36 @@ func (d *WorkItemDataSQL) ClaimPending(ctx context.Context, workType string, lim
 // refreshing locked_at to now and incrementing retry. Returns the items for
 // immediate processing — no reset to PENDING, no waiting for the next tick.
 // Uses a CTE with FOR UPDATE SKIP LOCKED so it is safe across replicas.
-func (d *WorkItemDataSQL) RecoverOrphans(ctx context.Context, workType string, maxAge time.Duration, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *WorkItemDataSQL) RecoverOrphans(ctx context.Context, workType, destination, objectType string, maxAge time.Duration, limit int) ([]*store.WorkItem, *core.ApplicationError) {
 	cutoff := time.Now().Add(-maxAge)
 	now := time.Now()
+
+	where := `type = ? AND status = ? AND locked_at < ?`
+	args := []any{workType, store.StatusInProgress, cutoff}
+	if destination != "" {
+		where += ` AND destination = ?`
+		args = append(args, destination)
+	}
+	if objectType != "" {
+		where += ` AND object_type = ?`
+		args = append(args, objectType)
+	}
+	args = append(args, limit, now, now)
+
 	var items []*store.WorkItem
 	err := d.DB.NewRaw(`
 		WITH recovered AS (
-			SELECT id FROM workitems
-			WHERE type = ? AND status = ? AND locked_at < ?
+			SELECT id FROM work_items
+			WHERE `+where+`
 			ORDER BY locked_at ASC
 			LIMIT ?
 			FOR UPDATE SKIP LOCKED
 		)
-		UPDATE workitems
+		UPDATE work_items
 		SET locked_at = ?, retry = retry + 1, update_time = ?
 		WHERE id IN (SELECT id FROM recovered)
 		RETURNING *
-	`, workType, store.StatusInProgress, cutoff, limit, now, now).Scan(ctx, &items)
+	`, args...).Scan(ctx, &items)
 	if err != nil {
 		return nil, core.TechnicalErrorWithError(err)
 	}
@@ -117,7 +137,7 @@ func (d *WorkItemDataSQL) RecoverOrphans(ctx context.Context, workType string, m
 // When claiming is used, items are IN_PROGRESS at this point.
 func (d *WorkItemDataSQL) MarkDone(ctx context.Context, ids []string) *core.ApplicationError {
 	now := time.Now()
-	_, err := d.DB.NewUpdate().TableExpr("workitems").
+	_, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
 		Set("status = ?", store.StatusDone).
 		Set("update_time = ?", now).
 		Set("locked_at = NULL").
@@ -132,11 +152,28 @@ func (d *WorkItemDataSQL) MarkDone(ctx context.Context, ids []string) *core.Appl
 // MarkFailed marks the given item as FAILED regardless of current status.
 func (d *WorkItemDataSQL) MarkFailed(ctx context.Context, id, reason string) *core.ApplicationError {
 	now := time.Now()
-	_, err := d.DB.NewUpdate().TableExpr("workitems").
+	_, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
 		Set("status = ?", store.StatusFailed).
 		Set("error = ?", reason).
 		Set("update_time = ?", now).
 		Set("locked_at = NULL").
+		Where("id = ?", id).
+		Exec(ctx)
+	if err != nil {
+		return core.TechnicalErrorWithError(err)
+	}
+	return nil
+}
+
+func (d *WorkItemDataSQL) MarkPending(ctx context.Context, id string, after time.Duration) *core.ApplicationError {
+	now := time.Now()
+	nextRunAt := now.Add(after) // after=0 → nextRunAt=now (immediately claimable)
+	_, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
+		Set("status = ?", store.StatusPending).
+		Set("locked_at = NULL").
+		Set("update_time = ?", now).
+		Set("retry = retry + 1").
+		Set("next_run_at = ?", nextRunAt).
 		Where("id = ?", id).
 		Exec(ctx)
 	if err != nil {
@@ -159,7 +196,7 @@ func (d *WorkItemDataSQL) InsertIfNotActive(ctx context.Context, items []*store.
 		objectIds[i] = item.ObjectId
 	}
 	var activeIds []string
-	if err := d.DB.NewSelect().TableExpr("workitems").
+	if err := d.DB.NewSelect().TableExpr(store.TableWorkItems).
 		ColumnExpr("object_id").
 		Where("type = ? AND object_id IN (?) AND status IN (?, ?)",
 			workType, bun.List(objectIds), store.StatusPending, store.StatusInProgress).

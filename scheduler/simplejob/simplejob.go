@@ -46,7 +46,9 @@ func makeFactory(items store.IWorkItemStore, runner ITaskRunner) scheduler.JobFa
 		if workType == "" {
 			workType = name
 		}
-		return gocron.NewTask(run, name, workType, items, runner)
+		return gocron.NewTask(func() error {
+			return run(name, workType, items, runner)
+		})
 	}
 }
 

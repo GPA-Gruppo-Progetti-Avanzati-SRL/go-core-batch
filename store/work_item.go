@@ -6,8 +6,8 @@ import (
 )
 
 const (
-	CollectionWorkItems = "workitems"
-	TableWorkItems      = "workitems"
+	CollectionWorkItems = "work_items"
+	TableWorkItems      = "work_items"
 	StatusPending       = "PENDING"
 	StatusInProgress    = "IN_PROGRESS"
 	StatusDone          = "DONE"
@@ -23,13 +23,14 @@ type WorkItem struct {
 	ObjectId    string     `bson:"objectId"                  bun:"object_id"`
 	ObjectType  string     `bson:"objectType"                bun:"object_type"`
 	Destination string     `bson:"destination"               bun:"destination"`
-	Payload     any        `bson:"payload"                   bun:"payload"`
+	Payload     any        `bson:"payload"                   bun:"payload,type:jsonb"`
 	Status      string     `bson:"status"                    bun:"status"`
 	CreateTime  time.Time  `bson:"createTime"                bun:"create_time"`
 	UpdateTime  *time.Time `bson:"updateTime,omitempty"      bun:"update_time,nullzero"`
 	LockedAt    *time.Time `bson:"lockedAt,omitempty"        bun:"locked_at,nullzero"`
+	NextRunAt   *time.Time `bson:"nextRunAt,omitempty"       bun:"next_run_at,nullzero"`
 	Retry       int        `bson:"retry"                     bun:"retry"`
-	Error       string     `bson:"error,omitempty"           bun:"error,omitempty"`
+	Error       string     `bson:"error,omitempty"           bun:"error,nullzero"`
 }
 
 func (w WorkItem) GetCollectionName(ctx context.Context) string { return CollectionWorkItems }

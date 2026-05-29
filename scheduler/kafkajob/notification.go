@@ -2,6 +2,7 @@ package kafkajob
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -20,30 +21,20 @@ import (
 
 var tracer = otel.Tracer("NotificationKafkaJob")
 
+const defaultKafkaOrphanTimeout = 10 * time.Minute
+const defaultKafkaLimit = 100
+
 func makeNotificationJobFactory(producer *kafka.ProducerService, items store.IWorkItemStore) scheduler.JobFactory {
 	return func(name string, s *scheduler.Services, config scheduler.Config) gocron.Task {
-		return gocron.NewTask(notificationJobRun, name, producer, items, config.Properties)
+		return gocron.NewTask(func() error {
+			return notificationJobRun(name, producer, items, config)
+		})
 	}
 }
 
-func notificationJobRun(name string, producer *kafka.ProducerService, items store.IWorkItemStore, p map[string]string) error {
+func notificationJobRun(name string, producer *kafka.ProducerService, items store.IWorkItemStore, config scheduler.Config) error {
+	p := config.Properties
 	jobId := jobID(name)
-	log.Trace().Msgf("S - %s - Eseguo job ...", jobId)
-
-	timeout := 10 * time.Second
-	if v, ok := p["timeout"]; ok {
-		if n, err := strconv.Atoi(v); err != nil {
-			log.Error().Msgf("S - %s - timeout invalido: %s", jobId, v)
-		} else {
-			timeout = time.Duration(n) * time.Second
-		}
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	spanCtx, span := tracer.Start(ctx, name)
-	span.SetAttributes(attribute.String("jobName", name), attribute.String("jobId", jobId))
-	defer span.End()
 
 	destination, ok := p["destination"]
 	if !ok {
@@ -57,38 +48,98 @@ func notificationJobRun(name string, producer *kafka.ProducerService, items stor
 	if !ok {
 		return core.TechnicalErrorWithCodeAndMessage("PROPERTIES", "topic not found in properties")
 	}
+
+	limit := defaultKafkaLimit
+	if v := p["limit"]; v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = n
+		}
+	}
+
+	timeout := 30 * time.Second
+	if v := p["timeout"]; v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			timeout = time.Duration(n) * time.Second
+		}
+	}
+
+	orphanTimeout := config.LockTimeout
+	if orphanTimeout == 0 {
+		orphanTimeout = defaultKafkaOrphanTimeout
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	spanCtx, span := tracer.Start(ctx, name)
 	span.SetAttributes(
+		attribute.String("jobName", name),
+		attribute.String("jobId", jobId),
 		attribute.String("destination", destination),
 		attribute.String("object", object),
 	)
+	defer span.End()
 
-	pending, err := items.FindPending(spanCtx, JobType, destination, object)
-	if err != nil {
-		span.RecordError(err)
-		return core.TechnicalErrorWithError(err)
+	// 1. Re-claim orphans
+	orphans, appErr := items.RecoverOrphans(spanCtx, JobType, destination, object, orphanTimeout, limit)
+	if appErr != nil {
+		log.Warn().Err(appErr).Msgf("[%s] orphan recovery failed", jobId)
+		orphans = nil
+	} else if len(orphans) > 0 {
+		log.Info().Msgf("[%s] re-claimed %d orphaned item(s)", jobId, len(orphans))
 	}
-	if len(pending) == 0 {
-		log.Trace().Msgf("S - %s - No pending work items", jobId)
+
+	// 2. Claim fresh PENDING items
+	remaining := limit - len(orphans)
+	var fresh []*store.WorkItem
+	if remaining > 0 {
+		fresh, appErr = items.ClaimPending(spanCtx, JobType, destination, object, remaining)
+		if appErr != nil {
+			span.RecordError(appErr)
+			log.Error().Err(appErr).Msgf("[%s] ClaimPending failed", jobId)
+			return appErr
+		}
+	}
+
+	all := append(orphans, fresh...)
+	if len(all) == 0 {
+		log.Trace().Msgf("[%s] no pending items", jobId)
 		return nil
 	}
-	log.Info().Msgf("S - %s - %d work items to send", jobId, len(pending))
+	log.Info().Msgf("[%s] processing %d item(s) (%d orphaned, %d fresh)", jobId, len(all), len(orphans), len(fresh))
 
-	ids, kafkaMsgs := prepareMessages(pending)
+	ids, kafkaMsgs := prepareMessages(all)
+	if len(kafkaMsgs) == 0 {
+		// all items had invalid payload — mark them failed individually
+		for _, item := range all {
+			items.MarkFailed(spanCtx, item.Id, "invalid payload")
+		}
+		return nil
+	}
+
 	if errProduce := producer.ProduceMessages(spanCtx, kafkaMsgs, topic); errProduce != nil {
 		span.RecordError(errProduce)
-		log.Error().Msgf("S - %s - error producing to kafka: %s", jobId, errProduce)
+		log.Error().Err(errProduce).Msgf("[%s] Kafka produce failed — resetting %d items to PENDING", jobId, len(ids))
+		// Transient Kafka failure — reset claimed items so they are retried next tick.
+		var retryErr *store.RetryError
+		var after time.Duration
+		if errors.As(errProduce, &retryErr) {
+			after = retryErr.After
+		}
+		for _, id := range ids {
+			items.MarkPending(spanCtx, id, after)
+		}
 		return errProduce
 	}
 
-	// At-least-once delivery: if MarkDone fails, items will be re-sent on the next tick
-	// (Kafka produce is NOT rolled back).
-	if len(ids) > 0 {
-		if errMark := items.MarkDone(spanCtx, ids); errMark != nil {
-			span.RecordError(errMark)
-			log.Error().Err(errMark).Msgf("S - %s - ATTENZIONE: Kafka produce OK ma MarkDone fallito — %d items saranno ri-inviati al prossimo tick", jobId, len(ids))
-			return errMark
-		}
+	// At-least-once: if MarkDone fails, items will be re-sent on the next tick.
+	if errMark := items.MarkDone(spanCtx, ids); errMark != nil {
+		span.RecordError(errMark)
+		log.Error().Err(errMark).Msgf("[%s] ATTENZIONE: Kafka produce OK ma MarkDone fallito — %d items saranno ri-inviati", jobId, len(ids))
+		return errMark
 	}
+
+	log.Info().Msgf("[%s] sent %d message(s) to topic %s", jobId, len(ids), topic)
 	return nil
 }
 

@@ -16,7 +16,7 @@ type ITaskService[T any] interface {
 	GetServices() T
 }
 
-type RunTask[T any] func(t *Task, s T) *core.ApplicationError
+type RunTask[T any] func(t *Task, s T, items store.IWorkItemStore) *core.ApplicationError
 
 type Task struct {
 	Id        string

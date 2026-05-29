@@ -13,19 +13,19 @@ flowchart TD
     CRON([Cron tick]) --> FEED
 
     subgraph FEED["Fase 0 — Feed (opzionale, solo con RegisterWithFeed)"]
-        QS[IQueryStore.GetIds\nquery su sorgente esterna] --> IINA[IWorkItemStore.InsertIfNotActive\ncrea PENDING solo per ID senza riga attiva]
+        QS[IQueryStore.GetIds\nquery su sorgente esterna] --> IINA["IWorkItemStore.InsertIfNotActive\ncrea PENDING + next_run_at=now\nsolo per ID senza riga attiva"]
     end
 
     FEED --> ORPHAN
 
     subgraph ORPHAN["Fase 1 — Recover orphans"]
-        RO[IWorkItemStore.RecoverOrphans\nIN_PROGRESS scaduti → locked_at = NOW\nretry++  ·  restituisce le righe]
+        RO["IWorkItemStore.RecoverOrphans\nIN_PROGRESS scaduti → locked_at=NOW\nretry++  ·  restituisce le righe"]
     end
 
     ORPHAN --> CLAIM
 
     subgraph CLAIM["Fase 2 — Claim"]
-        CP[IWorkItemStore.ClaimPending\nSELECT FOR UPDATE SKIP LOCKED\nPENDING → IN_PROGRESS  ·  locked_at = NOW]
+        CP["IWorkItemStore.ClaimPending\nSELECT FOR UPDATE SKIP LOCKED\nPENDING + next_run_at≤NOW → IN_PROGRESS"]
     end
 
     RO -- orphans --> MERGE
@@ -38,21 +38,29 @@ flowchart TD
         D -- gRPC --> REMOTE
 
         subgraph LOCAL["LocalDispatcher"]
-            LS[IData.SetTaskStart] --> RUN[ITaskRunner.Run]
-            RUN -- ok --> LD[IData.SetTaskDone\nIWorkItemStore.MarkDone]
-            RUN -- errore --> LE[IData.SetTaskInError\nIWorkItemStore.MarkFailed]
+            LS[IData.SetTaskStart] --> RUN["ITaskRunner.Run(ctx, objectId, taskType, items)"]
+            RUN -- "items.MarkDone → DONE" --> LD[IData.SetTaskDone]
+            RUN -- "items.MarkPending(after)\nnext_run_at=now+d · retry++\n→ PENDING" --> LP[IData.SetTaskInError]
+            RUN -- "items.MarkFailed → FAILED\noppure nessun mark" --> LE[IData.SetTaskInError]
         end
 
-        subgraph REMOTE["Worker remoto"]
-            WS[IData.SetTaskStart] --> WRUN[esecuzione]
-            WRUN -- ok --> WD[IData.SetTaskDone\nIWorkItemStore.MarkDone]
-            WRUN -- errore --> WE[IData.SetTaskInError\nIWorkItemStore.MarkFailed]
-            WRUN -- crash --> ORPHANED([item resta IN_PROGRESS\n→ recover al tick successivo])
+        subgraph REMOTE["Worker remoto (gRPC)"]
+            WS[IData.SetTaskStart] --> WRUN["RunTask(t, services, items)"]
+            WRUN -- "items.MarkDone → DONE" --> WD[IData.SetTaskDone]
+            WRUN -- "items.MarkPending(after)\n→ PENDING" --> WP[IData.SetTaskInError]
+            WRUN -- "items.MarkFailed → FAILED" --> WE[IData.SetTaskInError]
+            WRUN -- crash --> ORPHANED(["item resta IN_PROGRESS\n→ RecoverOrphans al tick successivo"])
         end
     end
 
-    LD & LE & WD & WE --> DONE([fine run])
+    LD & LP & LE & WD & WP & WE --> DONE([fine run])
 ```
+
+> **Il task controlla il proprio lifecycle.** `ITaskRunner.Run` e `RunTask[T]` ricevono
+> `store.IWorkItemStore` direttamente — sono responsabili di chiamare
+> `items.MarkDone` / `items.MarkPending` / `items.MarkFailed`.
+> Questo permette transazioni atomiche: inserire workitem figli e chiudere quello
+> corrente in un'unica TX.
 
 ---
 
@@ -81,8 +89,9 @@ go-core-batch/
 │   └── kafkajob/                 # Job che invia WorkItem su Kafka
 │
 ├── store/
-│   ├── work_item.go              # WorkItem — outbox record (tabella workitems)
+│   ├── work_item.go              # WorkItem — outbox record (tabella work_items)
 │   ├── work_item_store.go        # IWorkItemStore: ClaimPending, RecoverOrphans, InsertIfNotActive, ...
+│   ├── errors.go                 # RetryError{After duration} — retry ritardato
 │   ├── task_log.go               # TaskLog — ciclo di vita task (tabella task_logs)
 │   ├── store.go                  # IData: SetTaskStart/Done/InError/Assigned/AssignationKO
 │   ├── sqlstore/                 # WorkItemDataSQL + BatchDataSQL
@@ -98,21 +107,24 @@ go-core-batch/
 ## WorkItem lifecycle
 
 ```
-         InsertIfNotActive
-sorgente ──────────────────► PENDING
-esterna                          │
+         InsertIfNotActive          manuale / API
+sorgente ──────────────────► PENDING ◄─────────────────────
+esterna    next_run_at=now       │
                                  │ ClaimPending
-    workitems inseriti           ▼
-    manualmente         ►  IN_PROGRESS ──────────────────► DONE
-                                 │                          ▲
-                                 │ timeout (lock-timeout)   │
-                                 ▼                          │
-                            RecoverOrphans ── ri-dispatch ──┘
-                           (locked_at=NOW, retry++)
-                                 │
-                                 │ max retry
+                                 │ (next_run_at ≤ NOW)
                                  ▼
-                              FAILED
+                           IN_PROGRESS
+                          /      |      \
+            items.MarkDone  items.MarkPending  items.MarkFailed
+                        /    (RetryError)  \
+                       ▼            ▼            ▼
+                     DONE        PENDING        FAILED
+                             next_run_at=now+d
+                              retry++
+
+    Se il worker crasha (nessun Mark chiamato):
+    item resta IN_PROGRESS → RecoverOrphans (locked_at=NOW, retry++)
+    → ri-dispatch immediato nello stesso run
 ```
 
 ---
@@ -209,11 +221,34 @@ type MyRunner struct{}
 
 var _ localdispatcher.ITaskRunner = (*MyRunner)(nil)
 
-func (r *MyRunner) Run(ctx context.Context, objectId, taskType string) error {
-    // objectId = WorkItem.ObjectId (ID dalla sorgente)
-    // nil → MarkDone, errore → MarkFailed
+// Il runner è responsabile del lifecycle: deve chiamare items.Mark* prima di ritornare.
+// Può anche inserire nuovi workitem nella stessa transazione (atomicità garantita dall'app).
+func (r *MyRunner) Run(ctx context.Context, objectId, taskType string, items store.IWorkItemStore) error {
+    result, err := callExternalService(ctx, objectId)
+    if err != nil {
+        if isTransient(err) {
+            // Riprova tra 5 minuti
+            return items.MarkPending(ctx, objectId, 5*time.Minute)
+        }
+        // Errore definitivo
+        if appErr := items.MarkFailed(ctx, objectId, err.Error()); appErr != nil {
+            log.Error().Err(appErr).Msg("MarkFailed failed")
+        }
+        return err
+    }
+    // Successo
+    if appErr := items.MarkDone(ctx, []string{objectId}); appErr != nil {
+        return appErr
+    }
     return nil
 }
+```
+
+`store.RetryError` è disponibile per propagare l'intenzione di retry verso il livello superiore:
+
+```go
+return store.RetryWithCause(5*time.Minute, err)  // wrappa l'errore originale
+return store.Retry(0)                             // retry immediato
 ```
 
 ---
@@ -239,19 +274,18 @@ core.Provides(
 )
 
 // main.go
-core.Invoke(func(items store.IWorkItemStore, qs distributedjob.IQueryStore, data store.IData) {
-    distributedjob.RegisterWithFeed(localdispatcher.New(&batch.MyRunner{}, items, data), items, qs, data)
+core.Invoke(func(items store.IWorkItemStore, data store.IData) {
+    distributedjob.Register(localdispatcher.New(&batch.MyRunner{}, items, data), items, data)
 })
 core.Invoke(func(_ *scheduler.Scheduler) {})
 
 // Creazione tabelle all'avvio
 core.Invoke(func(db *bun.DB, lc fx.Lifecycle) {
     lc.Append(fx.Hook{OnStart: func(ctx context.Context) error {
-        _, err := db.NewCreateTable().Model((*store.WorkItem)(nil)).IfNotExists().Exec(ctx)
-        if err != nil {
+        if _, err := db.NewCreateTable().Model((*store.WorkItem)(nil)).IfNotExists().Exec(ctx); err != nil {
             return err
         }
-        _, err = db.NewCreateTable().Model((*store.TaskLog)(nil)).IfNotExists().Exec(ctx)
+        _, err := db.NewCreateTable().Model((*store.TaskLog)(nil)).IfNotExists().Exec(ctx)
         return err
     }})
 })
@@ -270,7 +304,7 @@ core.Invoke(func(d *grpcdispatcher.GrpcDispatcher, items store.IWorkItemStore, d
     distributedjob.Register(d, items, data)
 })
 
-// Worker side (riceve ed esegue)
+// Worker side (riceve ed esegue) — deve avere la stessa store.IWorkItemStore del scheduler
 core.Provides(
     worker.NewWorkers[MyServices],
     grpchandler.NewRouter[MyServices],
@@ -278,13 +312,15 @@ core.Provides(
 )
 ```
 
-Il `worker.NewWorkers` accetta `store.IWorkItemStore` per chiudere il lifecycle (`MarkDone`/`MarkFailed`) dopo ogni task. Se il worker crasha prima di marcare, il job scheduler recupera l'item tramite `RecoverOrphans` al tick successivo.
+`worker.NewWorkers` accetta `store.IWorkItemStore`; ogni `RunTask[T]` riceve `items` e chiama
+`MarkDone`/`MarkPending`/`MarkFailed`. Se il worker crasha prima di marcare, il scheduler
+recupera l'item tramite `RecoverOrphans` al tick successivo.
 
 ---
 
 ## simplejob — alternativa senza infrastruttura
 
-Usa `simplejob` solo se non serve `task_logs`, non prevedi di scalare a gRPC, e vuoi un runner minimo su `workitems`.
+Usa `simplejob` solo se non serve `task_logs`, non prevedi di scalare a gRPC, e vuoi un runner minimo su `work_items`.
 
 ```go
 simplejob.Register("MyJobType", items, &batch.MyRunner{})

@@ -15,12 +15,13 @@ import (
 )
 
 type workItemFilter struct {
-	Id          string   `field:"_id"         operator:"$eq" omitempty:"true"`
-	IdIn        []string `field:"_id"         operator:"$in" omitempty:"true"`
-	Type        string   `field:"type"        operator:"$eq" omitempty:"true"`
-	Status      string   `field:"status"      operator:"$eq" omitempty:"true"`
-	Destination string   `field:"destination" operator:"$eq" omitempty:"true"`
-	ObjectType  string   `field:"objectType"  operator:"$eq" omitempty:"true"`
+	Id           string    `field:"_id"         operator:"$eq"  omitempty:"true"`
+	IdIn         []string  `field:"_id"         operator:"$in"  omitempty:"true"`
+	Type         string    `field:"type"        operator:"$eq"  omitempty:"true"`
+	Status       string    `field:"status"      operator:"$eq"  omitempty:"true"`
+	Destination  string    `field:"destination" operator:"$eq"  omitempty:"true"`
+	ObjectType   string    `field:"objectType"  operator:"$eq"  omitempty:"true"`
+	NextRunAtLte time.Time `field:"nextRunAt"   operator:"$lte" omitempty:"true"`
 }
 
 func (f workItemFilter) GetFilterCollectionName(ctx context.Context) string {
@@ -52,10 +53,10 @@ func (d *WorkItemData) FindPending(ctx context.Context, workType, destination, o
 // ClaimPending atomically claims up to limit PENDING items using optimistic locking.
 // For each candidate found, it attempts an UpdateOne WHERE status=PENDING — only items
 // still PENDING at the time of the update are successfully claimed.
-func (d *WorkItemData) ClaimPending(ctx context.Context, workType string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *WorkItemData) ClaimPending(ctx context.Context, workType, destination, objectType string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
 	candidates, appErr := mongo.GetObjectsByFilterSorted[store.WorkItem](ctx, d.Service,
-		workItemFilter{Type: workType, Status: store.StatusPending},
-		page.SortRequest{{Field: "createTime", Dir: page.Asc}},
+		workItemFilter{Type: workType, Status: store.StatusPending, Destination: destination, ObjectType: objectType, NextRunAtLte: time.Now()},
+		page.SortRequest{{Field: "nextRunAt", Dir: page.Asc}, {Field: "createTime", Dir: page.Asc}},
 	)
 	if appErr != nil {
 		return nil, appErr
@@ -90,13 +91,20 @@ func (d *WorkItemData) ClaimPending(ctx context.Context, workType string, limit 
 // refreshing lockedAt to now and incrementing retry. Returns the items for
 // immediate processing — no reset to PENDING, no waiting for the next tick.
 // Uses optimistic per-item UpdateOne so concurrent replicas don't double-claim.
-func (d *WorkItemData) RecoverOrphans(ctx context.Context, workType string, maxAge time.Duration, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *WorkItemData) RecoverOrphans(ctx context.Context, workType, destination, objectType string, maxAge time.Duration, limit int) ([]*store.WorkItem, *core.ApplicationError) {
 	cutoff := time.Now().Add(-maxAge)
 	now := time.Now()
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 
+	query := bson.M{"type": workType, "status": store.StatusInProgress, "lockedAt": bson.M{"$lt": cutoff}}
+	if destination != "" {
+		query["destination"] = destination
+	}
+	if objectType != "" {
+		query["objectType"] = objectType
+	}
 	cursor, err := coll.Find(ctx,
-		bson.M{"type": workType, "status": store.StatusInProgress, "lockedAt": bson.M{"$lt": cutoff}},
+		query,
 		options.Find().SetSort(bson.D{{Key: "lockedAt", Value: 1}}).SetLimit(int64(limit)),
 	)
 	if err != nil {
@@ -148,6 +156,23 @@ func (d *WorkItemData) MarkFailed(ctx context.Context, id, reason string) *core.
 	_, err := coll.UpdateOne(ctx,
 		bson.M{"_id": id},
 		bson.M{"$set": bson.M{"status": store.StatusFailed, "error": reason, "updateTime": now, "lockedAt": nil}},
+	)
+	if err != nil {
+		return core.TechnicalErrorWithError(err)
+	}
+	return nil
+}
+
+func (d *WorkItemData) MarkPending(ctx context.Context, id string, after time.Duration) *core.ApplicationError {
+	now := time.Now()
+	nextRunAt := now.Add(after)
+	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
+	_, err := coll.UpdateOne(ctx,
+		bson.M{"_id": id},
+		bson.M{
+			"$set": bson.M{"status": store.StatusPending, "lockedAt": nil, "updateTime": now, "nextRunAt": nextRunAt},
+			"$inc": bson.M{"retry": 1},
+		},
 	)
 	if err != nil {
 		return core.TechnicalErrorWithError(err)

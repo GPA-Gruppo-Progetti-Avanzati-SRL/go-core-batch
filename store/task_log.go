@@ -16,8 +16,8 @@ type TaskLog struct {
 	Stato    string    `json:"stato"             bson:"stato"             bun:"stato"`
 	Hostname string    `json:"hostname"          bson:"hostname"          bun:"hostname"`
 	Logdate  time.Time `json:"logdate"           bson:"logdate"           bun:"logdate"`
-	Objectid string    `json:"oggetto,omitempty" bson:"oggetto,omitempty" bun:"oggetto,omitempty"`
-	Error    string    `json:"errore,omitempty"  bson:"errore,omitempty"  bun:"errore,omitempty"`
+	Objectid string    `json:"oggetto,omitempty" bson:"oggetto,omitempty" bun:"oggetto,nullzero"`
+	Error    string    `json:"errore,omitempty"  bson:"errore,omitempty"  bun:"errore,nullzero"`
 }
 
 func (t TaskLog) GetCollectionName(ctx context.Context) string { return "tasks" }

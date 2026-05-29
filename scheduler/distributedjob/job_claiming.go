@@ -29,7 +29,9 @@ func jobID(name string) string {
 
 func makeClaimingFactory(dispatcher ITaskDispatcher, items store.IWorkItemStore, qs IQueryStore, data store.IData) scheduler.JobFactory {
 	return func(name string, s *scheduler.Services, config scheduler.Config) gocron.Task {
-		return gocron.NewTask(jobRunWithClaiming, name, dispatcher, items, qs, data, config)
+		return gocron.NewTask(func() error {
+			return jobRunWithClaiming(name, dispatcher, items, qs, data, config)
+		})
 	}
 }
 
@@ -90,6 +92,7 @@ func jobRunWithClaiming(name string, dispatcher ITaskDispatcher, items store.IWo
 					ObjectType: p["objectType"],
 					Status:     store.StatusPending,
 					CreateTime: now,
+					NextRunAt:  &now,
 				}
 			}
 			if n, feedErr := items.InsertIfNotActive(spanCtx, workItems); feedErr != nil {
@@ -101,7 +104,7 @@ func jobRunWithClaiming(name string, dispatcher ITaskDispatcher, items store.IWo
 	}
 
 	// 1. Re-claim orphans from previous crashed runs (refresh locked_at, keep IN_PROGRESS)
-	orphans, appErr := items.RecoverOrphans(spanCtx, taskType, orphanTimeout, ilimit)
+	orphans, appErr := items.RecoverOrphans(spanCtx, taskType, "", "", orphanTimeout, ilimit)
 	if appErr != nil {
 		log.Warn().Err(appErr).Msgf("[%s] orphan recovery failed", jobId)
 		orphans = nil
@@ -113,7 +116,7 @@ func jobRunWithClaiming(name string, dispatcher ITaskDispatcher, items store.IWo
 	remaining := ilimit - len(orphans)
 	var fresh []*store.WorkItem
 	if remaining > 0 {
-		fresh, appErr = items.ClaimPending(spanCtx, taskType, remaining)
+		fresh, appErr = items.ClaimPending(spanCtx, taskType, "", "", remaining)
 		if appErr != nil {
 			span.RecordError(appErr)
 			span.SetStatus(codes.Error, "claim failed")

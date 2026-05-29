@@ -2,11 +2,11 @@ package worker
 
 import (
 	"context"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"github.com/rs/zerolog/log"
 	"go.uber.org/fx"
 )
@@ -107,18 +107,12 @@ func Run[T any](semaphore chan struct{}, t *Task, services ITaskService[T], data
 		}
 		return
 	}
-	err := run(t, services.GetServices())
+	err := run(t, services.GetServices(), items)
 	if err != nil {
 		log.Error().Msgf("W - %s - %s - Error executing task: %s", t.GetJobId(), t.GetId(), err.Error())
 		t.LogTaskError(data, err.Error())
-		if items != nil {
-			items.MarkFailed(t.Context, t.ObjectId, err.Error())
-		}
 	} else {
 		log.Trace().Msgf("W - %s - %s - Executed task %T", t.GetJobId(), t.GetId(), t)
 		t.LogDone(data)
-		if items != nil {
-			items.MarkDone(t.Context, []string{t.ObjectId})
-		}
 	}
 }

@@ -8,13 +8,20 @@ import (
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
-	"github.com/rs/zerolog/log"
 )
 
 // ITaskRunner is the interface the application implements.
-// Run is called once per dispatched objectId; return non-nil to mark the item as failed.
+// The runner is fully responsible for the workitem lifecycle:
+//
+//	items.MarkDone(ctx, []string{objectId})        — successo
+//	items.MarkPending(ctx, objectId, after)        — errore transiente, riprova dopo delay
+//	items.MarkFailed(ctx, objectId, reason)        — errore definitivo
+//
+// Il runner può anche inserire nuovi workitem (items.Insert) nella stessa operazione,
+// raggiungendo l'atomicità con una transazione a livello di DB se necessario.
+// Restituire un errore non-nil causa il log su task_logs come InError.
 type ITaskRunner interface {
-	Run(ctx context.Context, objectId, taskType string) error
+	Run(ctx context.Context, objectId, taskType string, items store.IWorkItemStore) error
 }
 
 // LocalDispatcher implements distributedjob.ITaskDispatcher by running tasks in-process.
@@ -37,19 +44,10 @@ func New(runner ITaskRunner, items store.IWorkItemStore, data store.IData) *Loca
 
 func (d *LocalDispatcher) DispatchTask(ctx context.Context, jobId, taskId, objectId, taskType string) error {
 	d.data.SetTaskStart(ctx, taskId, jobId, taskType, objectId)
-
-	if err := d.runner.Run(ctx, objectId, taskType); err != nil {
+	if err := d.runner.Run(ctx, objectId, taskType, d.items); err != nil {
 		d.data.SetTaskInError(ctx, taskId, jobId, taskType, objectId, err.Error())
-		if markErr := d.items.MarkFailed(ctx, objectId, err.Error()); markErr != nil {
-			log.Error().Err(markErr).Msgf("[%s] MarkFailed failed for %s", jobId, objectId)
-		}
 		return err
 	}
-
 	d.data.SetTaskDone(ctx, taskId, jobId, taskType, objectId)
-	if markErr := d.items.MarkDone(ctx, []string{objectId}); markErr != nil {
-		log.Error().Err(markErr).Msgf("[%s] MarkDone failed for %s", jobId, objectId)
-		return markErr
-	}
 	return nil
 }
