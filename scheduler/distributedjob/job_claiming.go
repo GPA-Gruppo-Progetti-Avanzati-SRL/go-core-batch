@@ -120,7 +120,7 @@ func jobRunWithClaiming(name string, dispatcher ITaskDispatcher, items store.IWo
 		if appErr != nil {
 			span.RecordError(appErr)
 			span.SetStatus(codes.Error, "claim failed")
-			log.Error().Msgf("[%s] ClaimPending failed", jobId)
+			log.Error().Err(appErr).Msgf("[%s] ClaimPending failed", jobId)
 			return appErr
 		}
 	}
