@@ -55,7 +55,7 @@ func (d *BatchData) insertTask(ctx context.Context, taskid, jobId, typeTask, obj
 		Objectid: objectid,
 		Error:    errMsg,
 	}
-	if err := mongo.InsertOne(ctx, d.Service, obj); err != nil {
+	if _, err := mongo.InsertOne(ctx, d.Service, obj); err != nil {
 		log.Error().Err(err).Msgf("Impossibile inserire task log: %s", err.Message)
 	}
 }
