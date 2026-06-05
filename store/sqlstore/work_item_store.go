@@ -2,11 +2,13 @@ package sqlstore
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/page"
 	coresql "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-sql"
+
 	"github.com/uptrace/bun"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
@@ -133,51 +135,66 @@ func (d *WorkItemDataSQL) RecoverOrphans(ctx context.Context, workType, destinat
 	return items, nil
 }
 
-// MarkDone marks the given items as DONE regardless of current status.
-// When claiming is used, items are IN_PROGRESS at this point.
+// MarkDone transitions the given IN_PROGRESS items to DONE.
+// Returns an error if any id is not found in IN_PROGRESS state.
 func (d *WorkItemDataSQL) MarkDone(ctx context.Context, ids []string) *core.ApplicationError {
 	now := time.Now()
-	_, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
+	res, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
 		Set("status = ?", store.StatusDone).
 		Set("update_time = ?", now).
 		Set("locked_at = NULL").
-		Where("id IN (?)", bun.List(ids)).
+		Where("id IN (?) AND status = ?", bun.List(ids), store.StatusInProgress).
 		Exec(ctx)
 	if err != nil {
 		return core.TechnicalErrorWithError(err)
 	}
+	if affected, _ := res.RowsAffected(); int(affected) != len(ids) {
+		return core.TechnicalErrorWithCodeAndMessage("WIS-MD-001",
+			fmt.Sprintf("MarkDone: expected %d IN_PROGRESS items, modified %d", len(ids), affected))
+	}
 	return nil
 }
 
-// MarkFailed marks the given item as FAILED regardless of current status.
+// MarkFailed transitions the given IN_PROGRESS item to FAILED.
+// Returns an error if the item is not found in IN_PROGRESS state.
 func (d *WorkItemDataSQL) MarkFailed(ctx context.Context, id, reason string) *core.ApplicationError {
 	now := time.Now()
-	_, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
+	res, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
 		Set("status = ?", store.StatusFailed).
 		Set("error = ?", reason).
 		Set("update_time = ?", now).
 		Set("locked_at = NULL").
-		Where("id = ?", id).
+		Where("id = ? AND status = ?", id, store.StatusInProgress).
 		Exec(ctx)
 	if err != nil {
 		return core.TechnicalErrorWithError(err)
 	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return core.TechnicalErrorWithCodeAndMessage("WIS-MF-001",
+			fmt.Sprintf("MarkFailed: item %q not found in IN_PROGRESS state", id))
+	}
 	return nil
 }
 
+// MarkPending resets the given IN_PROGRESS item back to PENDING for retry.
+// Returns an error if the item is not found in IN_PROGRESS state.
 func (d *WorkItemDataSQL) MarkPending(ctx context.Context, id string, after time.Duration) *core.ApplicationError {
 	now := time.Now()
-	nextRunAt := now.Add(after) // after=0 → nextRunAt=now (immediately claimable)
-	_, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
+	nextRunAt := now.Add(after)
+	res, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
 		Set("status = ?", store.StatusPending).
 		Set("locked_at = NULL").
 		Set("update_time = ?", now).
 		Set("retry = retry + 1").
 		Set("next_run_at = ?", nextRunAt).
-		Where("id = ?", id).
+		Where("id = ? AND status = ?", id, store.StatusInProgress).
 		Exec(ctx)
 	if err != nil {
 		return core.TechnicalErrorWithError(err)
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return core.TechnicalErrorWithCodeAndMessage("WIS-MP-001",
+			fmt.Sprintf("MarkPending: item %q not found in IN_PROGRESS state", id))
 	}
 	return nil
 }
@@ -186,38 +203,88 @@ func (d *WorkItemDataSQL) Insert(ctx context.Context, items []*store.WorkItem) *
 	return coresql.InsertMany[store.WorkItem](ctx, d.DB, items)
 }
 
+func (d *WorkItemDataSQL) DeleteIfPending(ctx context.Context, id string) (bool, *core.ApplicationError) {
+	res, err := d.DB.NewDelete().TableExpr(store.TableWorkItems).
+		Where("id = ? AND status = ?", id, store.StatusPending).
+		Exec(ctx)
+	if err != nil {
+		return false, core.TechnicalErrorWithError(err)
+	}
+	affected, _ := res.RowsAffected()
+	return affected == 1, nil
+}
+
+func (d *WorkItemDataSQL) HasActive(ctx context.Context, workType, objectId string) (bool, *core.ApplicationError) {
+	var count int
+	if err := d.DB.NewSelect().TableExpr(store.TableWorkItems).
+		ColumnExpr("COUNT(*)").
+		Where("type = ? AND object_id = ? AND status IN (?, ?)",
+			workType, objectId, store.StatusPending, store.StatusInProgress).
+		Scan(ctx, &count); err != nil {
+		return false, core.TechnicalErrorWithError(err)
+	}
+	return count > 0, nil
+}
+
+// InsertIfNotActive inserts each item only if no active (PENDING or IN_PROGRESS) entry
+// exists for the same (type, object_id). Relies on the partial unique index
+// uk_workitem_active — call EnsureIndexes at startup to create it.
 func (d *WorkItemDataSQL) InsertIfNotActive(ctx context.Context, items []*store.WorkItem) (int, *core.ApplicationError) {
 	if len(items) == 0 {
 		return 0, nil
 	}
-	objectIds := make([]string, len(items))
-	workType := items[0].Type
-	for i, item := range items {
-		objectIds[i] = item.ObjectId
-	}
-	var activeIds []string
-	if err := d.DB.NewSelect().TableExpr(store.TableWorkItems).
-		ColumnExpr("object_id").
-		Where("type = ? AND object_id IN (?) AND status IN (?, ?)",
-			workType, bun.List(objectIds), store.StatusPending, store.StatusInProgress).
-		Scan(ctx, &activeIds); err != nil {
+	res, err := d.DB.NewInsert().
+		Model(&items).
+		On("CONFLICT DO NOTHING").
+		Exec(ctx)
+	if err != nil {
 		return 0, core.TechnicalErrorWithError(err)
 	}
-	active := make(map[string]struct{}, len(activeIds))
-	for _, id := range activeIds {
-		active[id] = struct{}{}
+	affected, _ := res.RowsAffected()
+	return int(affected), nil
+}
+
+func (d *WorkItemDataSQL) List(ctx context.Context, workType, status string, pageSize, pageNumber int) ([]*store.WorkItem, *page.Paging, *core.ApplicationError) {
+	q := d.DB.NewSelect().TableExpr(store.TableWorkItems).Where("type = ?", workType)
+	if status != "" {
+		q = q.Where("status = ?", status)
 	}
-	var toInsert []*store.WorkItem
-	for _, item := range items {
-		if _, exists := active[item.ObjectId]; !exists {
-			toInsert = append(toInsert, item)
-		}
+
+	var total int64
+	if err := q.ColumnExpr("COUNT(*)").Scan(ctx, &total); err != nil {
+		return nil, nil, core.TechnicalErrorWithError(err)
 	}
-	if len(toInsert) == 0 {
-		return 0, nil
+
+	paging := page.InitPaging(&page.Config{DefaultPageSize: 20, DefaultPageNumber: 1, MaxPageSize: 100}, pageSize, pageNumber, total)
+	offset, appErr := paging.Paging()
+	if appErr != nil {
+		return nil, nil, appErr
 	}
-	if appErr := coresql.InsertMany[store.WorkItem](ctx, d.DB, toInsert); appErr != nil {
-		return 0, appErr
+
+	q = d.DB.NewSelect().TableExpr(store.TableWorkItems).Where("type = ?", workType).
+		OrderExpr("create_time DESC")
+	if status != "" {
+		q = q.Where("status = ?", status)
 	}
-	return len(toInsert), nil
+	if offset >= 0 {
+		q = q.Offset(offset).Limit(paging.PageSize)
+	}
+
+	var items []*store.WorkItem
+	if err := q.Scan(ctx, &items); err != nil {
+		return nil, nil, core.TechnicalErrorWithError(err)
+	}
+	return items, paging, nil
+}
+
+// EnsureIndexes creates the indexes required by WorkItemDataSQL. Call once at application startup.
+// The partial unique index uk_workitem_active prevents concurrent insertion of duplicate
+// active (PENDING or IN_PROGRESS) items for the same (type, object_id).
+func EnsureIndexes(ctx context.Context, db *bun.DB) error {
+	_, err := db.ExecContext(ctx, `
+		CREATE UNIQUE INDEX IF NOT EXISTS uk_workitem_active
+		ON work_items (type, object_id)
+		WHERE status IN ('PENDING', 'IN_PROGRESS')
+	`)
+	return err
 }

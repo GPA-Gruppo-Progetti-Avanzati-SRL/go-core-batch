@@ -2,6 +2,7 @@ package mongostore
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
@@ -9,6 +10,7 @@ import (
 	mongo "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/tpm-mongo-common/mongolks"
 	"go.mongodb.org/mongo-driver/v2/bson"
+	mgodriver "go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
@@ -135,40 +137,52 @@ func (d *WorkItemData) RecoverOrphans(ctx context.Context, workType, destination
 	return claimed, nil
 }
 
-// MarkDone marks the given items as DONE. Uses raw driver to support variable-length batches.
+// MarkDone transitions the given IN_PROGRESS items to DONE.
+// Returns an error if any id is not found in IN_PROGRESS state.
 func (d *WorkItemData) MarkDone(ctx context.Context, ids []string) *core.ApplicationError {
 	now := time.Now()
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
-	_, err := coll.UpdateMany(ctx,
-		bson.M{"_id": bson.M{"$in": ids}},
+	res, err := coll.UpdateMany(ctx,
+		bson.M{"_id": bson.M{"$in": ids}, "status": store.StatusInProgress},
 		bson.M{"$set": bson.M{"status": store.StatusDone, "updateTime": now, "lockedAt": nil}},
 	)
 	if err != nil {
 		return core.TechnicalErrorWithError(err)
 	}
+	if int(res.ModifiedCount) != len(ids) {
+		return core.TechnicalErrorWithCodeAndMessage("WIS-MD-001",
+			fmt.Sprintf("MarkDone: expected %d IN_PROGRESS items, modified %d", len(ids), res.ModifiedCount))
+	}
 	return nil
 }
 
-// MarkFailed marks the given item as FAILED. Uses raw driver to avoid count validation.
+// MarkFailed transitions the given IN_PROGRESS item to FAILED.
+// Returns an error if the item is not found in IN_PROGRESS state.
 func (d *WorkItemData) MarkFailed(ctx context.Context, id, reason string) *core.ApplicationError {
 	now := time.Now()
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
-	_, err := coll.UpdateOne(ctx,
-		bson.M{"_id": id},
+	res, err := coll.UpdateOne(ctx,
+		bson.M{"_id": id, "status": store.StatusInProgress},
 		bson.M{"$set": bson.M{"status": store.StatusFailed, "error": reason, "updateTime": now, "lockedAt": nil}},
 	)
 	if err != nil {
 		return core.TechnicalErrorWithError(err)
 	}
+	if res.ModifiedCount == 0 {
+		return core.TechnicalErrorWithCodeAndMessage("WIS-MF-001",
+			fmt.Sprintf("MarkFailed: item %q not found in IN_PROGRESS state", id))
+	}
 	return nil
 }
 
+// MarkPending resets the given IN_PROGRESS item back to PENDING for retry.
+// Returns an error if the item is not found in IN_PROGRESS state.
 func (d *WorkItemData) MarkPending(ctx context.Context, id string, after time.Duration) *core.ApplicationError {
 	now := time.Now()
 	nextRunAt := now.Add(after)
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
-	_, err := coll.UpdateOne(ctx,
-		bson.M{"_id": id},
+	res, err := coll.UpdateOne(ctx,
+		bson.M{"_id": id, "status": store.StatusInProgress},
 		bson.M{
 			"$set": bson.M{"status": store.StatusPending, "lockedAt": nil, "updateTime": now, "nextRunAt": nextRunAt},
 			"$inc": bson.M{"retry": 1},
@@ -176,6 +190,10 @@ func (d *WorkItemData) MarkPending(ctx context.Context, id string, after time.Du
 	)
 	if err != nil {
 		return core.TechnicalErrorWithError(err)
+	}
+	if res.ModifiedCount == 0 {
+		return core.TechnicalErrorWithCodeAndMessage("WIS-MP-001",
+			fmt.Sprintf("MarkPending: item %q not found in IN_PROGRESS state", id))
 	}
 	return nil
 }
@@ -188,45 +206,80 @@ func (d *WorkItemData) Insert(ctx context.Context, items []*store.WorkItem) *cor
 	return mongo.InsertMany(ctx, d.Service, list)
 }
 
+func (d *WorkItemData) DeleteIfPending(ctx context.Context, id string) (bool, *core.ApplicationError) {
+	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
+	res, err := coll.DeleteOne(ctx, bson.M{"_id": id, "status": store.StatusPending})
+	if err != nil {
+		return false, core.TechnicalErrorWithError(err)
+	}
+	return res.DeletedCount == 1, nil
+}
+
+func (d *WorkItemData) HasActive(ctx context.Context, workType, objectId string) (bool, *core.ApplicationError) {
+	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
+	count, err := coll.CountDocuments(ctx, bson.M{
+		"type":     workType,
+		"objectId": objectId,
+		"status":   bson.M{"$in": []string{store.StatusPending, store.StatusInProgress}},
+	})
+	if err != nil {
+		return false, core.TechnicalErrorWithError(err)
+	}
+	return count > 0, nil
+}
+
+// InsertIfNotActive inserts each item only if no active (PENDING or IN_PROGRESS) entry
+// exists for the same (type, objectId). Relies on the partial unique index
+// uk_workitem_active — call EnsureIndexes at startup to create it.
 func (d *WorkItemData) InsertIfNotActive(ctx context.Context, items []*store.WorkItem) (int, *core.ApplicationError) {
 	if len(items) == 0 {
 		return 0, nil
 	}
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
-	objectIds := make([]string, len(items))
-	workType := items[0].Type
-	for i, item := range items {
-		objectIds[i] = item.ObjectId
-	}
-	cursor, err := coll.Find(ctx, bson.M{
-		"type":     workType,
-		"objectId": bson.M{"$in": objectIds},
-		"status":   bson.M{"$in": []string{store.StatusPending, store.StatusInProgress}},
-	})
-	if err != nil {
-		return 0, core.TechnicalErrorWithError(err)
-	}
-	defer cursor.Close(ctx)
-	active := make(map[string]struct{})
-	for cursor.Next(ctx) {
-		var doc struct {
-			ObjectId string `bson:"objectId"`
-		}
-		if err := cursor.Decode(&doc); err == nil {
-			active[doc.ObjectId] = struct{}{}
-		}
-	}
-	var toInsert []mongo.ICollection
+	var inserted int
 	for _, item := range items {
-		if _, exists := active[item.ObjectId]; !exists {
-			toInsert = append(toInsert, item)
+		if _, err := coll.InsertOne(ctx, item); err != nil {
+			if mgodriver.IsDuplicateKeyError(err) {
+				continue
+			}
+			return inserted, core.TechnicalErrorWithError(err)
 		}
+		inserted++
 	}
-	if len(toInsert) == 0 {
-		return 0, nil
+	return inserted, nil
+}
+
+func (d *WorkItemData) List(ctx context.Context, workType, status string, pageSize, pageNumber int) ([]*store.WorkItem, *page.Paging, *core.ApplicationError) {
+	filter := workItemFilter{Type: workType, Status: status}
+	paging := page.InitPaging(&page.Config{DefaultPageSize: 20, DefaultPageNumber: 1, MaxPageSize: 100}, pageSize, pageNumber, 0)
+	flat, err := mongo.GetPageByFilter[store.WorkItem](ctx, d.Service, filter, paging,
+		options.Find().SetSort(bson.D{{Key: "createTime", Value: -1}}))
+	if err != nil {
+		return nil, nil, err
 	}
-	if appErr := mongo.InsertMany(ctx, d.Service, toInsert); appErr != nil {
-		return 0, appErr
+	items := make([]*store.WorkItem, len(flat))
+	for i := range flat {
+		items[i] = &flat[i]
 	}
-	return len(toInsert), nil
+	return items, paging, nil
+}
+
+// EnsureIndexes creates the indexes required by WorkItemData. Call once at application startup.
+// The partial unique index uk_workitem_active prevents concurrent insertion of duplicate
+// active (PENDING or IN_PROGRESS) items for the same (type, objectId).
+func EnsureIndexes(ctx context.Context, service *mongolks.LinkedService) error {
+	coll := service.GetCollection(store.CollectionWorkItems, "")
+	_, err := coll.Indexes().CreateOne(ctx, mgodriver.IndexModel{
+		Keys: bson.D{{Key: "type", Value: 1}, {Key: "objectId", Value: 1}},
+		Options: options.Index().
+			SetUnique(true).
+			SetPartialFilterExpression(bson.M{
+				"$or": bson.A{
+					bson.M{"status": store.StatusPending},
+					bson.M{"status": store.StatusInProgress},
+				},
+			}).
+			SetName("uk_workitem_active"),
+	})
+	return err
 }

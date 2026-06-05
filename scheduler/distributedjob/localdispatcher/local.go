@@ -31,14 +31,17 @@ func New(mux *runner.MuxRunner, items store.IWorkItemStore, data store.IData) *L
 // DispatchTask launches the task in a goroutine and returns immediately.
 // Concurrency is naturally bounded by the limit property in the scheduler config
 // (ClaimPending returns at most limit items per run).
+// context.WithoutCancel detaches the goroutine from the job context, which is
+// canceled as soon as the job function returns — before the goroutine completes.
 func (d *LocalDispatcher) DispatchTask(ctx context.Context, jobId, taskId, objectId, taskType string) error {
+	taskCtx := context.WithoutCancel(ctx)
 	go func() {
-		d.data.SetTaskStart(ctx, taskId, jobId, taskType, objectId)
-		if err := d.mux.Run(ctx, objectId, taskType, d.items); err != nil {
-			d.data.SetTaskInError(ctx, taskId, jobId, taskType, objectId, err.Error())
+		d.data.SetTaskStart(taskCtx, taskId, jobId, taskType, objectId)
+		if err := d.mux.Run(taskCtx, objectId, taskType, d.items); err != nil {
+			d.data.SetTaskInError(taskCtx, taskId, jobId, taskType, objectId, err.Error())
 			return
 		}
-		d.data.SetTaskDone(ctx, taskId, jobId, taskType, objectId)
+		d.data.SetTaskDone(taskCtx, taskId, jobId, taskType, objectId)
 	}()
 	return nil
 }

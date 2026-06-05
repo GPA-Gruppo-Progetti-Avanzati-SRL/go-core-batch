@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/page"
 )
 
 // IWorkItemStore is the persistence interface for the outbox/work-item pattern.
@@ -34,4 +35,13 @@ type IWorkItemStore interface {
 	// already exists for the same (type, object_id). Returns the number inserted.
 	// Safe to call repeatedly — already-active items are silently skipped.
 	InsertIfNotActive(ctx context.Context, items []*WorkItem) (int, *core.ApplicationError)
+	// HasActive returns true when at least one PENDING or IN_PROGRESS item
+	// exists for the given workType and objectId.
+	HasActive(ctx context.Context, workType, objectId string) (bool, *core.ApplicationError)
+	// DeleteIfPending deletes the item with the given id only if its status is PENDING.
+	// Returns (true, nil) if deleted, (false, nil) if the item is not found or is no longer PENDING.
+	DeleteIfPending(ctx context.Context, id string) (bool, *core.ApplicationError)
+	// List returns a paginated list of workitems filtered by type and optionally by status.
+	// Pass status="" to include all statuses. pageSize=0 returns all items.
+	List(ctx context.Context, workType, status string, pageSize, pageNumber int) ([]*WorkItem, *page.Paging, *core.ApplicationError)
 }
