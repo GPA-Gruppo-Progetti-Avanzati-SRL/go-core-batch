@@ -33,15 +33,15 @@ flowchart TD
     MERGE([merge orphans + fresh]) --> DISPATCH
 
     subgraph DISPATCH["Fase 3 — Dispatch per ogni item"]
-        D{ITaskDispatcher}
+        D{MuxRunner\nrouting per taskType}
         D -- in-process --> LOCAL
         D -- gRPC --> REMOTE
 
         subgraph LOCAL["LocalDispatcher"]
-            LS[IData.SetTaskStart] --> RUN["ITaskRunner.Run(ctx, objectId, taskType, items)"]
+            LS[IData.SetTaskStart] --> RUN["ITaskRunner.Run(ctx, objectId, items)"]
             RUN -- "items.MarkDone → DONE" --> LD[IData.SetTaskDone]
             RUN -- "items.MarkPending(after)\nnext_run_at=now+d · retry++\n→ PENDING" --> LP[IData.SetTaskInError]
-            RUN -- "items.MarkFailed → FAILED\noppure nessun mark" --> LE[IData.SetTaskInError]
+            RUN -- "items.MarkFailed → FAILED" --> LE[IData.SetTaskInError]
         end
 
         subgraph REMOTE["Worker remoto (gRPC)"]
@@ -56,11 +56,9 @@ flowchart TD
     LD & LP & LE & WD & WP & WE --> DONE([fine run])
 ```
 
-> **Il task controlla il proprio lifecycle.** `ITaskRunner.Run` e `RunTask[T]` ricevono
-> `store.IWorkItemStore` direttamente — sono responsabili di chiamare
-> `items.MarkDone` / `items.MarkPending` / `items.MarkFailed`.
-> Questo permette transazioni atomiche: inserire workitem figli e chiudere quello
-> corrente in un'unica TX.
+> **Il task controlla il proprio lifecycle.** `ITaskRunner.Run` riceve `store.IWorkItemStore`
+> direttamente — è responsabile di chiamare `items.MarkDone` / `items.MarkPending` / `items.MarkFailed`.
+> Questo permette transazioni atomiche: inserire workitem figli e chiudere quello corrente in un'unica TX.
 
 ---
 
@@ -80,8 +78,10 @@ go-core-batch/
 │   │   ├── dispatcher.go         # Interface: ITaskDispatcher
 │   │   ├── store.go              # Interface: IQueryStore (feed opzionale)
 │   │   ├── job_claiming.go       # jobRunWithClaiming — feed → orphans → claim → dispatch
-│   │   ├── localdispatcher/      # ITaskDispatcher in-process
-│   │   ├── grpcdispatcher/       # ITaskDispatcher via gRPC
+│   │   ├── runner/               # Infrastruttura condivisa tra tutti i dispatcher
+│   │   │   └── runner.go         # ITaskRunner, TaskRunner, MuxRunner, Provide()
+│   │   ├── localdispatcher/      # ITaskDispatcher in-process + Module()
+│   │   ├── grpcdispatcher/       # ITaskDispatcher via gRPC + Module()
 │   │   ├── sqlstore/             # IQueryStore su SQL
 │   │   └── mongostore/           # IQueryStore su MongoDB
 │   │
@@ -98,6 +98,7 @@ go-core-batch/
 │   └── mongostore/               # WorkItemData + BatchData
 │
 ├── worker/                       # Worker pool per task distribuiti via gRPC
+│   └── grpchandler/              # Router gRPC → worker pool + Module() + Provide()
 ├── grpc/                         # Client/Server gRPC
 └── kafka/                        # ProducerService (franz-go)
 ```
@@ -129,68 +130,124 @@ esterna    next_run_at=now       │
 
 ---
 
-## Modalità d'uso
+## Pattern consigliato — Module() + runner.Provide()
 
-### Senza feed — workitems gestiti esternamente
+Il modo canonico per aggiungere task runner a un'applicazione. Ogni task type è in un file autonomo; il wiring centrale non cambia mai.
 
-I workitem vengono inseriti da un processo esterno (API, altro job, script). Il job schedula solo claim + dispatch.
+### Struttura app/batch/
 
-```go
-// main.go
-core.Invoke(func(items store.IWorkItemStore, data store.IData) {
-    distributedjob.Register(
-        localdispatcher.New(&batch.MyRunner{}, items, data),
-        items,
-        data,
-    )
-})
+```
+app/batch/
+  batch.go           — chiama localdispatcher.Module() in init()
+  miotask.go         — definisce runner + lo registra con runner.Provide()
+  altrotask.go       — idem per un secondo task type
 ```
 
-```yaml
-scheduler:
-  - name: "my-job"
-    type: "DistribuiteTask"
-    cron: "*/30 * * * * *"
-    lock-timeout: 10m
-    properties:
-      task:  "MyTaskType"
-      limit: "100"
-```
-
-### Con feed — workitems alimentati da sorgente esterna
-
-Il job interroga una tabella/collection esterna, crea i workitem per gli ID non ancora attivi, poi fa il claim.
+### app/batch/batch.go
 
 ```go
-// app-config.go
-core.Provides(
-    fx.Annotate(djsqlstore.NewQueryDataSQL, fx.As(new(distributedjob.IQueryStore))),
+package batch
+
+import "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/localdispatcher"
+
+func init() {
+    localdispatcher.Module()
+}
+```
+
+### app/batch/miotask.go
+
+```go
+package batch
+
+import (
+    "context"
+    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/runner"
+    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 )
 
-// main.go
+func init() {
+    runner.Provide(newMioTaskRunner)
+}
+
+// I parametri del costruttore sono iniettati da Fx — business, data, ecc.
+func newMioTaskRunner(svc mySvc.IService) *runner.TaskRunner {
+    return runner.New("MIO_TASK", &mioTaskRunner{svc: svc})
+}
+
+type mioTaskRunner struct {
+    svc mySvc.IService
+}
+
+func (r *mioTaskRunner) Run(ctx context.Context, objectId string, items store.IWorkItemStore) error {
+    if err := r.svc.DoWork(ctx, objectId); err != nil {
+        items.MarkFailed(ctx, objectId, err.Error())
+        return err
+    }
+    return items.MarkDone(ctx, []string{objectId})
+}
+```
+
+### app-config.go — blank import
+
+```go
+import _ "myapp/app/batch"   // attiva tutti gli init() in app/batch/
+```
+
+### config.yml
+
+```yaml
+scheduler:
+  - name: "mio-job"
+    type: "DistribuiteTask"
+    cron: "* * * * *"
+    singleton: true
+    lock-timeout: 15m
+    disabled: false
+    properties:
+      task:  "MIO_TASK"
+      limit: "10"
+```
+
+---
+
+## Modalità di registrazione a confronto
+
+### Manuale (bassa configurazione)
+
+Utile per un singolo task type o quando non si usa il pattern `app/batch/`.
+
+```go
+// main.go — prima di core.Invoke(scheduler.NewScheduler)
+core.Invoke(func(items store.IWorkItemStore, data store.IData) {
+    distributedjob.Register(
+        localdispatcher.New(runner.NewMux([]*runner.TaskRunner{
+            runner.New("MY_TASK", &batch.MyRunner{}),
+        }), items, data),
+        items, data,
+    )
+})
+```
+
+### Con feed — workitem alimentati da sorgente esterna
+
+```go
 core.Invoke(func(items store.IWorkItemStore, qs distributedjob.IQueryStore, data store.IData) {
     distributedjob.RegisterWithFeed(
-        localdispatcher.New(&batch.MyRunner{}, items, data),
-        items,
-        qs,
-        data,
+        localdispatcher.New(mux, items, data),
+        items, qs, data,
     )
 })
 ```
 
 ```yaml
-scheduler:
-  - name: "orders-job"
-    type: "DistribuiteTask"
-    cron: "0 * * * *"
-    lock-timeout: 15m
-    properties:
-      task:       "ProcessOrder"
-      limit:      "200"
-      collection: "orders"
-      filter:     "status = 'READY'"
-      sort:       "created_at:asc"
-      objectType: "Order"         # opzionale — finisce in WorkItem.ObjectType
+properties:
+  task:       "ProcessOrder"
+  limit:      "200"
+  collection: "orders"
+  filter:     "status = 'READY'"
+  sort:       "created_at:asc"
+  objectType: "Order"
 ```
 
 ---
@@ -204,7 +261,7 @@ scheduler:
 | `cron` | string | Espressione cron (secondi abilitati) |
 | `singleton` | bool | Redis lock — evita run paralleli su repliche diverse |
 | `lock-timeout` | duration | Dopo quanto un IN_PROGRESS è considerato orfano (default: 10m) |
-| `disabled` | bool | Disabilita il job |
+| `disabled` | bool | Disabilita il job senza rimuoverlo dalla config |
 | `properties.task` | string | TaskType passato al dispatcher |
 | `properties.limit` | int | Max item per run |
 | `properties.collection` | string | Tabella/collection sorgente (solo con feed) |
@@ -214,107 +271,90 @@ scheduler:
 
 ---
 
-## Implementare un task runner
+## Wiring Fx completo (services/data layer)
 
 ```go
-type MyRunner struct{}
+// services/services.go
+core.Provides(
+    batchredis.NewService,
+    fx.Annotate(mongostore.NewBatchData,    fx.As(new(store.IData))),
+    fx.Annotate(mongostore.NewWorkItemData, fx.As(new(store.IWorkItemStore))),
+    scheduler.NewScheduler,
+)
 
-var _ localdispatcher.ITaskRunner = (*MyRunner)(nil)
-
-// Il runner è responsabile del lifecycle: deve chiamare items.Mark* prima di ritornare.
-// Può anche inserire nuovi workitem nella stessa transazione (atomicità garantita dall'app).
-func (r *MyRunner) Run(ctx context.Context, objectId, taskType string, items store.IWorkItemStore) error {
-    result, err := callExternalService(ctx, objectId)
-    if err != nil {
-        if isTransient(err) {
-            // Riprova tra 5 minuti
-            return items.MarkPending(ctx, objectId, 5*time.Minute)
-        }
-        // Errore definitivo
-        if appErr := items.MarkFailed(ctx, objectId, err.Error()); appErr != nil {
-            log.Error().Err(appErr).Msg("MarkFailed failed")
-        }
-        return err
-    }
-    // Successo
-    if appErr := items.MarkDone(ctx, []string{objectId}); appErr != nil {
-        return appErr
-    }
-    return nil
-}
-```
-
-`store.RetryError` è disponibile per propagare l'intenzione di retry verso il livello superiore:
-
-```go
-return store.RetryWithCause(5*time.Minute, err)  // wrappa l'errore originale
-return store.Retry(0)                             // retry immediato
+// app-config.go
+core.Supply(&cfg.Batch.Redis, cfg.Scheduler)
 ```
 
 ---
 
-## Wiring Fx completo
+## RetryError — retry ritardato
 
 ```go
-// data/data.go — init()
-core.Provides(
-    coresql.NewService,
-    fx.Annotate(sqlstore.NewWorkItemDataSQL, fx.As(new(store.IWorkItemStore))),
-    fx.Annotate(sqlstore.NewBatchDataSQL,    fx.As(new(store.IData))),
-)
+return store.Retry(5 * time.Minute)              // riprova tra 5 min
+return store.Retry(0)                            // retry immediato
+return store.RetryWithCause(5*time.Minute, err)  // wrappa l'errore originale
+```
 
-// app-config.go — init()
-core.Supply(&cfg.Batch.Redis, cfg.Scheduler)
-core.Provides(
-    func() schema.Dialect { return pgdialect.New() },
-    batchredis.NewService,
-    scheduler.NewScheduler,
-    // solo se si usa la modalità con feed:
-    fx.Annotate(djsqlstore.NewQueryDataSQL, fx.As(new(distributedjob.IQueryStore))),
-)
+Il campo `next_run_at` viene impostato a `now + After` da `MarkPending`. `ClaimPending` filtra `next_run_at <= NOW()`.
 
-// main.go
-core.Invoke(func(items store.IWorkItemStore, data store.IData) {
-    distributedjob.Register(localdispatcher.New(&batch.MyRunner{}, items, data), items, data)
-})
-core.Invoke(func(_ *scheduler.Scheduler) {})
+---
 
-// Creazione tabelle all'avvio
-core.Invoke(func(db *bun.DB, lc fx.Lifecycle) {
-    lc.Append(fx.Hook{OnStart: func(ctx context.Context) error {
-        if _, err := db.NewCreateTable().Model((*store.WorkItem)(nil)).IfNotExists().Exec(ctx); err != nil {
-            return err
-        }
-        _, err := db.NewCreateTable().Model((*store.TaskLog)(nil)).IfNotExists().Exec(ctx)
-        return err
-    }})
-})
+## IQueryStore — SQL vs MongoDB
+
+```go
+// SQL (distributedjob/sqlstore) — filter = WHERE clause raw, sort = "col:asc"
+// MongoDB (distributedjob/mongostore) — filter = JSON query '{"status":"NEW"}'
+
+// Registrazione:
+fx.Annotate(djsqlstore.NewQueryDataSQL,   fx.As(new(distributedjob.IQueryStore)))
+fx.Annotate(djmongostore.NewQueryDataMongo, fx.As(new(distributedjob.IQueryStore)))
 ```
 
 ---
 
 ## Worker distribuito (gRPC)
 
-Per scalare i worker su processi separati, sostituire `localdispatcher` con `grpcdispatcher`:
+Due processi separati: il **scheduler** dispatcha via gRPC, il **worker** riceve ed esegue.
+I runner si registrano con `runner.Provide()` identicamente al caso local — solo `Module()` cambia.
+
+### Scheduler side (scheduler process)
 
 ```go
-// Scheduler side (schedula e dispatcha via gRPC)
-core.Provides(batchgrpc.NewClient)
-core.Invoke(func(d *grpcdispatcher.GrpcDispatcher, items store.IWorkItemStore, data store.IData) {
-    distributedjob.Register(d, items, data)
-})
+// app/batch/batch.go nel processo scheduler
+import "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/grpcdispatcher"
 
-// Worker side (riceve ed esegue) — deve avere la stessa store.IWorkItemStore del scheduler
-core.Provides(
-    worker.NewWorkers[MyServices],
-    grpchandler.NewRouter[MyServices],
-    batchgrpc.NewServer,
-)
+func init() {
+    grpcdispatcher.Module()  // registra GrpcDispatcher — nessun runner locale
+}
 ```
 
-`worker.NewWorkers` accetta `store.IWorkItemStore`; ogni `RunTask[T]` riceve `items` e chiama
-`MarkDone`/`MarkPending`/`MarkFailed`. Se il worker crasha prima di marcare, il scheduler
-recupera l'item tramite `RecoverOrphans` al tick successivo.
+### Worker side (worker process)
+
+```go
+// app/batch/batch.go nel processo worker
+import "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/worker/grpchandler"
+
+func init() {
+    grpchandler.Module()  // avvia gRPC server + worker pool con i runner registrati
+}
+
+// app/batch/miotask.go — identico al caso local
+func init() {
+    runner.Provide(newMioTaskRunner)
+}
+```
+
+Il worker deve connettersi allo stesso DB del scheduler per `IWorkItemStore` (`MarkDone`/`MarkFailed`).
+
+### grpchandler.Module() — dipendenze Fx richieste
+
+`grpchandler.Module()` richiede via Fx:
+- `store.IWorkItemStore`
+- `store.IData`
+- `*batchgrpc.Server`
+- `[]worker.Config` — pool sizes per task type (dalla config applicazione)
+- `[]*runner.TaskRunner` (gruppo `batch_runners`, popolato da `runner.Provide()`)
 
 ---
 
@@ -330,14 +370,63 @@ simplejob.Register("MyJobType", items, &batch.MyRunner{})
 
 ---
 
-## Dipendenze opzionali
+## Interfacce chiave
 
-| Package | Dipendenza | Quando usare |
+```go
+// runner.ITaskRunner — implementata dai task runner applicativi
+type ITaskRunner interface {
+    Run(ctx context.Context, objectId string, items store.IWorkItemStore) error
+}
+
+// distributedjob.ITaskDispatcher — chiamata dal job per ogni item
+type ITaskDispatcher interface {
+    DispatchTask(ctx context.Context, jobId, taskId, objectId, taskType string) error
+}
+
+// store.IWorkItemStore — claiming + lifecycle
+type IWorkItemStore interface {
+    ClaimPending(ctx context.Context, workType, destination, objectType string, limit int) ([]*WorkItem, *core.ApplicationError)
+    RecoverOrphans(ctx context.Context, workType, destination, objectType string, maxAge time.Duration, limit int) ([]*WorkItem, *core.ApplicationError)
+    InsertIfNotActive(ctx context.Context, items []*WorkItem) (int, *core.ApplicationError)
+    MarkDone(ctx context.Context, ids []string) *core.ApplicationError
+    MarkFailed(ctx context.Context, id, reason string) *core.ApplicationError
+    MarkPending(ctx context.Context, id string, after time.Duration) *core.ApplicationError
+    Insert(ctx context.Context, items []*WorkItem) *core.ApplicationError
+}
+
+// store.IData — ciclo di vita task su task_logs
+type IData interface {
+    SetTaskStart(ctx context.Context, taskid, jobid, typeTask, objectid string)
+    SetTaskDone(ctx context.Context, taskid, jobid, typeTask, objectid string)
+    SetTaskInError(ctx context.Context, taskid, jobid, typeTask, objectid, errMsg string)
+    SetTaskAssigned(ctx context.Context, taskid, jobid, typeTask, objectid string)
+    SetTaskAssignationKO(ctx context.Context, taskid, jobid, typeTask, objectid, errMsg string)
+}
+```
+
+---
+
+## Concorrenza — local vs gRPC
+
+| | LocalDispatcher | gRPC worker pool |
 |---|---|---|
-| `redis/` | `go-redis/v9` | sempre (lock scheduler) |
-| `store/sqlstore/` | `uptrace/bun` | DB SQL |
-| `store/mongostore/` | `go-mongo-driver` | MongoDB |
-| `distributedjob/sqlstore/` | `uptrace/bun` | feed da tabelle SQL |
-| `distributedjob/mongostore/` | `go-mongo-driver` | feed da collection MongoDB |
-| `distributedjob/grpcdispatcher/` | `grpc-go` | deployment distribuito |
-| `kafka/` | `twmb/franz-go` | notifiche Kafka |
+| **Dispatch** | lancia goroutine, ritorna subito | invia gRPC call, ritorna subito |
+| **Concorrenza** | `limit` item in parallelo | `limit` item dispatchati, concorrenza controllata dal pool size |
+| **Scaling** | verticale (un processo) | orizzontale (N worker process × M goroutine) |
+| **Config pool** | non necessaria — bound implicito = `limit` | `[]worker.Config` per task type |
+
+In locale, `limit` è il bound naturale: `ClaimPending` restituisce al massimo `limit` item, quindi al massimo `limit` goroutine attive per run. Non serve configurare un pool separato.
+
+In gRPC, `limit` e pool size sono dimensioni ortogonali: lo scheduler può claimare 100 item per tick mentre ogni worker process esegue al massimo M task in concorrenza, e si possono avere N worker process in parallelo.
+
+---
+
+## Trappole
+
+- **`core.Invoke(func(_ *scheduler.Scheduler) {})`** è obbligatorio — senza di esso lo scheduler non viene costruito da Fx.
+- **`distributedjob.Register` / `localdispatcher.Module()`** deve essere invocato prima dello scheduler — gli Invoke Fx sono ordinati.
+- **`runner.Provide(constructor)`** deve essere chiamato in `init()` — Fx raccoglie il gruppo `batch_runners` prima di invocare `Module()`.
+- **`gocron.NewTask` deve usare una closure zero-arg** che cattura le dipendenze — non passare interface nil come `...any` o gocron va in panic in reflect.
+- **Tabelle**: `work_items` e `task_logs` (costanti `store.TableWorkItems`, `store.TableTaskLogs`).
+- **`singleton: true`** richiede Redis attivo — senza Redis il lock fallisce all'avvio.
+- **Worker distribuito**: il processo worker deve connettersi allo stesso DB del scheduler per chiamare `MarkDone`/`MarkFailed`.
