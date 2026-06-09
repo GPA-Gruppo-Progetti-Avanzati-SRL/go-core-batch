@@ -38,6 +38,8 @@ type IWorkItemStore interface {
 	// HasActive returns true when at least one PENDING or IN_PROGRESS item
 	// exists for the given workType and objectId.
 	HasActive(ctx context.Context, workType, objectId string) (bool, *core.ApplicationError)
+	// GetById returns the WorkItem with the given id, or a NotFound error.
+	GetById(ctx context.Context, id string) (*WorkItem, *core.ApplicationError)
 	// DeleteIfPending deletes the item with the given id only if its status is PENDING.
 	// Returns (true, nil) if deleted, (false, nil) if the item is not found or is no longer PENDING.
 	DeleteIfPending(ctx context.Context, id string) (bool, *core.ApplicationError)

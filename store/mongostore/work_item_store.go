@@ -2,6 +2,7 @@ package mongostore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -213,6 +214,18 @@ func (d *WorkItemData) DeleteIfPending(ctx context.Context, id string) (bool, *c
 		return false, core.TechnicalErrorWithError(err)
 	}
 	return res.DeletedCount == 1, nil
+}
+
+func (d *WorkItemData) GetById(ctx context.Context, id string) (*store.WorkItem, *core.ApplicationError) {
+	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
+	var item store.WorkItem
+	if err := coll.FindOne(ctx, bson.M{"_id": id}).Decode(&item); err != nil {
+		if errors.Is(err, mgodriver.ErrNoDocuments) {
+			return nil, core.NotFoundError()
+		}
+		return nil, core.TechnicalErrorWithError(err)
+	}
+	return &item, nil
 }
 
 func (d *WorkItemData) HasActive(ctx context.Context, workType, objectId string) (bool, *core.ApplicationError) {

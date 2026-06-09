@@ -1,8 +1,6 @@
 package grpchandler
 
 import (
-	"context"
-
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	batchgrpc "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/grpc"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/runner"
@@ -59,7 +57,7 @@ func (s *runnerService) GetTaskExecutions(taskType string) (worker.RunTask[*runn
 		return nil, false
 	}
 	return func(t *worker.Task, _ *runnerService, items store.IWorkItemStore) *core.ApplicationError {
-		if err := r.Run(context.Background(), t.ObjectId, items); err != nil {
+		if err := r.Run(t.Context, t.ObjectId, items); err != nil {
 			return core.TechnicalErrorWithError(err)
 		}
 		return nil

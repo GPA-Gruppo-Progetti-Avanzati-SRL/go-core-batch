@@ -214,6 +214,10 @@ func (d *WorkItemDataSQL) DeleteIfPending(ctx context.Context, id string) (bool,
 	return affected == 1, nil
 }
 
+func (d *WorkItemDataSQL) GetById(ctx context.Context, id string) (*store.WorkItem, *core.ApplicationError) {
+	return nil, core.TechnicalErrorWithCodeAndMessage("NOT-IMPL", "GetById not implemented for SQL store")
+}
+
 func (d *WorkItemDataSQL) HasActive(ctx context.Context, workType, objectId string) (bool, *core.ApplicationError) {
 	var count int
 	if err := d.DB.NewSelect().TableExpr(store.TableWorkItems).
