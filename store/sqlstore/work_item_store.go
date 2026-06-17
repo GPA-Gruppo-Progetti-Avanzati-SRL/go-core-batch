@@ -3,6 +3,7 @@ package sqlstore
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
@@ -248,7 +249,7 @@ func (d *WorkItemDataSQL) InsertIfNotActive(ctx context.Context, items []*store.
 	return int(affected), nil
 }
 
-func (d *WorkItemDataSQL) List(ctx context.Context, workType, status string, pageSize, pageNumber int) ([]*store.WorkItem, *page.Paging, *core.ApplicationError) {
+func (d *WorkItemDataSQL) List(ctx context.Context, workType, status string, paging *page.Paging, sort page.SortRequest) ([]*store.WorkItem, *core.ApplicationError) {
 	q := d.DB.NewSelect().TableExpr(store.TableWorkItems).Where("type = ?", workType)
 	if status != "" {
 		q = q.Where("status = ?", status)
@@ -256,17 +257,22 @@ func (d *WorkItemDataSQL) List(ctx context.Context, workType, status string, pag
 
 	var total int64
 	if err := q.ColumnExpr("COUNT(*)").Scan(ctx, &total); err != nil {
-		return nil, nil, core.TechnicalErrorWithError(err)
+		return nil, core.TechnicalErrorWithError(err)
 	}
+	paging.SetTotalItems(total)
 
-	paging := page.InitPaging(&page.Config{DefaultPageSize: 20, DefaultPageNumber: 1, MaxPageSize: 100}, pageSize, pageNumber, total)
 	offset, appErr := paging.Paging()
 	if appErr != nil {
-		return nil, nil, appErr
+		return nil, appErr
+	}
+
+	orderExpr := "create_time DESC"
+	if expr := strings.TrimPrefix(coresql.SortToSQL(sort), "ORDER BY "); expr != "" {
+		orderExpr = expr
 	}
 
 	q = d.DB.NewSelect().TableExpr(store.TableWorkItems).Where("type = ?", workType).
-		OrderExpr("create_time DESC")
+		OrderExpr(orderExpr)
 	if status != "" {
 		q = q.Where("status = ?", status)
 	}
@@ -276,9 +282,9 @@ func (d *WorkItemDataSQL) List(ctx context.Context, workType, status string, pag
 
 	var items []*store.WorkItem
 	if err := q.Scan(ctx, &items); err != nil {
-		return nil, nil, core.TechnicalErrorWithError(err)
+		return nil, core.TechnicalErrorWithError(err)
 	}
-	return items, paging, nil
+	return items, nil
 }
 
 // EnsureIndexes creates the indexes required by WorkItemDataSQL. Call once at application startup.

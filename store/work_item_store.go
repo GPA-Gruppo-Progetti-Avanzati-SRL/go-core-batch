@@ -44,6 +44,8 @@ type IWorkItemStore interface {
 	// Returns (true, nil) if deleted, (false, nil) if the item is not found or is no longer PENDING.
 	DeleteIfPending(ctx context.Context, id string) (bool, *core.ApplicationError)
 	// List returns a paginated list of workitems filtered by type and optionally by status.
-	// Pass status="" to include all statuses. pageSize=0 returns all items.
-	List(ctx context.Context, workType, status string, pageSize, pageNumber int) ([]*WorkItem, *page.Paging, *core.ApplicationError)
+	// Pass status="" to include all statuses.
+	// sort controls the order; pass nil to use the default (createTime DESC).
+	// paging must be pre-initialised by the caller (page.InitPaging); List updates TotalCount in place.
+	List(ctx context.Context, workType, status string, paging *page.Paging, sort page.SortRequest) ([]*WorkItem, *core.ApplicationError)
 }

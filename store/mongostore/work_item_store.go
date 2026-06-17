@@ -262,19 +262,23 @@ func (d *WorkItemData) InsertIfNotActive(ctx context.Context, items []*store.Wor
 	return inserted, nil
 }
 
-func (d *WorkItemData) List(ctx context.Context, workType, status string, pageSize, pageNumber int) ([]*store.WorkItem, *page.Paging, *core.ApplicationError) {
+func (d *WorkItemData) List(ctx context.Context, workType, status string, paging *page.Paging, sort page.SortRequest) ([]*store.WorkItem, *core.ApplicationError) {
 	filter := workItemFilter{Type: workType, Status: status}
-	paging := page.InitPaging(&page.Config{DefaultPageSize: 20, DefaultPageNumber: 1, MaxPageSize: 100}, pageSize, pageNumber, 0)
-	flat, err := mongo.GetPageByFilter[store.WorkItem](ctx, d.Service, filter, paging,
-		options.Find().SetSort(bson.D{{Key: "createTime", Value: -1}}))
+	var sortOpt options.Lister[options.FindOptions]
+	if len(sort) > 0 {
+		sortOpt = mongo.FindSortOption(sort)
+	} else {
+		sortOpt = options.Find().SetSort(bson.D{{Key: "createTime", Value: -1}})
+	}
+	flat, err := mongo.GetPageByFilter[store.WorkItem](ctx, d.Service, filter, paging, sortOpt)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	items := make([]*store.WorkItem, len(flat))
 	for i := range flat {
 		items[i] = &flat[i]
 	}
-	return items, paging, nil
+	return items, nil
 }
 
 // EnsureIndexes creates the indexes required by WorkItemData. Call once at application startup.
