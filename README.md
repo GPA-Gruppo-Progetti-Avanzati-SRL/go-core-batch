@@ -12,8 +12,8 @@ Framework per batch processing distribuito. Gestisce job schedulati, claiming at
 flowchart TD
     CRON([Cron tick]) --> FEED
 
-    subgraph FEED["Fase 0 — Feed (opzionale, solo con RegisterWithFeed)"]
-        QS[IQueryStore.GetIds\nquery su sorgente esterna] --> IINA["IWorkItemStore.InsertIfNotActive\ncrea PENDING + next_run_at=now\nsolo per ID senza riga attiva"]
+    subgraph FEED["Fase 0 — Feed (opzionale, solo con DistribuiteTaskByQuery / DistribuiteTaskByS3File)"]
+        QS[IFeedSource.Feed\nquery DB o listing S3] --> IINA["IWorkItemStore.InsertIfNotActive\ncrea PENDING + next_run_at=now\nsolo per ID senza riga attiva"]
     end
 
     FEED --> ORPHAN
@@ -73,20 +73,28 @@ go-core-batch/
 │   ├── registry.go               # Jobs map[string]JobFactory
 │   ├── metrics.go                # Prometheus: TaskAssigned, TaskAssignedKO, JobExecution
 │   │
-│   ├── distributedjob/           # Unico job type distribuito — claiming sempre attivo
-│   │   ├── distributedjob.go     # Register / RegisterWithFeed
+│   ├── distributedjob/           # Job type distribuiti — claiming sempre attivo
+│   │   ├── distributedjob.go     # Register / RegisterByQuery / RegisterByS3File
+│   │   ├── feed.go               # IFeedSource interface + queryStoreFeed adapter
 │   │   ├── dispatcher.go         # Interface: ITaskDispatcher
-│   │   ├── store.go              # Interface: IQueryStore (feed opzionale)
+│   │   ├── store.go              # Interface: IQueryStore (feed DB)
 │   │   ├── job_claiming.go       # jobRunWithClaiming — feed → orphans → claim → dispatch
 │   │   ├── runner/               # Infrastruttura condivisa tra tutti i dispatcher
-│   │   │   └── runner.go         # ITaskRunner, TaskRunner, MuxRunner, Provide()
+│   │   │   └── runner.go         # ITaskRunner, TaskRunner, MuxRunner, Provide(), IFileRunner, RegisterFile()
 │   │   ├── localdispatcher/      # ITaskDispatcher in-process + Module()
 │   │   ├── grpcdispatcher/       # ITaskDispatcher via gRPC + Module()
+│   │   ├── queryfeed/            # Modulo Fx per DistribuiteTaskByQuery
+│   │   ├── s3feed/               # Modulo Fx per DistribuiteTaskByS3File (feed + runner + module)
 │   │   ├── sqlstore/             # IQueryStore su SQL
 │   │   └── mongostore/           # IQueryStore su MongoDB
 │   │
 │   ├── simplejob/                # Job semplice in-process (senza claiming, senza task_logs)
 │   └── kafkajob/                 # Job che invia WorkItem su Kafka
+│
+├── s3/                           # Client S3 multi-service (aws-sdk-go-v2)
+│   ├── config.go                 # ServiceConfig, Config
+│   ├── service.go                # Service: List, Get, Move
+│   └── registry.go               # Registry: NewRegistry, Get
 │
 ├── store/
 │   ├── work_item.go              # WorkItem — outbox record (tabella work_items)
@@ -229,25 +237,92 @@ core.Invoke(func(items store.IWorkItemStore, data store.IData) {
 })
 ```
 
-### Con feed — workitem alimentati da sorgente esterna
+### Con feed DB — DistribuiteTaskByQuery
 
 ```go
-core.Invoke(func(items store.IWorkItemStore, qs distributedjob.IQueryStore, data store.IData) {
-    distributedjob.RegisterWithFeed(
-        localdispatcher.New(mux, items, data),
-        items, qs, data,
-    )
-})
+// app/batch/batch.go
+import (
+    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/localdispatcher"
+    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/queryfeed"
+)
+
+func init() {
+    localdispatcher.Module()
+    queryfeed.Module()
+}
 ```
 
 ```yaml
-properties:
-  task:       "ProcessOrder"
-  limit:      "200"
-  collection: "orders"
-  filter:     "status = 'READY'"
-  sort:       "created_at:asc"
-  objectType: "Order"
+scheduler:
+  - name: "process-orders"
+    type: "DistribuiteTaskByQuery"
+    cron: "* * * * *"
+    singleton: true
+    lock-timeout: 15m
+    properties:
+      task:       "ProcessOrder"
+      limit:      "200"
+      collection: "orders"
+      filter:     "status = 'READY'"
+      sort:       "created_at:asc"
+      objectType: "Order"
+```
+
+### Con feed S3 — DistribuiteTaskByS3File
+
+```go
+// app/batch/batch.go
+import (
+    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/localdispatcher"
+    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/runner"
+    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/s3feed"
+)
+
+func init() {
+    localdispatcher.Module()
+    s3feed.Module()
+    runner.RegisterFile[myS3Runner]("S3_IMPORT")
+}
+```
+
+```go
+// app/batch/s3_import.go
+type myS3Runner struct {
+    fx.In
+    Svc mysvc.IService
+}
+
+func (r *myS3Runner) Run(ctx context.Context, key string, content io.Reader, items store.IWorkItemStore) error {
+    // process the file stream
+    return items.MarkDone(ctx, []string{key})
+}
+```
+
+```yaml
+batch:
+  s3:
+    services:
+      main:
+        endpoint: "https://s3.eu-west-1.amazonaws.com"
+        region: "eu-west-1"
+        access-key: "AKIA..."
+        secret-key: "..."
+        bucket: "my-bucket"
+        use-path-style: false
+
+scheduler:
+  - name: "s3-import"
+    type: "DistribuiteTaskByS3File"
+    cron: "*/5 * * * *"
+    singleton: true
+    lock-timeout: 15m
+    properties:
+      task:      "S3_IMPORT"
+      limit:     "50"
+      service:   "main"
+      path:      "inbox/"
+      pattern:   "*.csv"
+      dest-path: "processed"
 ```
 
 ---
@@ -257,17 +332,21 @@ properties:
 | Campo | Tipo | Descrizione |
 |---|---|---|
 | `name` | string | Nome univoco del job |
-| `type` | string | `"DistribuiteTask"` oppure tipo simplejob |
+| `type` | string | `"DistribuiteTask"`, `"DistribuiteTaskByQuery"`, `"DistribuiteTaskByS3File"`, oppure tipo simplejob |
 | `cron` | string | Espressione cron (secondi abilitati) |
 | `singleton` | bool | Redis lock — evita run paralleli su repliche diverse |
 | `lock-timeout` | duration | Dopo quanto un IN_PROGRESS è considerato orfano (default: 10m) |
 | `disabled` | bool | Disabilita il job senza rimuoverlo dalla config |
 | `properties.task` | string | TaskType passato al dispatcher |
 | `properties.limit` | int | Max item per run |
-| `properties.collection` | string | Tabella/collection sorgente (solo con feed) |
-| `properties.filter` | string | WHERE SQL o JSON query Mongo (solo con feed) |
-| `properties.sort` | string | `"col:asc,col2:desc"` (solo con feed) |
-| `properties.objectType` | string | Finisce in `WorkItem.ObjectType` (solo con feed, opzionale) |
+| `properties.collection` | string | Tabella/collection sorgente (solo DistribuiteTaskByQuery) |
+| `properties.filter` | string | WHERE SQL o JSON query Mongo (solo DistribuiteTaskByQuery) |
+| `properties.sort` | string | `"col:asc,col2:desc"` (solo DistribuiteTaskByQuery) |
+| `properties.objectType` | string | Finisce in `WorkItem.ObjectType` (solo DistribuiteTaskByQuery, opzionale) |
+| `properties.service` | string | Nome logico del servizio S3 (solo DistribuiteTaskByS3File) |
+| `properties.path` | string | Prefisso S3 per il listing (solo DistribuiteTaskByS3File) |
+| `properties.pattern` | string | Glob pattern sul basename del file, es. `"*.csv"` (solo DistribuiteTaskByS3File) |
+| `properties.dest-path` | string | Prefisso S3 dove spostare i file elaborati (solo DistribuiteTaskByS3File) |
 
 ---
 

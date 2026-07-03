@@ -54,10 +54,16 @@ type muxParams struct {
 }
 
 // Module registers the DistribuiteTask mux dispatcher with the fx application.
-// Call once (e.g. in an init()) before scheduler.NewScheduler.
+// It provides ITaskDispatcher via fx so that queryfeed and s3feed modules can
+// depend on it. Call once (e.g. in an init()) before scheduler.NewScheduler.
 func Module() {
-	core.Invoke(func(p muxParams) {
-		mux := runner.NewMux(p.Runners)
-		distributedjob.Register(New(mux, p.Items, p.Data), p.Items, p.Data)
+	core.Provides(
+		func(p muxParams) *runner.MuxRunner {
+			return runner.NewMux(p.Runners)
+		},
+		fx.Annotate(New, fx.As(new(distributedjob.ITaskDispatcher))),
+	)
+	core.Invoke(func(d distributedjob.ITaskDispatcher, items store.IWorkItemStore, data store.IData) {
+		distributedjob.Register(d, items, data)
 	})
 }

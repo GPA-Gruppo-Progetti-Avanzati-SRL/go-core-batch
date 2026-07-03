@@ -84,3 +84,9 @@ func (f *S3Feed) Feed(ctx context.Context, taskType string, props map[string]str
 	}
 	return items, nil
 }
+
+// pathBase and pathMatch are thin wrappers exposed for testability.
+var (
+	pathBase  = path.Base
+	pathMatch = path.Match
+)

@@ -7,7 +7,7 @@ import (
 )
 
 // IQueryStore fetches object IDs from an external source (any table or collection).
-// Used by RegisterWithFeed to populate workitems before the claiming phase.
+// Used by RegisterByQuery to populate workitems before the claiming phase.
 // Implementations live in distributedjob/mongostore and distributedjob/sqlstore.
 type IQueryStore interface {
 	GetIds(ctx context.Context, collection, filter string, limit int) ([]string, *core.ApplicationError)

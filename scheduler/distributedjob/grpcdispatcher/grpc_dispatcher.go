@@ -30,25 +30,15 @@ func (d *GrpcDispatcher) DispatchTask(ctx context.Context, jobId, taskId, object
 	return err
 }
 
-// GrpcModule wires the gRPC client and GrpcDispatcher, then registers the job.
-// The app must separately provide store.IWorkItemStore and store.IData.
-// Deprecated: use Module() for consistency with localdispatcher.
-func GrpcModule() fx.Option {
-	return fx.Options(
-		fx.Provide(batchgrpc.NewClient),
-		fx.Provide(NewGrpcDispatcher),
-		fx.Invoke(func(d *GrpcDispatcher, items store.IWorkItemStore, data store.IData) {
-			distributedjob.Register(d, items, data)
-		}),
-	)
-}
-
-// Module is the idiomatic alternative to GrpcModule: it wires the gRPC client and
-// GrpcDispatcher via core.Provides/core.Invoke, consistent with localdispatcher.Module.
+// Module wires the gRPC client and GrpcDispatcher, providing ITaskDispatcher
+// via fx so that queryfeed and s3feed modules can depend on it.
 // Call once (e.g. in an init()) before scheduler.NewScheduler.
 func Module() {
-	core.Provides(batchgrpc.NewClient, NewGrpcDispatcher)
-	core.Invoke(func(d *GrpcDispatcher, items store.IWorkItemStore, data store.IData) {
+	core.Provides(
+		batchgrpc.NewClient,
+		fx.Annotate(NewGrpcDispatcher, fx.As(new(distributedjob.ITaskDispatcher))),
+	)
+	core.Invoke(func(d distributedjob.ITaskDispatcher, items store.IWorkItemStore, data store.IData) {
 		distributedjob.Register(d, items, data)
 	})
 }
