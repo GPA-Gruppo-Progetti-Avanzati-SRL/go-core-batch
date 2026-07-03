@@ -7,18 +7,17 @@
 //	simplejob.Module()
 //	simplejob.RegisterRunner[myRunner]("HelloWorld")
 //
-// Config example:
+// Config example (workType defaults to the job type, so it can be omitted when they match):
 //
 //	scheduler:
 //	  - name: "hello-world"
 //	    type: "HelloWorld"
 //	    cron: "*/5 * * * * *"
-//	    properties:
-//	      workType: "HelloWorld"
 package simplejob
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -87,27 +86,41 @@ func Module() {
 
 // Register adds a job type with the given name to the global scheduler registry.
 // The job finds all pending WorkItems of that type and calls runner.Run for each.
-// Items that succeed are marked DONE; items that fail are marked FAILED.
+// Items that succeed are marked DONE; items that fail are marked FAILED. A runner
+// may return store.Retry/store.RetryWithCause to reset the item to PENDING (with a
+// scheduled next_run_at) instead of failing it permanently.
 func Register(jobType string, items store.IWorkItemStore, runner ITaskRunner) {
 	scheduler.Jobs[jobType] = makeFactory(items, runner)
 }
 
+// defaultRunTimeout is used when the job config sets no lock-timeout.
+const defaultRunTimeout = 30 * time.Second
+
 func makeFactory(items store.IWorkItemStore, runner ITaskRunner) scheduler.JobFactory {
 	return func(name string, _ *scheduler.Services, config scheduler.Config) gocron.Task {
+		// workType is the WorkItem.Type queried by FindPending. It defaults to the
+		// job type (the registry key), so it only needs to be set explicitly when the
+		// WorkItem.Type differs from the configured type.
 		workType := config.Properties["workType"]
 		if workType == "" {
-			workType = name
+			workType = config.Type
 		}
 		selfFeed := config.Properties["selfFeed"] == "true"
+		// The run context timeout is taken from lock-timeout so long-running jobs
+		// (minutes) are not cut off by the default; falls back to defaultRunTimeout.
+		timeout := defaultRunTimeout
+		if config.LockTimeout > 0 {
+			timeout = config.LockTimeout
+		}
 		return gocron.NewTask(func() error {
-			return run(name, workType, selfFeed, items, runner)
+			return run(name, workType, selfFeed, timeout, items, runner)
 		})
 	}
 }
 
-func run(name, workType string, selfFeed bool, items store.IWorkItemStore, runner ITaskRunner) error {
+func run(name, workType string, selfFeed bool, timeout time.Duration, items store.IWorkItemStore, runner ITaskRunner) error {
 	jobID := fmt.Sprintf("%s-%s", name, time.Now().Format("20060102150405"))
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	if selfFeed {
@@ -142,6 +155,16 @@ func run(name, workType string, selfFeed bool, items store.IWorkItemStore, runne
 	var doneIDs []string
 	for _, item := range pending {
 		if runErr := runner.Run(ctx, item); runErr != nil {
+			// A *store.RetryError signals a transient failure: reset the item to PENDING
+			// with a scheduled next_run_at instead of marking it FAILED permanently.
+			var re *store.RetryError
+			if errors.As(runErr, &re) {
+				log.Warn().Err(runErr).Msgf("[%s] task transient failure for item %s, retry in %s", jobID, item.Id, re.After)
+				if markErr := items.MarkPending(ctx, item.Id, re.After); markErr != nil {
+					log.Error().Err(markErr).Msgf("[%s] MarkPending failed for item %s", jobID, item.Id)
+				}
+				continue
+			}
 			log.Error().Err(runErr).Msgf("[%s] task failed for item %s", jobID, item.Id)
 			if markErr := items.MarkFailed(ctx, item.Id, runErr.Error()); markErr != nil {
 				log.Error().Err(markErr).Msgf("[%s] MarkFailed failed for item %s", jobID, item.Id)
