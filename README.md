@@ -447,6 +447,20 @@ simplejob.Register("MyJobType", items, &batch.MyRunner{})
 
 `simplejob.ITaskRunner` riceve il `*store.WorkItem` completo invece del solo `objectId`.
 
+### selfFeed — job auto-alimentato
+
+Con la property `selfFeed: "true"`, il simplejob crea automaticamente un work item a ogni tick via `InsertIfNotActive` con `ObjectId = workType`. Finché l'item è PENDING o IN_PROGRESS non ne viene creato un altro; una volta DONE, al tick successivo ne crea uno nuovo.
+
+```yaml
+scheduler:
+  - name: "cleanup"
+    type: "Cleanup"
+    cron: "0 */5 * * * *"
+    properties:
+      selfFeed: "true"
+      workType: "Cleanup"
+```
+
 ---
 
 ## Interfacce chiave
