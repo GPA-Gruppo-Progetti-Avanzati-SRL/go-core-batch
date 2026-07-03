@@ -6,6 +6,7 @@ package runner
 import (
 	"context"
 	"fmt"
+	"io"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
@@ -70,4 +71,74 @@ func (r *MuxRunner) Run(ctx context.Context, objectId, taskType string, items st
 //	}
 func Provide(constructor any) {
 	core.Provides(fx.Annotate(constructor, fx.ResultTags(`group:"`+Group+`"`)))
+}
+
+// Register registers a struct type T as a task runner for the given taskType.
+// T must embed fx.In (for dependency injection) and implement ITaskRunner (via pointer receiver).
+//
+// Example:
+//
+//	func init() { runner.Register[myRunner]("MY_TASK") }
+//
+//	type myRunner struct {
+//	    fx.In
+//	    Svc myPkg.IService
+//	}
+//	func (r *myRunner) Run(ctx context.Context, objectId string, items store.IWorkItemStore) error { ... }
+func Register[T any, PT interface {
+	*T
+	ITaskRunner
+}](taskType string) {
+	Provide(func(p T) *TaskRunner {
+		pp := PT(&p)
+		return New(taskType, pp)
+	})
+}
+
+// IFileRunner is the interface for file-based task runners (e.g. S3).
+// The runner receives the file key and an io.Reader with the file content.
+type IFileRunner interface {
+	Run(ctx context.Context, key string, content io.Reader, items store.IWorkItemStore) error
+}
+
+// FileTaskRunner binds an IFileRunner to the task type it handles.
+type FileTaskRunner struct {
+	TaskType string
+	Runner   IFileRunner
+}
+
+// NewFile returns a FileTaskRunner wrapping runner for the given taskType.
+func NewFile(taskType string, r IFileRunner) *FileTaskRunner {
+	return &FileTaskRunner{TaskType: taskType, Runner: r}
+}
+
+// FileGroup is the fx group tag used to collect all registered FileTaskRunners.
+const FileGroup = "batch_file_runners"
+
+// ProvideFile registers a FileTaskRunner constructor into the batch_file_runners fx group.
+// The constructor may declare any fx-injectable parameters.
+func ProvideFile(constructor any) {
+	core.Provides(fx.Annotate(constructor, fx.ResultTags(`group:"`+FileGroup+`"`)))
+}
+
+// RegisterFile registers a struct type T as a file-based task runner for the given taskType.
+// T must embed fx.In (for dependency injection) and implement IFileRunner (via pointer receiver).
+//
+// Example:
+//
+//	func init() { runner.RegisterFile[myS3Runner]("S3_IMPORT") }
+//
+//	type myS3Runner struct {
+//	    fx.In
+//	    Svc mysvc.IService
+//	}
+//	func (r *myS3Runner) Run(ctx context.Context, key string, content io.Reader, items store.IWorkItemStore) error { ... }
+func RegisterFile[T any, PT interface {
+	*T
+	IFileRunner
+}](taskType string) {
+	ProvideFile(func(p T) *FileTaskRunner {
+		pp := PT(&p)
+		return NewFile(taskType, pp)
+	})
 }
