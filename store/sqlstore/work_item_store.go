@@ -216,7 +216,7 @@ func (d *WorkItemDataSQL) DeleteIfPending(ctx context.Context, id string) (bool,
 }
 
 func (d *WorkItemDataSQL) GetById(ctx context.Context, id string) (*store.WorkItem, *core.ApplicationError) {
-	return nil, core.TechnicalErrorWithCodeAndMessage("NOT-IMPL", "GetById not implemented for SQL store")
+	return coresql.GetById[store.WorkItem](ctx, d.DB, id)
 }
 
 func (d *WorkItemDataSQL) HasActive(ctx context.Context, workType, objectId string) (bool, *core.ApplicationError) {
