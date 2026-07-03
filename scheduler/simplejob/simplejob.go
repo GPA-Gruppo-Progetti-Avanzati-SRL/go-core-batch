@@ -17,7 +17,6 @@ package simplejob
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -33,11 +32,11 @@ import (
 // Group is the fx group tag used to collect all registered SimpleTaskRunners.
 const Group = "batch_simple_runners"
 
-// ITaskRunner is the interface that the application implements.
-// Run is called once per pending WorkItem; return non-nil to mark the item as failed.
-type ITaskRunner interface {
-	Run(ctx context.Context, item *store.WorkItem) error
-}
+// ITaskRunner is the single runner contract, shared with distributedjob via
+// store.ITaskRunner — a runner is interchangeable between the two families.
+// The framework applies the lifecycle from the return value (see store.ApplyResult):
+// nil→MarkDone, store.Retry→MarkPending, err→MarkFailed, store.ErrHandled→left untouched.
+type ITaskRunner = store.ITaskRunner
 
 // SimpleTaskRunner binds an ITaskRunner to the job type it handles.
 type SimpleTaskRunner struct {
@@ -88,7 +87,9 @@ func Module() {
 // The job finds all pending WorkItems of that type and calls runner.Run for each.
 // Items that succeed are marked DONE; items that fail are marked FAILED. A runner
 // may return store.Retry/store.RetryWithCause to reset the item to PENDING (with a
-// scheduled next_run_at) instead of failing it permanently.
+// scheduled next_run_at) instead of failing it permanently, or store.ErrHandled to
+// signal it has already finalized the item itself (e.g. MarkDone together with child
+// inserts in a transaction) so the framework applies no default Mark*.
 func Register(jobType string, items store.IWorkItemStore, runner ITaskRunner) {
 	scheduler.Jobs[jobType] = makeFactory(items, runner)
 }
@@ -152,35 +153,29 @@ func run(name, workType string, selfFeed bool, timeout time.Duration, items stor
 
 	log.Info().Msgf("[%s] processing %d item(s)", jobID, len(pending))
 
-	var doneIDs []string
+	var done, handled, retried, failed int
 	for _, item := range pending {
-		if runErr := runner.Run(ctx, item); runErr != nil {
-			// A *store.RetryError signals a transient failure: reset the item to PENDING
-			// with a scheduled next_run_at instead of marking it FAILED permanently.
-			var re *store.RetryError
-			if errors.As(runErr, &re) {
-				log.Warn().Err(runErr).Msgf("[%s] task transient failure for item %s, retry in %s", jobID, item.Id, re.After)
-				if markErr := items.MarkPending(ctx, item.Id, re.After); markErr != nil {
-					log.Error().Err(markErr).Msgf("[%s] MarkPending failed for item %s", jobID, item.Id)
-				}
-				continue
-			}
+		// Same lifecycle convention as distributedjob (store.ApplyResult):
+		// nil→MarkDone, store.Retry→MarkPending, err→MarkFailed, store.ErrHandled→untouched.
+		runErr := runner.Run(ctx, item, items)
+		outcome, markErr := store.ApplyResult(ctx, items, item.Id, runErr)
+		if markErr != nil {
+			log.Error().Err(markErr).Msgf("[%s] persisting outcome failed for item %s", jobID, item.Id)
+		}
+		switch outcome {
+		case store.OutcomeDone:
+			done++
+		case store.OutcomeHandled:
+			handled++
+		case store.OutcomeRetry:
+			log.Warn().Err(runErr).Msgf("[%s] transient failure for item %s, reset to PENDING", jobID, item.Id)
+			retried++
+		case store.OutcomeFailed:
 			log.Error().Err(runErr).Msgf("[%s] task failed for item %s", jobID, item.Id)
-			if markErr := items.MarkFailed(ctx, item.Id, runErr.Error()); markErr != nil {
-				log.Error().Err(markErr).Msgf("[%s] MarkFailed failed for item %s", jobID, item.Id)
-			}
-			continue
-		}
-		doneIDs = append(doneIDs, item.Id)
-	}
-
-	if len(doneIDs) > 0 {
-		if markErr := items.MarkDone(ctx, doneIDs); markErr != nil {
-			log.Error().Err(markErr).Msgf("[%s] MarkDone failed", jobID)
-			return markErr
+			failed++
 		}
 	}
 
-	log.Info().Msgf("[%s] done=%d failed=%d", jobID, len(doneIDs), len(pending)-len(doneIDs))
+	log.Info().Msgf("[%s] done=%d handled=%d retry=%d failed=%d", jobID, done, handled, retried, failed)
 	return nil
 }

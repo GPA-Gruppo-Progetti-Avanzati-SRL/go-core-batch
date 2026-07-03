@@ -19,16 +19,10 @@ type fileRunner struct {
 	inner runner.IFileRunner
 }
 
-func (r *fileRunner) Run(ctx context.Context, objectId string, items store.IWorkItemStore) error {
-	// Retrieve the work item to access the S3Payload
-	wi, appErr := items.GetById(ctx, objectId)
-	if appErr != nil {
-		return fmt.Errorf("s3feed runner: get work item %q: %w", objectId, appErr)
-	}
-
+func (r *fileRunner) Run(ctx context.Context, item *store.WorkItem, items store.IWorkItemStore) error {
 	var payload S3Payload
-	if err := decodePayload(wi.Payload, &payload); err != nil {
-		return fmt.Errorf("s3feed runner: decode payload for %q: %w", objectId, err)
+	if err := decodePayload(item.Payload, &payload); err != nil {
+		return fmt.Errorf("s3feed runner: decode payload for %q: %w", item.Id, err)
 	}
 
 	svc, ok := r.reg.Get(payload.Service)

@@ -57,9 +57,19 @@ func (s *runnerService) GetTaskExecutions(taskType string) (worker.RunTask[*runn
 		return nil, false
 	}
 	return func(t *worker.Task, _ *runnerService, items store.IWorkItemStore) *core.ApplicationError {
-		if err := r.Run(t.Context, t.ObjectId, items); err != nil {
-			return core.TechnicalErrorWithError(err)
+		item, appErr := items.GetById(t.Context, t.ObjectId)
+		if appErr != nil {
+			return appErr
 		}
-		return nil
+		runErr := r.Run(t.Context, item, items)
+		outcome, markErr := store.ApplyResult(t.Context, items, t.ObjectId, runErr)
+		if markErr != nil {
+			return core.TechnicalErrorWithError(markErr)
+		}
+		// Done/Handled → success; Retry/Failed → surface the error for task_logs.
+		if outcome == store.OutcomeDone || outcome == store.OutcomeHandled {
+			return nil
+		}
+		return core.TechnicalErrorWithError(runErr)
 	}, true
 }

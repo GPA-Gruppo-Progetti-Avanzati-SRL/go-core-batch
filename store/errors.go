@@ -1,6 +1,15 @@
 package store
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// ErrHandled signals that the runner has already finalized the workitem lifecycle
+// itself — e.g. MarkDone together with child workitem inserts in a single transaction
+// (outbox pattern). Return it from simplejob.ITaskRunner.Run so the framework does NOT
+// apply its default Mark* (MarkDone on nil / MarkFailed on error).
+var ErrHandled = errors.New("workitem lifecycle handled by runner")
 
 // RetryError signals a transient failure. Return it from ITaskRunner.Run
 // to reset the workitem to PENDING with a scheduled next_run_at.

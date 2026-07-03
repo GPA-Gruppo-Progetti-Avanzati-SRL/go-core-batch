@@ -16,15 +16,17 @@ import (
 // Group is the fx group tag used to collect all registered TaskRunners.
 const Group = "batch_runners"
 
-// ITaskRunner is the interface each task type implements.
-// The runner owns the full workitem lifecycle:
+// ITaskRunner is the single runner contract, shared with simplejob via store.ITaskRunner.
+// A runner is interchangeable between distributedjob and simplejob without code changes.
 //
-//	items.MarkDone(ctx, []string{objectId})       — success
-//	items.MarkPending(ctx, objectId, delay)        — transient error, retry later
-//	items.MarkFailed(ctx, objectId, reason)        — permanent failure
-type ITaskRunner interface {
-	Run(ctx context.Context, objectId string, items store.IWorkItemStore) error
-}
+// The framework applies the lifecycle from the return value (see store.ApplyResult):
+//
+//	return nil                                   → MarkDone
+//	return store.Retry(d) / RetryWithCause(d, e) → MarkPending (transient, retry later)
+//	return err                                   → MarkFailed
+//	return store.ErrHandled                      → left untouched (runner finalized it,
+//	                                               e.g. MarkDone + child inserts in a TX)
+type ITaskRunner = store.ITaskRunner
 
 // TaskRunner binds an ITaskRunner to the task type it handles.
 type TaskRunner struct {
@@ -56,7 +58,20 @@ func (r *MuxRunner) Run(ctx context.Context, objectId, taskType string, items st
 	if !ok {
 		return fmt.Errorf("no runner registered for taskType %q", taskType)
 	}
-	return runner.Run(ctx, objectId, items)
+	item, appErr := items.GetById(ctx, objectId)
+	if appErr != nil {
+		return appErr
+	}
+	runErr := runner.Run(ctx, item, items)
+	outcome, markErr := store.ApplyResult(ctx, items, objectId, runErr)
+	if markErr != nil {
+		return markErr
+	}
+	// Done/Handled → success (SetTaskDone); Retry/Failed → surface the error (SetTaskInError).
+	if outcome == store.OutcomeDone || outcome == store.OutcomeHandled {
+		return nil
+	}
+	return runErr
 }
 
 // Provide registers a TaskRunner constructor into the batch_runners fx group.
@@ -84,7 +99,7 @@ func Provide(constructor any) {
 //	    fx.In
 //	    Svc myPkg.IService
 //	}
-//	func (r *myRunner) Run(ctx context.Context, objectId string, items store.IWorkItemStore) error { ... }
+//	func (r *myRunner) Run(ctx context.Context, item *store.WorkItem, items store.IWorkItemStore) error { ... }
 func Register[T any, PT interface {
 	*T
 	ITaskRunner

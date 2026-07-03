@@ -6,7 +6,27 @@ Framework per batch processing distribuito. Gestisce job schedulati, claiming at
 
 ---
 
-## Processo — flusso completo
+## Modalità (job families)
+
+Tre famiglie di job, ciascuna un modulo Fx self-contained registrato in `scheduler.Jobs`. Condividono lo scheduler (gocron + **Redis distributed job lock**, applicato a *ogni* job) e lo store `work_items`.
+
+| Famiglia | Job type / registrazione | Quando usarla |
+|---|---|---|
+| **distributedjob** | `DistribuiteTask` · `DistribuiteTaskByQuery` · `DistribuiteTaskByS3File` — `localdispatcher`/`grpcdispatcher.Module()` + `runner.Register[T]` | **Molti** workitem da distribuire: claiming atomico anti-doppione, recovery orfani, `task_logs`, scaling orizzontale gRPC |
+| **simplejob** | tipo libero — `simplejob.Module()` + `simplejob.RegisterRunner[T]` | **Lavorazioni singole/poche** in-process (es. `singleton:true`): `FindPending`→loop→`Run(item)`. Niente claiming/gRPC/task_logs |
+| **kafkajob** | tipo libero — invia i WorkItem su un topic Kafka | Notifiche/outbox verso Kafka |
+
+```mermaid
+flowchart LR
+    Q{Natura della\nlavorazione?}
+    Q -- "molti workitem,\nworker pool / gRPC" --> DJ["distributedjob\nClaimPending + RecoverOrphans\n+ task_logs"]
+    Q -- "singola / poche,\nin-process" --> SJ["simplejob\nFindPending → Run(item)\nretry + timeout configurabili"]
+    Q -- "outbox verso\nKafka" --> KJ["kafkajob\nProducerService"]
+```
+
+---
+
+## distributedjob — flusso completo
 
 ```mermaid
 flowchart TD
@@ -38,17 +58,18 @@ flowchart TD
         D -- gRPC --> REMOTE
 
         subgraph LOCAL["LocalDispatcher"]
-            LS[IData.SetTaskStart] --> RUN["ITaskRunner.Run(ctx, objectId, items)"]
-            RUN -- "items.MarkDone → DONE" --> LD[IData.SetTaskDone]
-            RUN -- "items.MarkPending(after)\nnext_run_at=now+d · retry++\n→ PENDING" --> LP[IData.SetTaskInError]
-            RUN -- "items.MarkFailed → FAILED" --> LE[IData.SetTaskInError]
+            LS[IData.SetTaskStart] --> RUN["GetById → ITaskRunner.Run(ctx, item, items)\n→ store.ApplyResult(return)"]
+            RUN -- "nil → MarkDone → DONE" --> LD[IData.SetTaskDone]
+            RUN -- "store.ErrHandled → invariato\n(lifecycle gestito dal runner)" --> LD
+            RUN -- "store.Retry → MarkPending\nnext_run_at=now+d · retry++ → PENDING" --> LP[IData.SetTaskInError]
+            RUN -- "err → MarkFailed → FAILED" --> LE[IData.SetTaskInError]
         end
 
         subgraph REMOTE["Worker remoto (gRPC)"]
-            WS[IData.SetTaskStart] --> WRUN["RunTask(t, services, items)"]
-            WRUN -- "items.MarkDone → DONE" --> WD[IData.SetTaskDone]
-            WRUN -- "items.MarkPending(after)\n→ PENDING" --> WP[IData.SetTaskInError]
-            WRUN -- "items.MarkFailed → FAILED" --> WE[IData.SetTaskInError]
+            WS[IData.SetTaskStart] --> WRUN["GetById → ITaskRunner.Run(ctx, item, items)\n→ store.ApplyResult(return)"]
+            WRUN -- "nil / ErrHandled → DONE" --> WD[IData.SetTaskDone]
+            WRUN -- "store.Retry → MarkPending → PENDING" --> WP[IData.SetTaskInError]
+            WRUN -- "err → MarkFailed → FAILED" --> WE[IData.SetTaskInError]
             WRUN -- crash --> ORPHANED(["item resta IN_PROGRESS\n→ RecoverOrphans al tick successivo"])
         end
     end
@@ -56,9 +77,14 @@ flowchart TD
     LD & LP & LE & WD & WP & WE --> DONE([fine run])
 ```
 
-> **Il task controlla il proprio lifecycle.** `ITaskRunner.Run` riceve `store.IWorkItemStore`
-> direttamente — è responsabile di chiamare `items.MarkDone` / `items.MarkPending` / `items.MarkFailed`.
-> Questo permette transazioni atomiche: inserire workitem figli e chiudere quello corrente in un'unica TX.
+> **Runner unico e interscambiabile.** distributedjob e simplejob condividono la stessa interfaccia
+> `store.ITaskRunner` — `Run(ctx, item *WorkItem, items IWorkItemStore) error` — e la stessa semantica:
+> il framework applica `store.ApplyResult` sul valore di ritorno (`nil`→MarkDone, `store.Retry`→MarkPending,
+> `err`→MarkFailed, `store.ErrHandled`→invariato). Spostare un runner da una famiglia all'altra è un cambio
+> di **registrazione + config `type`**, non di logica.
+>
+> Per un `MarkDone` **transazionale** (es. chiudere il corrente + inserire workitem figli in un'unica TX) il
+> runner usa `items` e ritorna `store.ErrHandled`, così il framework non applica alcun `Mark*`.
 
 ---
 
@@ -88,7 +114,7 @@ go-core-batch/
 │   │   ├── sqlstore/             # IQueryStore su SQL
 │   │   └── mongostore/           # IQueryStore su MongoDB
 │   │
-│   ├── simplejob/                # Job semplice in-process (senza claiming, senza task_logs)
+│   ├── simplejob/                # Job in-process (no claiming/task_logs) — retry differito + timeout configurabile
 │   └── kafkajob/                 # Job che invia WorkItem su Kafka
 │
 ├── s3/                           # Client S3 multi-service (aws-sdk-go-v2)
@@ -187,14 +213,19 @@ type mioTaskRunner struct {
     svc mySvc.IService
 }
 
-func (r *mioTaskRunner) Run(ctx context.Context, objectId string, items store.IWorkItemStore) error {
-    if err := r.svc.DoWork(ctx, objectId); err != nil {
-        items.MarkFailed(ctx, objectId, err.Error())
-        return err
+func (r *mioTaskRunner) Run(ctx context.Context, item *store.WorkItem, items store.IWorkItemStore) error {
+    if err := r.svc.DoWork(ctx, item); err != nil {
+        if isTransient(err) {
+            return store.RetryWithCause(5*time.Minute, err) // → MarkPending
+        }
+        return err                                          // → MarkFailed
     }
-    return items.MarkDone(ctx, []string{objectId})
+    return nil                                              // → MarkDone
 }
 ```
+
+> Il lifecycle lo applica il framework dal valore di ritorno (`store.ApplyResult`). Per gestirlo a mano
+> (es. `items.MarkDone` transazionale con l'insert di workitem figli) chiudi tu l'item e ritorna `store.ErrHandled`.
 
 ### app-config.go — blank import
 
@@ -293,8 +324,9 @@ type myS3Runner struct {
 }
 
 func (r *myS3Runner) Run(ctx context.Context, key string, content io.Reader, items store.IWorkItemStore) error {
-    // process the file stream
-    return items.MarkDone(ctx, []string{key})
+    // process the file stream; return nil → l'adapter s3feed sposta il file e fa MarkDone,
+    // return err → il workitem resta pending per il retry
+    return nil
 }
 ```
 
@@ -332,10 +364,10 @@ scheduler:
 | Campo | Tipo | Descrizione |
 |---|---|---|
 | `name` | string | Nome univoco del job |
-| `type` | string | `"DistribuiteTask"`, `"DistribuiteTaskByQuery"`, `"DistribuiteTaskByS3File"`, oppure tipo simplejob |
+| `type` | string | distributedjob: `"DistribuiteTask"` · `"DistribuiteTaskByQuery"` · `"DistribuiteTaskByS3File"`. simplejob/kafkajob: il tipo registrato (arg di `RegisterRunner`) |
 | `cron` | string | Espressione cron (secondi abilitati) |
 | `singleton` | bool | Redis lock — evita run paralleli su repliche diverse |
-| `lock-timeout` | duration | Dopo quanto un IN_PROGRESS è considerato orfano (default: 10m) |
+| `lock-timeout` | duration | distributedjob: dopo quanto un IN_PROGRESS è considerato orfano (default: 10m). simplejob: timeout del context di `Run` (default: 30s) |
 | `disabled` | bool | Disabilita il job senza rimuoverlo dalla config |
 | `properties.task` | string | TaskType passato al dispatcher |
 | `properties.limit` | int | Max item per run |
@@ -347,6 +379,8 @@ scheduler:
 | `properties.path` | string | Prefisso S3 per il listing (solo DistribuiteTaskByS3File) |
 | `properties.pattern` | string | Glob pattern sul basename del file, es. `"*.csv"` (solo DistribuiteTaskByS3File) |
 | `properties.dest-path` | string | Prefisso S3 dove spostare i file elaborati (solo DistribuiteTaskByS3File) |
+| `properties.workType` | string | `WorkItem.Type` letto da `FindPending` (solo simplejob) — default = `type` |
+| `properties.selfFeed` | bool-string | `"true"`: il simplejob crea da sé un workitem a ogni tick (solo simplejob) |
 
 ---
 
@@ -437,15 +471,95 @@ Il worker deve connettersi allo stesso DB del scheduler per `IWorkItemStore` (`M
 
 ---
 
-## simplejob — alternativa senza infrastruttura
+## simplejob — job in-process senza claiming
 
-Usa `simplejob` solo se non serve `task_logs`, non prevedi di scalare a gRPC, e vuoi un runner minimo su `work_items`.
+Job leggero per **lavorazioni singole/poche** eseguite in-process: nessun claiming atomico per-item, nessun `task_logs`. L'esclusività **cross-replica** resta garantita dal distributed job lock dello scheduler + `singleton: true`. Il runner riceve il `*store.WorkItem` completo (payload diretto, niente `GetById`) e il **lifecycle è gestito dal framework** in base al valore di ritorno.
 
-```go
-simplejob.Register("MyJobType", items, &batch.MyRunner{})
+```mermaid
+flowchart TD
+    CRON([Cron tick]) --> LOCK["Distributed job lock\nsingleton → una sola replica"]
+    LOCK --> SELF
+    subgraph SELF["selfFeed — opzionale"]
+        SF["InsertIfNotActive\nObjectId = workType"]
+    end
+    SELF --> FP["IWorkItemStore.FindPending(workType)"]
+    FP -- "nessun item" --> END([fine run])
+    FP -- "per ogni item (loop sequenziale)" --> RUN["ITaskRunner.Run(ctx, item, items)\n→ store.ApplyResult(return)\nctx timeout = lock-timeout (default 30s)"]
+    RUN -- "return nil" --> DONE["MarkDone → DONE"]
+    RUN -- "return store.Retry(d) / RetryWithCause(d, err)" --> PEND["MarkPending(d) → PENDING\nnext_run_at=now+d · retry++"]
+    RUN -- "return err" --> FAIL["MarkFailed → FAILED"]
+    RUN -- "return store.ErrHandled" --> KEEP["invariato\n(lifecycle gestito dal runner)"]
+    DONE & PEND & FAIL & KEEP --> END
+    RUN -. "crash / nessun Mark" .-> STAY(["item resta PENDING\n→ ripreso al tick successivo"])
 ```
 
-`simplejob.ITaskRunner` riceve il `*store.WorkItem` completo invece del solo `objectId`.
+> Stessa interfaccia (`store.ITaskRunner`) e stessa semantica di distributedjob: un runner è interscambiabile tra le due famiglie senza modifiche di logica.
+
+### Wiring — Module() + RegisterRunner[T]
+
+```go
+// app/batch/batch.go
+import "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/simplejob"
+
+func init() {
+    simplejob.Module()
+    simplejob.RegisterRunner[myRunner]("MY_JOB")   // T: fx.In + store.ITaskRunner
+}
+```
+
+In alternativa `simplejob.ProvideRunner(constructor)` (costruttore esplicito che ritorna `*simplejob.SimpleTaskRunner`). Resta disponibile anche la registrazione low-level `simplejob.Register("MY_JOB", items, runner)`.
+
+### Runner — lifecycle dal valore di ritorno
+
+`store.ITaskRunner.Run(ctx, item, items)` — stessa interfaccia di distributedjob. Nel caso comune il runner ignora `items` e segnala l'esito col valore di ritorno.
+
+```go
+type myRunner struct {
+    fx.In
+    Svc mysvc.IService
+}
+
+func (r *myRunner) Run(ctx context.Context, item *store.WorkItem, items store.IWorkItemStore) error {
+    if err := r.Svc.Do(ctx, item); err != nil {
+        if isTransient(err) {
+            return store.RetryWithCause(5*time.Minute, err) // → MarkPending (retry differito)
+        }
+        return err                                          // → MarkFailed
+    }
+    return nil                                              // → MarkDone
+}
+```
+
+**MarkDone manuale / transazionale.** Se il runner deve gestire il lifecycle da sé — es. `MarkDone` insieme all'insert di altri workitem (outbox) — usa il parametro `items` e ritorna `store.ErrHandled`: il framework non applica alcun `Mark*` (l'atomicità insert+MarkDone dipende dal supporto transazionale dello store).
+
+```go
+func (r *myRunner) Run(ctx context.Context, item *store.WorkItem, items store.IWorkItemStore) error {
+    children, err := r.Svc.Process(ctx, item)
+    if err != nil {
+        return err                                     // → MarkFailed (framework)
+    }
+    if err := items.Insert(ctx, children); err != nil {
+        return err
+    }
+    if err := items.MarkDone(ctx, []string{item.Id}); err != nil {
+        return err
+    }
+    return store.ErrHandled                            // il framework non tocca l'item
+}
+```
+
+### Config YAML
+
+```yaml
+scheduler:
+  - name: "my-job"
+    type: "MY_JOB"          # = arg di RegisterRunner
+    cron: "*/5 * * * * *"
+    singleton: true         # esclusività cross-replica
+    lock-timeout: 15m       # timeout del context di Run (default 30s)
+    properties:
+      workType: "MY_JOB"    # opzionale — default = type
+```
 
 ### selfFeed — job auto-alimentato
 
@@ -458,18 +572,36 @@ scheduler:
     cron: "0 */5 * * * *"
     properties:
       selfFeed: "true"
-      workType: "Cleanup"
+      workType: "Cleanup"   # opzionale — default = type
 ```
+
+### Differenze da distributedjob
+
+| | simplejob | distributedjob |
+|---|---|---|
+| Claiming per-item | no — `FindPending` + loop sequenziale | sì — `ClaimPending` atomico (SKIP LOCKED) |
+| Recovery crash | item resta PENDING → ripreso al tick | `RecoverOrphans` su IN_PROGRESS scaduti |
+| Interfaccia runner | `store.ITaskRunner` (identica) | `store.ITaskRunner` (identica) |
+| Runner riceve | `*store.WorkItem` + `items` | `*store.WorkItem` + `items` (idem) |
+| Lifecycle | `store.ApplyResult` sul return: `nil`→Done, `store.Retry`→Pending, `err`→Failed, `store.ErrHandled`→manuale (idem) | idem |
+| `task_logs` | no | sì (`IData.SetTask*`) |
+| Scaling | in-process | gRPC worker pool |
+| Esclusività cross-replica | distributed job lock + `singleton` | distributed job lock + `singleton` + claiming |
 
 ---
 
 ## Interfacce chiave
 
 ```go
-// runner.ITaskRunner — implementata dai task runner applicativi
+// store.ITaskRunner — interfaccia unica condivisa da simplejob e distributedjob
+// (runner.ITaskRunner e simplejob.ITaskRunner sono alias di questa).
 type ITaskRunner interface {
-    Run(ctx context.Context, objectId string, items store.IWorkItemStore) error
+    Run(ctx context.Context, item *WorkItem, items IWorkItemStore) error
 }
+
+// store.ApplyResult — finalizza il workitem dal return del runner
+//   nil→MarkDone · ErrHandled→noop · *RetryError→MarkPending · altro err→MarkFailed
+func ApplyResult(ctx context.Context, items IWorkItemStore, id string, runErr error) (Outcome, *core.ApplicationError)
 
 // distributedjob.ITaskDispatcher — chiamata dal job per ogni item
 type ITaskDispatcher interface {
