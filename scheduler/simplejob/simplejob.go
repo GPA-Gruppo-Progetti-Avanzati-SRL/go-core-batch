@@ -18,6 +18,7 @@ package simplejob
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
@@ -94,12 +95,19 @@ func Register(jobType string, items store.IWorkItemStore, runner ITaskRunner) {
 	scheduler.Jobs[jobType] = makeFactory(items, runner)
 }
 
-// defaultRunTimeout is used when the job config sets no lock-timeout.
-const defaultRunTimeout = 30 * time.Second
+const (
+	// defaultRunTimeout bounds a single tick's processing when lock-timeout is unset.
+	defaultRunTimeout = 30 * time.Second
+	// defaultOrphanTimeout is the age after which an IN_PROGRESS item is considered
+	// orphaned (from a crashed/timed-out run) and re-claimed, when lock-timeout is unset.
+	defaultOrphanTimeout = 10 * time.Minute
+	// defaultBatchLimit caps how many items a single tick claims when no "limit" property is set.
+	defaultBatchLimit = 100
+)
 
 func makeFactory(items store.IWorkItemStore, runner ITaskRunner) scheduler.JobFactory {
 	return func(name string, _ *scheduler.Services, config scheduler.Config) gocron.Task {
-		// workType is the WorkItem.Type queried by FindPending. It defaults to the
+		// workType is the WorkItem.Type queried by ClaimPending. It defaults to the
 		// job type (the registry key), so it only needs to be set explicitly when the
 		// WorkItem.Type differs from the configured type.
 		workType := config.Properties["workType"]
@@ -107,19 +115,30 @@ func makeFactory(items store.IWorkItemStore, runner ITaskRunner) scheduler.JobFa
 			workType = config.Type
 		}
 		selfFeed := config.Properties["selfFeed"] == "true"
-		// The run context timeout is taken from lock-timeout so long-running jobs
-		// (minutes) are not cut off by the default; falls back to defaultRunTimeout.
+		// limit caps how many items are claimed (and processed) per tick.
+		limit := defaultBatchLimit
+		if v := config.Properties["limit"]; v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				limit = n
+			} else {
+				log.Warn().Msgf("[%s] invalid 'limit' property %q, using default %d", name, v, defaultBatchLimit)
+			}
+		}
+		// lock-timeout serves two roles: the run context timeout (so long-running jobs
+		// are not cut off by the default) and the orphan age used by RecoverOrphans.
 		timeout := defaultRunTimeout
+		orphanTimeout := defaultOrphanTimeout
 		if config.LockTimeout > 0 {
 			timeout = config.LockTimeout
+			orphanTimeout = config.LockTimeout
 		}
 		return gocron.NewTask(func() error {
-			return run(name, workType, selfFeed, timeout, items, runner)
+			return run(name, workType, selfFeed, timeout, orphanTimeout, limit, items, runner)
 		})
 	}
 }
 
-func run(name, workType string, selfFeed bool, timeout time.Duration, items store.IWorkItemStore, runner ITaskRunner) error {
+func run(name, workType string, selfFeed bool, timeout, orphanTimeout time.Duration, limit int, items store.IWorkItemStore, runner ITaskRunner) error {
 	jobID := fmt.Sprintf("%s-%s", name, time.Now().Format("20060102150405"))
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -141,10 +160,29 @@ func run(name, workType string, selfFeed bool, timeout time.Duration, items stor
 		}
 	}
 
-	pending, err := items.FindPending(ctx, workType, "", "")
-	if err != nil {
-		log.Error().Err(err).Msgf("[%s] FindPending failed", jobID)
-		return err
+	// 1. Re-claim orphans from previous crashed/timed-out runs (kept IN_PROGRESS,
+	// locked_at refreshed) so they are reprocessed instead of stuck forever.
+	orphans, appErr := items.RecoverOrphans(ctx, workType, "", "", orphanTimeout, limit)
+	if appErr != nil {
+		log.Warn().Err(appErr).Msgf("[%s] orphan recovery failed", jobID)
+		orphans = nil
+	} else if len(orphans) > 0 {
+		log.Info().Msgf("[%s] re-claimed %d orphaned item(s) (timeout=%s)", jobID, len(orphans), orphanTimeout)
+	}
+
+	// 2. Claim fresh PENDING items up to the remaining capacity. ClaimPending marks
+	// them IN_PROGRESS atomically, which is the precondition for MarkDone/MarkFailed/MarkPending.
+	pending := orphans
+	if remaining := limit - len(orphans); remaining > 0 {
+		fresh, claimErr := items.ClaimPending(ctx, workType, "", "", remaining)
+		if claimErr != nil {
+			log.Error().Err(claimErr).Msgf("[%s] ClaimPending failed", jobID)
+			if len(pending) == 0 {
+				return claimErr
+			}
+		} else {
+			pending = append(pending, fresh...)
+		}
 	}
 	if len(pending) == 0 {
 		log.Trace().Msgf("[%s] no pending items", jobID)
