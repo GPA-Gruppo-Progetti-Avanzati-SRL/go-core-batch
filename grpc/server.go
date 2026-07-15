@@ -2,6 +2,7 @@ package grpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -21,7 +22,7 @@ type Server struct {
 	*gogrpc.Server
 }
 
-func NewServer(lc fx.Lifecycle, config *ServerConfig) *Server {
+func NewServer(lc fx.Lifecycle, sh fx.Shutdowner, config *ServerConfig) *Server {
 	opts := []gogrpc.ServerOption{
 		gogrpc.KeepaliveParams(keepalive.ServerParameters{
 			MaxConnectionAge: time.Minute * 5,
@@ -38,7 +39,18 @@ func NewServer(lc fx.Lifecycle, config *ServerConfig) *Server {
 			if err != nil {
 				return err
 			}
-			go grpcServer.Serve(lis)
+			go func() {
+				// Serve blocca fino allo stop. Su GracefulStop ritorna nil o
+				// ErrServerStopped: in quei casi è uno shutdown normale. Un altro
+				// errore significa server morto → logga ed escala lo shutdown
+				// dell'app (non lasciare un processo vivo senza worker gRPC).
+				if serveErr := grpcServer.Serve(lis); serveErr != nil && !errors.Is(serveErr, gogrpc.ErrServerStopped) {
+					log.Error().Err(serveErr).Msg("grpc Server terminato con errore, shutdown dell'app")
+					if shErr := sh.Shutdown(); shErr != nil {
+						log.Error().Err(shErr).Msg("Shutdown dell'app fallito")
+					}
+				}
+			}()
 			return nil
 		},
 		OnStop: func(ctx context.Context) error {

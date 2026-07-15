@@ -14,6 +14,7 @@ import (
 type Workers[T any] struct {
 	TaskChannel map[string]chan *Task
 	OsChannel   chan os.Signal
+	StopChannel chan struct{} // closed by OnStop to broadcast shutdown to every worker
 	TaskRoutes  map[string]string
 	BatchData   store.IData
 	WorkItems   store.IWorkItemStore // optional: closes workitem lifecycle after each task
@@ -39,12 +40,17 @@ func NewWorkers[T any](lc fx.Lifecycle, workersConfig []Config, data store.IData
 	w := &Workers[T]{BatchData: data, WorkItems: items}
 	w.TaskChannel = make(map[string]chan *Task)
 	w.TaskRoutes = make(map[string]string)
-	stopCh := make(chan os.Signal, 1)
-	signal.Notify(stopCh, syscall.SIGINT, syscall.SIGTERM)
-	w.OsChannel = stopCh
+	w.StopChannel = make(chan struct{})
+	osCh := make(chan os.Signal, 1)
+	signal.Notify(osCh, syscall.SIGINT, syscall.SIGTERM)
+	w.OsChannel = osCh
 
 	for _, v := range workersConfig {
 		value := v
+		if value.Size < 1 {
+			log.Warn().Msgf("Worker %s: invalid size %d, defaulting to 1", value.Name, value.Size)
+			value.Size = 1
+		}
 		w.TaskChannel[value.Name] = make(chan *Task, value.Size)
 		for _, t := range value.Tasks {
 			log.Trace().Msgf("Assegno Task %s a Worker %s", t, value.Name)
@@ -55,37 +61,49 @@ func NewWorkers[T any](lc fx.Lifecycle, workersConfig []Config, data store.IData
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
 			for k, channel := range w.TaskChannel {
-				go NewWorker[T](k, channel, w.OsChannel, services, data, items)
+				go NewWorker[T](k, channel, w.StopChannel, w.OsChannel, services, data, items)
 			}
 			return nil
 		},
 		OnStop: func(ctx context.Context) error {
-			for k, v := range w.TaskChannel {
-				log.Info().Msgf("Closing worker channel for %s", k)
-				close(v)
-			}
+			// Broadcast shutdown to every worker. Task channels are intentionally
+			// NOT closed: producers (DispatchTask / gRPC handler) may still be sending,
+			// and a send on a closed channel panics. In-flight buffered tasks are
+			// already claimed (IN_PROGRESS) and get re-claimed by RecoverOrphans.
+			log.Info().Msg("Stopping worker pool")
+			close(w.StopChannel)
 			return nil
 		},
 	})
 	return w
 }
 
-func NewWorker[T any](k string, channel chan *Task, chanSig chan os.Signal, services ITaskService[T], batchData store.IData, items store.IWorkItemStore) *Workers[T] {
+func NewWorker[T any](k string, channel chan *Task, stopCh <-chan struct{}, osCh <-chan os.Signal, services ITaskService[T], batchData store.IData, items store.IWorkItemStore) *Workers[T] {
 	log.Info().Msgf("Starting %s worker", k)
 	capacity := cap(channel)
 	log.Info().Msgf("Capacity Channel %d", capacity)
 	semaphore := make(chan struct{}, capacity)
 	for {
 		select {
-		case ch := <-channel:
-			semaphore <- struct{}{}
-			if ch != nil {
-				log.Trace().Msgf("W - %s - %s - Green Signal Executing task in worker channel", ch.GetJobId(), ch.GetId())
-				go Run(semaphore, ch, services, batchData, items)
+		case <-stopCh:
+			log.Info().Msgf("Worker %s: stop signal received, terminating", k)
+			return nil
+		case <-osCh:
+			log.Info().Msgf("Worker %s: OS signal received, terminating", k)
+			return nil
+		case ch, ok := <-channel:
+			if !ok {
+				log.Info().Msgf("Worker %s: task channel closed, terminating", k)
+				return nil
 			}
-		case <-chanSig:
-			log.Trace().Msg("Getting os channel signal")
-			break
+			if ch == nil {
+				continue
+			}
+			// Acquire the semaphore slot only when a real task will be launched,
+			// so it is always released by Run's deferred <-semaphore.
+			semaphore <- struct{}{}
+			log.Trace().Msgf("W - %s - %s - Green Signal Executing task in worker channel", ch.GetJobId(), ch.GetId())
+			go Run(semaphore, ch, services, batchData, items)
 		}
 	}
 }

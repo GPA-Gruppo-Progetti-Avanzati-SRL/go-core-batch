@@ -13,14 +13,14 @@ Tre famiglie di job, ciascuna un modulo Fx self-contained registrato in `schedul
 | Famiglia | Job type / registrazione | Quando usarla |
 |---|---|---|
 | **distributedjob** | `DistribuiteTask` · `DistribuiteTaskByQuery` · `DistribuiteTaskByS3File` — `localdispatcher`/`grpcdispatcher.Module()` + `runner.Register[T]` | **Molti** workitem da distribuire: claiming atomico anti-doppione, recovery orfani, `task_logs`, scaling orizzontale gRPC |
-| **simplejob** | tipo libero — `simplejob.Module()` + `simplejob.RegisterRunner[T]` | **Lavorazioni singole/poche** in-process (es. `singleton:true`): `FindPending`→loop→`Run(item)`. Niente claiming/gRPC/task_logs |
+| **simplejob** | tipo libero — `simplejob.Module()` + `simplejob.RegisterRunner[T]` | **Lavorazioni singole/poche** in-process (es. `singleton:true`): `RecoverOrphans`→`ClaimPending`→loop→`Run(item)`. Niente gRPC/task_logs |
 | **kafkajob** | tipo libero — invia i WorkItem su un topic Kafka | Notifiche/outbox verso Kafka |
 
 ```mermaid
 flowchart LR
     Q{Natura della\nlavorazione?}
     Q -- "molti workitem,\nworker pool / gRPC" --> DJ["distributedjob\nClaimPending + RecoverOrphans\n+ task_logs"]
-    Q -- "singola / poche,\nin-process" --> SJ["simplejob\nFindPending → Run(item)\nretry + timeout configurabili"]
+    Q -- "singola / poche,\nin-process" --> SJ["simplejob\nClaimPending + RecoverOrphans\nin-process, retry + timeout"]
     Q -- "outbox verso\nKafka" --> KJ["kafkajob\nProducerService"]
 ```
 
@@ -114,7 +114,7 @@ go-core-batch/
 │   │   ├── sqlstore/             # IQueryStore su SQL
 │   │   └── mongostore/           # IQueryStore su MongoDB
 │   │
-│   ├── simplejob/                # Job in-process (no claiming/task_logs) — retry differito + timeout configurabile
+│   ├── simplejob/                # Job in-process con claiming (no gRPC/task_logs) — retry differito + timeout configurabile
 │   └── kafkajob/                 # Job che invia WorkItem su Kafka
 │
 ├── s3/                           # Client S3 multi-service (aws-sdk-go-v2)
@@ -367,10 +367,10 @@ scheduler:
 | `type` | string | distributedjob: `"DistribuiteTask"` · `"DistribuiteTaskByQuery"` · `"DistribuiteTaskByS3File"`. simplejob/kafkajob: il tipo registrato (arg di `RegisterRunner`) |
 | `cron` | string | Espressione cron (secondi abilitati) |
 | `singleton` | bool | Redis lock — evita run paralleli su repliche diverse |
-| `lock-timeout` | duration | distributedjob: dopo quanto un IN_PROGRESS è considerato orfano (default: 10m). simplejob: timeout del context di `Run` (default: 30s) |
+| `lock-timeout` | duration | Dopo quanto un IN_PROGRESS è considerato orfano (default: 10m — distributedjob e simplejob). simplejob: anche timeout del context di `Run` (default: 30s) |
 | `disabled` | bool | Disabilita il job senza rimuoverlo dalla config |
 | `properties.task` | string | TaskType passato al dispatcher |
-| `properties.limit` | int | Max item per run |
+| `properties.limit` | int | Max item per run (simplejob: default 100) |
 | `properties.collection` | string | Tabella/collection sorgente (solo DistribuiteTaskByQuery) |
 | `properties.filter` | string | WHERE SQL o JSON query Mongo (solo DistribuiteTaskByQuery) |
 | `properties.sort` | string | `"col:asc,col2:desc"` (solo DistribuiteTaskByQuery) |
@@ -379,7 +379,7 @@ scheduler:
 | `properties.path` | string | Prefisso S3 per il listing (solo DistribuiteTaskByS3File) |
 | `properties.pattern` | string | Glob pattern sul basename del file, es. `"*.csv"` (solo DistribuiteTaskByS3File) |
 | `properties.dest-path` | string | Prefisso S3 dove spostare i file elaborati (solo DistribuiteTaskByS3File) |
-| `properties.workType` | string | `WorkItem.Type` letto da `FindPending` (solo simplejob) — default = `type` |
+| `properties.workType` | string | `WorkItem.Type` letto da `ClaimPending`/`RecoverOrphans` (solo simplejob) — default = `type` |
 | `properties.selfFeed` | bool-string | `"true"`: il simplejob crea da sé un workitem a ogni tick (solo simplejob) |
 
 ---
@@ -471,9 +471,9 @@ Il worker deve connettersi allo stesso DB del scheduler per `IWorkItemStore` (`M
 
 ---
 
-## simplejob — job in-process senza claiming
+## simplejob — job in-process con claiming
 
-Job leggero per **lavorazioni singole/poche** eseguite in-process: nessun claiming atomico per-item, nessun `task_logs`. L'esclusività **cross-replica** resta garantita dal distributed job lock dello scheduler + `singleton: true`. Il runner riceve il `*store.WorkItem` completo (payload diretto, niente `GetById`) e il **lifecycle è gestito dal framework** in base al valore di ritorno.
+Job leggero per **lavorazioni singole/poche** eseguite in-process: claiming atomico per-item e recovery orfani come distributedjob (`RecoverOrphans` + `ClaimPending`, fino a `limit` item per tick, default 100), ma nessun dispatch gRPC e nessun `task_logs`. L'esclusività **cross-replica** resta garantita dal distributed job lock dello scheduler + `singleton: true`. Il runner riceve il `*store.WorkItem` completo (payload diretto, niente `GetById`) e il **lifecycle è gestito dal framework** in base al valore di ritorno.
 
 ```mermaid
 flowchart TD
@@ -482,15 +482,16 @@ flowchart TD
     subgraph SELF["selfFeed — opzionale"]
         SF["InsertIfNotActive\nObjectId = workType"]
     end
-    SELF --> FP["IWorkItemStore.FindPending(workType)"]
-    FP -- "nessun item" --> END([fine run])
-    FP -- "per ogni item (loop sequenziale)" --> RUN["ITaskRunner.Run(ctx, item, items)\n→ store.ApplyResult(return)\nctx timeout = lock-timeout (default 30s)"]
+    SELF --> RO["IWorkItemStore.RecoverOrphans\nIN_PROGRESS più vecchi di lock-timeout (default 10m)\nretry++"]
+    RO --> CP["IWorkItemStore.ClaimPending(workType, limit)\nPENDING → IN_PROGRESS (atomico, max limit)"]
+    CP -- "nessun item" --> END([fine run])
+    CP -- "per ogni item (loop sequenziale)" --> RUN["ITaskRunner.Run(ctx, item, items)\n→ store.ApplyResult(return)\nctx timeout = lock-timeout (default 30s)"]
     RUN -- "return nil" --> DONE["MarkDone → DONE"]
     RUN -- "return store.Retry(d) / RetryWithCause(d, err)" --> PEND["MarkPending(d) → PENDING\nnext_run_at=now+d · retry++"]
     RUN -- "return err" --> FAIL["MarkFailed → FAILED"]
     RUN -- "return store.ErrHandled" --> KEEP["invariato\n(lifecycle gestito dal runner)"]
     DONE & PEND & FAIL & KEEP --> END
-    RUN -. "crash / nessun Mark" .-> STAY(["item resta PENDING\n→ ripreso al tick successivo"])
+    RUN -. "crash / nessun Mark" .-> STAY(["item resta IN_PROGRESS\n→ re-claimato da RecoverOrphans\ndopo lock-timeout (retry++)"])
 ```
 
 > Stessa interfaccia (`store.ITaskRunner`) e stessa semantica di distributedjob: un runner è interscambiabile tra le due famiglie senza modifiche di logica.
@@ -579,8 +580,8 @@ scheduler:
 
 | | simplejob | distributedjob |
 |---|---|---|
-| Claiming per-item | no — `FindPending` + loop sequenziale | sì — `ClaimPending` atomico (SKIP LOCKED) |
-| Recovery crash | item resta PENDING → ripreso al tick | `RecoverOrphans` su IN_PROGRESS scaduti |
+| Claiming per-item | sì — `ClaimPending` atomico (idem) | sì — `ClaimPending` atomico (SKIP LOCKED) |
+| Recovery crash | `RecoverOrphans` su IN_PROGRESS scaduti (idem) | `RecoverOrphans` su IN_PROGRESS scaduti |
 | Interfaccia runner | `store.ITaskRunner` (identica) | `store.ITaskRunner` (identica) |
 | Runner riceve | `*store.WorkItem` + `items` | `*store.WorkItem` + `items` (idem) |
 | Lifecycle | `store.ApplyResult` sul return: `nil`→Done, `store.Retry`→Pending, `err`→Failed, `store.ErrHandled`→manuale (idem) | idem |
@@ -615,8 +616,14 @@ type IWorkItemStore interface {
     InsertIfNotActive(ctx context.Context, items []*WorkItem) (int, *core.ApplicationError)
     MarkDone(ctx context.Context, ids []string) *core.ApplicationError
     MarkFailed(ctx context.Context, id, reason string) *core.ApplicationError
-    MarkPending(ctx context.Context, id string, after time.Duration) *core.ApplicationError
+    // MarkPending: status → PENDING, retry++, next_run_at = now + retryDelay
+    MarkPending(ctx context.Context, id string, retryDelay time.Duration) *core.ApplicationError
     Insert(ctx context.Context, items []*WorkItem) *core.ApplicationError
+    GetById(ctx context.Context, id string) (*WorkItem, *core.ApplicationError)
+    HasActive(ctx context.Context, workType, objectId string) (bool, *core.ApplicationError)
+    DeleteIfPending(ctx context.Context, id string) (bool, *core.ApplicationError)
+    List(ctx context.Context, workType, status string, paging *page.Paging, sort page.SortRequest) ([]*WorkItem, *core.ApplicationError)
+    FindPending(ctx context.Context, workType, destination, objectType string) ([]*WorkItem, *core.ApplicationError) // legacy, nessun caller
 }
 
 // store.IData — ciclo di vita task su task_logs
