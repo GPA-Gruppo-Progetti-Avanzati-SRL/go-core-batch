@@ -31,15 +31,17 @@ func wire(p moduleParams) {
 	NewRouter[*runnerService](w, p.GrpcServer, svc)
 }
 
-// Module wires the gRPC server and worker pool using registered TaskRunners,
-// unconditionally. Call once (e.g. in an init()) in the worker process.
-// The application must supply []worker.Config (pool sizes per task type).
+// Module provvede il gRPC Server e wire il worker pool usando i TaskRunner registrati,
+// incondizionatamente. Call once (e.g. in an init()) in the worker process.
+// L'app deve fornire []worker.Config (pool size per task type) e la *batchgrpc.ServerConfig.
 func Module() {
+	core.Provides(batchgrpc.NewServer)
 	core.Invoke(wire)
 }
 
 // ModuleIf è come Module ma attivo solo quando core.Mode è tra i modes indicati.
 func ModuleIf(modes ...string) {
+	core.ProvidesIf(batchgrpc.NewServer, modes...)
 	core.InvokeIf(wire, modes...)
 }
 
