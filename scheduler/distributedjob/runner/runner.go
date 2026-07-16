@@ -25,7 +25,8 @@ const Group = "batch_runners"
 //	return store.Retry(d) / RetryWithCause(d, e) → MarkPending (transient, retry later)
 //	return err                                   → MarkFailed
 //	return store.ErrHandled                      → left untouched (runner finalized it,
-//	                                               e.g. MarkDone + child inserts in a TX)
+//	                                               e.g. MarkDone + child inserts in a TX,
+//	                                               using an fx-injected IWorkItemStore)
 type ITaskRunner = store.ITaskRunner
 
 // TaskRunner binds an ITaskRunner to the task type it handles.
@@ -62,7 +63,7 @@ func (r *MuxRunner) Run(ctx context.Context, objectId, taskType string, items st
 	if appErr != nil {
 		return appErr
 	}
-	runErr := runner.Run(ctx, item, items)
+	runErr := runner.Run(ctx, item)
 	outcome, markErr := store.ApplyResult(ctx, items, objectId, runErr)
 	if markErr != nil {
 		return markErr
@@ -99,7 +100,7 @@ func Provide(constructor any) {
 //	    fx.In
 //	    Svc myPkg.IService
 //	}
-//	func (r *myRunner) Run(ctx context.Context, item *store.WorkItem, items store.IWorkItemStore) error { ... }
+//	func (r *myRunner) Run(ctx context.Context, item *store.WorkItem) error { ... }
 func Register[T any, PT interface {
 	*T
 	ITaskRunner
@@ -113,7 +114,7 @@ func Register[T any, PT interface {
 // IFileRunner is the interface for file-based task runners (e.g. S3).
 // The runner receives the file key and an io.Reader with the file content.
 type IFileRunner interface {
-	Run(ctx context.Context, key string, content io.Reader, items store.IWorkItemStore) error
+	Run(ctx context.Context, key string, content io.Reader) error
 }
 
 // FileTaskRunner binds an IFileRunner to the task type it handles.
@@ -147,7 +148,7 @@ func ProvideFile(constructor any) {
 //	    fx.In
 //	    Svc mysvc.IService
 //	}
-//	func (r *myS3Runner) Run(ctx context.Context, key string, content io.Reader, items store.IWorkItemStore) error { ... }
+//	func (r *myS3Runner) Run(ctx context.Context, key string, content io.Reader) error { ... }
 func RegisterFile[T any, PT interface {
 	*T
 	IFileRunner

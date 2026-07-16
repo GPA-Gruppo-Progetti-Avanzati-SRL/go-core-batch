@@ -195,7 +195,7 @@ func run(name, workType string, selfFeed bool, timeout, orphanTimeout time.Durat
 	for _, item := range pending {
 		// Same lifecycle convention as distributedjob (store.ApplyResult):
 		// nil→MarkDone, store.Retry→MarkPending, err→MarkFailed, store.ErrHandled→untouched.
-		runErr := runner.Run(ctx, item, items)
+		runErr := runner.Run(ctx, item)
 		outcome, markErr := store.ApplyResult(ctx, items, item.Id, runErr)
 		if markErr != nil {
 			log.Error().Err(markErr).Msgf("[%s] persisting outcome failed for item %s", jobID, item.Id)

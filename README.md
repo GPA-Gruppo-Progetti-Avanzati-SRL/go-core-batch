@@ -58,7 +58,7 @@ flowchart TD
         D -- gRPC --> REMOTE
 
         subgraph LOCAL["LocalDispatcher"]
-            LS[IData.SetTaskStart] --> RUN["GetById → ITaskRunner.Run(ctx, item, items)\n→ store.ApplyResult(return)"]
+            LS[IData.SetTaskStart] --> RUN["GetById → ITaskRunner.Run(ctx, item)\n→ store.ApplyResult(return)"]
             RUN -- "nil → MarkDone → DONE" --> LD[IData.SetTaskDone]
             RUN -- "store.ErrHandled → invariato\n(lifecycle gestito dal runner)" --> LD
             RUN -- "store.Retry → MarkPending\nnext_run_at=now+d · retry++ → PENDING" --> LP[IData.SetTaskInError]
@@ -66,7 +66,7 @@ flowchart TD
         end
 
         subgraph REMOTE["Worker remoto (gRPC)"]
-            WS[IData.SetTaskStart] --> WRUN["GetById → ITaskRunner.Run(ctx, item, items)\n→ store.ApplyResult(return)"]
+            WS[IData.SetTaskStart] --> WRUN["GetById → ITaskRunner.Run(ctx, item)\n→ store.ApplyResult(return)"]
             WRUN -- "nil / ErrHandled → DONE" --> WD[IData.SetTaskDone]
             WRUN -- "store.Retry → MarkPending → PENDING" --> WP[IData.SetTaskInError]
             WRUN -- "err → MarkFailed → FAILED" --> WE[IData.SetTaskInError]
@@ -78,13 +78,14 @@ flowchart TD
 ```
 
 > **Runner unico e interscambiabile.** distributedjob e simplejob condividono la stessa interfaccia
-> `store.ITaskRunner` — `Run(ctx, item *WorkItem, items IWorkItemStore) error` — e la stessa semantica:
+> `store.ITaskRunner` — `Run(ctx, item *WorkItem) error` — e la stessa semantica:
 > il framework applica `store.ApplyResult` sul valore di ritorno (`nil`→MarkDone, `store.Retry`→MarkPending,
 > `err`→MarkFailed, `store.ErrHandled`→invariato). Spostare un runner da una famiglia all'altra è un cambio
 > di **registrazione + config `type`**, non di logica.
 >
 > Per un `MarkDone` **transazionale** (es. chiudere il corrente + inserire workitem figli in un'unica TX) il
-> runner usa `items` e ritorna `store.ErrHandled`, così il framework non applica alcun `Mark*`.
+> runner inietta un `store.IWorkItemStore` via fx nella propria struct e ritorna `store.ErrHandled`, così il
+> framework non applica alcun `Mark*`.
 
 ---
 
@@ -213,7 +214,7 @@ type mioTaskRunner struct {
     svc mySvc.IService
 }
 
-func (r *mioTaskRunner) Run(ctx context.Context, item *store.WorkItem, items store.IWorkItemStore) error {
+func (r *mioTaskRunner) Run(ctx context.Context, item *store.WorkItem) error {
     if err := r.svc.DoWork(ctx, item); err != nil {
         if isTransient(err) {
             return store.RetryWithCause(5*time.Minute, err) // → MarkPending
@@ -225,7 +226,8 @@ func (r *mioTaskRunner) Run(ctx context.Context, item *store.WorkItem, items sto
 ```
 
 > Il lifecycle lo applica il framework dal valore di ritorno (`store.ApplyResult`). Per gestirlo a mano
-> (es. `items.MarkDone` transazionale con l'insert di workitem figli) chiudi tu l'item e ritorna `store.ErrHandled`.
+> (es. `MarkDone` transazionale con l'insert di workitem figli) inietta un `store.IWorkItemStore` via fx nella
+> struct, chiudi tu l'item e ritorna `store.ErrHandled`.
 
 ### app-config.go — blank import
 
@@ -323,7 +325,7 @@ type myS3Runner struct {
     Svc mysvc.IService
 }
 
-func (r *myS3Runner) Run(ctx context.Context, key string, content io.Reader, items store.IWorkItemStore) error {
+func (r *myS3Runner) Run(ctx context.Context, key string, content io.Reader) error {
     // process the file stream; return nil → l'adapter s3feed sposta il file e fa MarkDone,
     // return err → il workitem resta pending per il retry
     return nil
@@ -485,7 +487,7 @@ flowchart TD
     SELF --> RO["IWorkItemStore.RecoverOrphans\nIN_PROGRESS più vecchi di lock-timeout (default 10m)\nretry++"]
     RO --> CP["IWorkItemStore.ClaimPending(workType, limit)\nPENDING → IN_PROGRESS (atomico, max limit)"]
     CP -- "nessun item" --> END([fine run])
-    CP -- "per ogni item (loop sequenziale)" --> RUN["ITaskRunner.Run(ctx, item, items)\n→ store.ApplyResult(return)\nctx timeout = lock-timeout (default 30s)"]
+    CP -- "per ogni item (loop sequenziale)" --> RUN["ITaskRunner.Run(ctx, item)\n→ store.ApplyResult(return)\nctx timeout = lock-timeout (default 30s)"]
     RUN -- "return nil" --> DONE["MarkDone → DONE"]
     RUN -- "return store.Retry(d) / RetryWithCause(d, err)" --> PEND["MarkPending(d) → PENDING\nnext_run_at=now+d · retry++"]
     RUN -- "return err" --> FAIL["MarkFailed → FAILED"]
@@ -512,7 +514,7 @@ In alternativa `simplejob.ProvideRunner(constructor)` (costruttore esplicito che
 
 ### Runner — lifecycle dal valore di ritorno
 
-`store.ITaskRunner.Run(ctx, item, items)` — stessa interfaccia di distributedjob. Nel caso comune il runner ignora `items` e segnala l'esito col valore di ritorno.
+`store.ITaskRunner.Run(ctx, item)` — stessa interfaccia di distributedjob. Nel caso comune il runner segnala l'esito col valore di ritorno.
 
 ```go
 type myRunner struct {
@@ -520,7 +522,7 @@ type myRunner struct {
     Svc mysvc.IService
 }
 
-func (r *myRunner) Run(ctx context.Context, item *store.WorkItem, items store.IWorkItemStore) error {
+func (r *myRunner) Run(ctx context.Context, item *store.WorkItem) error {
     if err := r.Svc.Do(ctx, item); err != nil {
         if isTransient(err) {
             return store.RetryWithCause(5*time.Minute, err) // → MarkPending (retry differito)
@@ -531,18 +533,24 @@ func (r *myRunner) Run(ctx context.Context, item *store.WorkItem, items store.IW
 }
 ```
 
-**MarkDone manuale / transazionale.** Se il runner deve gestire il lifecycle da sé — es. `MarkDone` insieme all'insert di altri workitem (outbox) — usa il parametro `items` e ritorna `store.ErrHandled`: il framework non applica alcun `Mark*` (l'atomicità insert+MarkDone dipende dal supporto transazionale dello store).
+**MarkDone manuale / transazionale.** Se il runner deve gestire il lifecycle da sé — es. `MarkDone` insieme all'insert di altri workitem (outbox) — inietta un `store.IWorkItemStore` via fx nella struct e ritorna `store.ErrHandled`: il framework non applica alcun `Mark*` (l'atomicità insert+MarkDone dipende dal supporto transazionale dello store).
 
 ```go
-func (r *myRunner) Run(ctx context.Context, item *store.WorkItem, items store.IWorkItemStore) error {
+type myRunner struct {
+    fx.In
+    Svc   mysvc.IService
+    Items store.IWorkItemStore   // iniettato da fx per il MarkDone transazionale
+}
+
+func (r *myRunner) Run(ctx context.Context, item *store.WorkItem) error {
     children, err := r.Svc.Process(ctx, item)
     if err != nil {
         return err                                     // → MarkFailed (framework)
     }
-    if err := items.Insert(ctx, children); err != nil {
+    if err := r.Items.Insert(ctx, children); err != nil {
         return err
     }
-    if err := items.MarkDone(ctx, []string{item.Id}); err != nil {
+    if err := r.Items.MarkDone(ctx, []string{item.Id}); err != nil {
         return err
     }
     return store.ErrHandled                            // il framework non tocca l'item
@@ -597,7 +605,7 @@ scheduler:
 // store.ITaskRunner — interfaccia unica condivisa da simplejob e distributedjob
 // (runner.ITaskRunner e simplejob.ITaskRunner sono alias di questa).
 type ITaskRunner interface {
-    Run(ctx context.Context, item *WorkItem, items IWorkItemStore) error
+    Run(ctx context.Context, item *WorkItem) error
 }
 
 // store.ApplyResult — finalizza il workitem dal return del runner

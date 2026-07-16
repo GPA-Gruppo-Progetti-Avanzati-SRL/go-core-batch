@@ -19,7 +19,7 @@ type fileRunner struct {
 	inner runner.IFileRunner
 }
 
-func (r *fileRunner) Run(ctx context.Context, item *store.WorkItem, items store.IWorkItemStore) error {
+func (r *fileRunner) Run(ctx context.Context, item *store.WorkItem) error {
 	var payload S3Payload
 	if err := decodePayload(item.Payload, &payload); err != nil {
 		return fmt.Errorf("s3feed runner: decode payload for %q: %w", item.Id, err)
@@ -38,7 +38,7 @@ func (r *fileRunner) Run(ctx context.Context, item *store.WorkItem, items store.
 	defer reader.Close()
 
 	// Delegate to the inner file runner
-	if err := r.inner.Run(ctx, payload.Key, reader, items); err != nil {
+	if err := r.inner.Run(ctx, payload.Key, reader); err != nil {
 		log.Warn().Err(err).Msgf("s3feed runner: handler failed for %q, keeping pending", payload.Key)
 		return err
 	}

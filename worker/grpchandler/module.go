@@ -70,7 +70,7 @@ func (s *runnerService) GetTaskExecutions(taskType string) (worker.RunTask[*runn
 		if appErr != nil {
 			return appErr
 		}
-		runErr := r.Run(t.Context, item, items)
+		runErr := r.Run(t.Context, item)
 		outcome, markErr := store.ApplyResult(t.Context, items, t.ObjectId, runErr)
 		if markErr != nil {
 			return core.TechnicalErrorWithError(markErr)

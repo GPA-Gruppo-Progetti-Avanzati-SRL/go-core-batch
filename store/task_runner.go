@@ -12,12 +12,13 @@ import (
 // them: switching a job from one family to the other is a registration + config
 // change, not a code change.
 //
-// The runner receives the full WorkItem (payload included) and the store. It does
-// NOT have to touch the lifecycle: the framework applies ApplyResult on the return
-// value. It MAY finalize the item itself (e.g. MarkDone together with child inserts
-// in a transaction) and return ErrHandled so the framework leaves it untouched.
+// The runner receives the full WorkItem (payload included). It does NOT have to
+// touch the lifecycle: the framework applies ApplyResult on the return value. A
+// runner that wants to finalize the item itself (e.g. MarkDone together with child
+// inserts in a transaction) injects an IWorkItemStore via fx into its struct and
+// returns ErrHandled so the framework leaves it untouched.
 type ITaskRunner interface {
-	Run(ctx context.Context, item *WorkItem, items IWorkItemStore) error
+	Run(ctx context.Context, item *WorkItem) error
 }
 
 // Outcome is the classification of a runner result, returned by ApplyResult.
