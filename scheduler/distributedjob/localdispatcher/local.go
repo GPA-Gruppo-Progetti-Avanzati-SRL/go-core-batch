@@ -53,17 +53,28 @@ type muxParams struct {
 	Runners []*runner.TaskRunner `group:"batch_runners"`
 }
 
-// Module registers the DistribuiteTask mux dispatcher with the fx application.
-// It provides ITaskDispatcher via fx so that queryfeed and s3feed modules can
-// depend on it. Call once (e.g. in an init()) before scheduler.NewScheduler.
+func newMuxRunner(p muxParams) *runner.MuxRunner {
+	return runner.NewMux(p.Runners)
+}
+
+func register(d distributedjob.ITaskDispatcher, items store.IWorkItemStore, data store.IData) {
+	distributedjob.Register(d, items, data)
+}
+
+// Module registers the DistribuiteTask mux dispatcher with the fx application,
+// unconditionally. It provides ITaskDispatcher via fx so that queryfeed and s3feed
+// modules can depend on it. Call once (e.g. in an init()) before scheduler.NewScheduler.
 func Module() {
 	core.Provides(
-		func(p muxParams) *runner.MuxRunner {
-			return runner.NewMux(p.Runners)
-		},
+		newMuxRunner,
 		fx.Annotate(New, fx.As(new(distributedjob.ITaskDispatcher))),
 	)
-	core.Invoke(func(d distributedjob.ITaskDispatcher, items store.IWorkItemStore, data store.IData) {
-		distributedjob.Register(d, items, data)
-	})
+	core.Invoke(register)
+}
+
+// ModuleIf è come Module ma attivo solo quando core.Mode è tra i modes indicati.
+func ModuleIf(modes ...string) {
+	core.ProvidesIf(newMuxRunner, modes...)
+	core.ProvidesIf(fx.Annotate(New, fx.As(new(distributedjob.ITaskDispatcher))), modes...)
+	core.InvokeIf(register, modes...)
 }

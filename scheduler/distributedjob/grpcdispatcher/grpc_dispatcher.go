@@ -30,15 +30,24 @@ func (d *GrpcDispatcher) DispatchTask(ctx context.Context, jobId, taskId, object
 	return err
 }
 
-// Module wires the gRPC client and GrpcDispatcher, providing ITaskDispatcher
-// via fx so that queryfeed and s3feed modules can depend on it.
+func register(d distributedjob.ITaskDispatcher, items store.IWorkItemStore, data store.IData) {
+	distributedjob.Register(d, items, data)
+}
+
+// Module wires the gRPC client and GrpcDispatcher unconditionally, providing
+// ITaskDispatcher via fx so that queryfeed and s3feed modules can depend on it.
 // Call once (e.g. in an init()) before scheduler.NewScheduler.
 func Module() {
 	core.Provides(
 		batchgrpc.NewClient,
 		fx.Annotate(NewGrpcDispatcher, fx.As(new(distributedjob.ITaskDispatcher))),
 	)
-	core.Invoke(func(d distributedjob.ITaskDispatcher, items store.IWorkItemStore, data store.IData) {
-		distributedjob.Register(d, items, data)
-	})
+	core.Invoke(register)
+}
+
+// ModuleIf è come Module ma attivo solo quando core.Mode è tra i modes indicati.
+func ModuleIf(modes ...string) {
+	core.ProvidesIf(batchgrpc.NewClient, modes...)
+	core.ProvidesIf(fx.Annotate(NewGrpcDispatcher, fx.As(new(distributedjob.ITaskDispatcher))), modes...)
+	core.InvokeIf(register, modes...)
 }

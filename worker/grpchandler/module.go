@@ -25,15 +25,22 @@ type moduleParams struct {
 	Runners    []*runner.TaskRunner `group:"batch_runners"`
 }
 
-// Module wires the gRPC server and worker pool using registered TaskRunners.
-// Call once (e.g. in an init()) in the worker process.
+func wire(p moduleParams) {
+	svc := newRunnerService(p.Runners)
+	w := worker.NewWorkers[*runnerService](p.Lifecycle, p.WorkersCfg, p.Data, svc, p.Items)
+	NewRouter[*runnerService](w, p.GrpcServer, svc)
+}
+
+// Module wires the gRPC server and worker pool using registered TaskRunners,
+// unconditionally. Call once (e.g. in an init()) in the worker process.
 // The application must supply []worker.Config (pool sizes per task type).
 func Module() {
-	core.Invoke(func(p moduleParams) {
-		svc := newRunnerService(p.Runners)
-		w := worker.NewWorkers[*runnerService](p.Lifecycle, p.WorkersCfg, p.Data, svc, p.Items)
-		NewRouter[*runnerService](w, p.GrpcServer, svc)
-	})
+	core.Invoke(wire)
+}
+
+// ModuleIf è come Module ma attivo solo quando core.Mode è tra i modes indicati.
+func ModuleIf(modes ...string) {
+	core.InvokeIf(wire, modes...)
 }
 
 // runnerService bridges []*runner.TaskRunner to worker.ITaskService[*runnerService].
