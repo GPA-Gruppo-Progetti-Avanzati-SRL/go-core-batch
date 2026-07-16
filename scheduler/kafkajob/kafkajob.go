@@ -16,6 +16,7 @@
 package kafkajob
 
 import (
+	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/kafka"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
@@ -30,11 +31,25 @@ func Register(producer *kafka.ProducerService, items store.IWorkItemStore) {
 	scheduler.Jobs[JobType] = makeNotificationJobFactory(producer, items)
 }
 
-// Module wires the Kafka producer and registers the job.
+// Module wires the Kafka producer and registers the job (stile fx.Options, per composizione con fx).
 // The app must separately provide store.IWorkItemStore (mongostore or sqlstore).
 func Module() fx.Option {
 	return fx.Options(
 		fx.Provide(kafka.NewProducerService),
 		fx.Invoke(Register),
 	)
+}
+
+// ModuleCore è la variante core-style di Module: provvede il ProducerService e registra il job
+// nel container go-core-app (Provides + Invoke), incondizionatamente.
+// L'app deve fornire *kafka.Config e store.IWorkItemStore.
+func ModuleCore() {
+	core.Provides(kafka.NewProducerService)
+	core.Invoke(Register)
+}
+
+// ModuleIf è come ModuleCore ma attivo solo quando core.Mode è tra i modes indicati.
+func ModuleIf(modes ...string) {
+	core.ProvidesIf(kafka.NewProducerService, modes...)
+	core.InvokeIf(Register, modes...)
 }
