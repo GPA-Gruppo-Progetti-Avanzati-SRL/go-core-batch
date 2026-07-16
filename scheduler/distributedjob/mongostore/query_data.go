@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"time"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob"
@@ -13,6 +14,28 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
+
+// currentTimestampPlaceholder è sostituito ricorsivamente con time.Now() nei filtri, così i job
+// possono esprimere condizioni temporali statiche in configurazione (es. {"$lte":"CURRENT_TIMESTAMP"}).
+const currentTimestampPlaceholder = "CURRENT_TIMESTAMP"
+
+// convertDates sostituisce ricorsivamente il placeholder CURRENT_TIMESTAMP con l'orario corrente.
+func convertDates(m bson.M) bson.M {
+	now := time.Now()
+	for key, value := range m {
+		switch v := value.(type) {
+		case string:
+			if v == currentTimestampPlaceholder {
+				m[key] = now
+			}
+		case bson.M:
+			m[key] = convertDates(v)
+		case map[string]interface{}:
+			m[key] = convertDates(bson.M(v))
+		}
+	}
+	return m
+}
 
 // QueryData implements distributedjob.IQueryStore against a MongoDB collection.
 type QueryData struct {
@@ -37,6 +60,7 @@ func (q *QueryData) GetIdsSorted(ctx context.Context, collection, filter, sort s
 		if err := json.Unmarshal([]byte(filter), &query); err != nil {
 			return nil, core.TechnicalErrorWithError(err)
 		}
+		query = convertDates(query)
 	} else {
 		query = bson.M{}
 	}
