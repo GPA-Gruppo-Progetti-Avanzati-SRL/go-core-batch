@@ -32,14 +32,14 @@ func (f workItemFilter) GetFilterCollectionName(ctx context.Context) string {
 	return store.CollectionWorkItems
 }
 
-// WorkItemData implements store.IWorkItemStore using MongoDB.
-type WorkItemData struct {
+// workItemData implements store.IWorkItemStore using MongoDB.
+type workItemData struct {
 	Service     *mongolks.LinkedService
 	idxWarnOnce sync.Once
 }
 
-func NewWorkItemData(ms *mongolks.LinkedService) *WorkItemData {
-	return &WorkItemData{Service: ms}
+func newWorkItemData(ms *mongolks.LinkedService) *workItemData {
+	return &workItemData{Service: ms}
 }
 
 // warnIfActiveIndexMissing logga (una sola volta) un warning se l'indice partiale unico
@@ -48,7 +48,7 @@ func NewWorkItemData(ms *mongolks.LinkedService) *WorkItemData {
 // work item duplicati e doppia esecuzione. L'indice NON viene creato in automatico
 // (gestione manuale via EnsureIndexes o migration/ops): il warning serve a rendere
 // l'eventuale assenza una scelta consapevole, non una svista.
-func (d *WorkItemData) warnIfActiveIndexMissing(ctx context.Context) {
+func (d *workItemData) warnIfActiveIndexMissing(ctx context.Context) {
 	d.idxWarnOnce.Do(func() {
 		coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 		cur, err := coll.Indexes().List(ctx)
@@ -74,9 +74,9 @@ func (d *WorkItemData) warnIfActiveIndexMissing(ctx context.Context) {
 	})
 }
 
-var _ store.IWorkItemStore = (*WorkItemData)(nil)
+var _ store.IWorkItemStore = (*workItemData)(nil)
 
-func (d *WorkItemData) FindPending(ctx context.Context, workType, destination, objectType string) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemData) FindPending(ctx context.Context, workType, destination, objectType string) ([]*store.WorkItem, *core.ApplicationError) {
 	filter := workItemFilter{
 		Type:        workType,
 		Status:      store.StatusPending,
@@ -93,7 +93,7 @@ func (d *WorkItemData) FindPending(ctx context.Context, workType, destination, o
 // The candidate query matches items whose next_run_at is due, treating a missing/null
 // next_run_at as "due now" (mirrors the SQL store's `next_run_at IS NULL OR <= NOW()`),
 // and is bounded by limit so the whole PENDING backlog is never loaded into memory.
-func (d *WorkItemData) ClaimPending(ctx context.Context, workType, destination, objectType string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemData) ClaimPending(ctx context.Context, workType, destination, objectType string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
 	now := time.Now()
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 
@@ -153,7 +153,7 @@ func (d *WorkItemData) ClaimPending(ctx context.Context, workType, destination, 
 // refreshing lockedAt to now and incrementing retry. Returns the items for
 // immediate processing — no reset to PENDING, no waiting for the next tick.
 // Uses optimistic per-item UpdateOne so concurrent replicas don't double-claim.
-func (d *WorkItemData) RecoverOrphans(ctx context.Context, workType, destination, objectType string, maxAge time.Duration, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemData) RecoverOrphans(ctx context.Context, workType, destination, objectType string, maxAge time.Duration, limit int) ([]*store.WorkItem, *core.ApplicationError) {
 	cutoff := time.Now().Add(-maxAge)
 	now := time.Now()
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
@@ -199,7 +199,7 @@ func (d *WorkItemData) RecoverOrphans(ctx context.Context, workType, destination
 
 // MarkDone transitions the given IN_PROGRESS items to DONE.
 // Returns an error if any id is not found in IN_PROGRESS state.
-func (d *WorkItemData) MarkDone(ctx context.Context, ids []string) *core.ApplicationError {
+func (d *workItemData) MarkDone(ctx context.Context, ids []string) *core.ApplicationError {
 	now := time.Now()
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	res, err := coll.UpdateMany(ctx,
@@ -218,7 +218,7 @@ func (d *WorkItemData) MarkDone(ctx context.Context, ids []string) *core.Applica
 
 // MarkFailed transitions the given IN_PROGRESS item to FAILED.
 // Returns an error if the item is not found in IN_PROGRESS state.
-func (d *WorkItemData) MarkFailed(ctx context.Context, id, reason string) *core.ApplicationError {
+func (d *workItemData) MarkFailed(ctx context.Context, id, reason string) *core.ApplicationError {
 	now := time.Now()
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	res, err := coll.UpdateOne(ctx,
@@ -237,7 +237,7 @@ func (d *WorkItemData) MarkFailed(ctx context.Context, id, reason string) *core.
 
 // MarkPending resets the given IN_PROGRESS item back to PENDING for retry.
 // Returns an error if the item is not found in IN_PROGRESS state.
-func (d *WorkItemData) MarkPending(ctx context.Context, id string, after time.Duration) *core.ApplicationError {
+func (d *workItemData) MarkPending(ctx context.Context, id string, after time.Duration) *core.ApplicationError {
 	now := time.Now()
 	nextRunAt := now.Add(after)
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
@@ -258,7 +258,7 @@ func (d *WorkItemData) MarkPending(ctx context.Context, id string, after time.Du
 	return nil
 }
 
-func (d *WorkItemData) Insert(ctx context.Context, items []*store.WorkItem) *core.ApplicationError {
+func (d *workItemData) Insert(ctx context.Context, items []*store.WorkItem) *core.ApplicationError {
 	list := make([]mongo.ICollection, len(items))
 	for i, item := range items {
 		list[i] = item
@@ -266,7 +266,7 @@ func (d *WorkItemData) Insert(ctx context.Context, items []*store.WorkItem) *cor
 	return mongo.InsertMany(ctx, d.Service, list)
 }
 
-func (d *WorkItemData) DeleteIfPending(ctx context.Context, id string) (bool, *core.ApplicationError) {
+func (d *workItemData) DeleteIfPending(ctx context.Context, id string) (bool, *core.ApplicationError) {
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	res, err := coll.DeleteOne(ctx, bson.M{"_id": id, "status": store.StatusPending})
 	if err != nil {
@@ -275,7 +275,7 @@ func (d *WorkItemData) DeleteIfPending(ctx context.Context, id string) (bool, *c
 	return res.DeletedCount == 1, nil
 }
 
-func (d *WorkItemData) GetById(ctx context.Context, id string) (*store.WorkItem, *core.ApplicationError) {
+func (d *workItemData) GetById(ctx context.Context, id string) (*store.WorkItem, *core.ApplicationError) {
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	var item store.WorkItem
 	if err := coll.FindOne(ctx, bson.M{"_id": id}).Decode(&item); err != nil {
@@ -287,7 +287,7 @@ func (d *WorkItemData) GetById(ctx context.Context, id string) (*store.WorkItem,
 	return &item, nil
 }
 
-func (d *WorkItemData) HasActive(ctx context.Context, workType, objectId string) (bool, *core.ApplicationError) {
+func (d *workItemData) HasActive(ctx context.Context, workType, objectId string) (bool, *core.ApplicationError) {
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	count, err := coll.CountDocuments(ctx, bson.M{
 		"type":     workType,
@@ -303,7 +303,7 @@ func (d *WorkItemData) HasActive(ctx context.Context, workType, objectId string)
 // InsertIfNotActive inserts each item only if no active (PENDING or IN_PROGRESS) entry
 // exists for the same (type, objectId). Relies on the partial unique index
 // uk_workitem_active — call EnsureIndexes at startup to create it.
-func (d *WorkItemData) InsertIfNotActive(ctx context.Context, items []*store.WorkItem) (int, *core.ApplicationError) {
+func (d *workItemData) InsertIfNotActive(ctx context.Context, items []*store.WorkItem) (int, *core.ApplicationError) {
 	if len(items) == 0 {
 		return 0, nil
 	}
@@ -322,7 +322,7 @@ func (d *WorkItemData) InsertIfNotActive(ctx context.Context, items []*store.Wor
 	return inserted, nil
 }
 
-func (d *WorkItemData) List(ctx context.Context, workType, status string, paging *page.Paging, sort page.SortRequest) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemData) List(ctx context.Context, workType, status string, paging *page.Paging, sort page.SortRequest) ([]*store.WorkItem, *core.ApplicationError) {
 	filter := workItemFilter{Type: workType, Status: status}
 	var sortOpt options.Lister[options.FindOptions]
 	if len(sort) > 0 {
@@ -341,7 +341,7 @@ func (d *WorkItemData) List(ctx context.Context, workType, status string, paging
 	return items, nil
 }
 
-// EnsureIndexes creates the indexes required by WorkItemData. Call once at application startup.
+// EnsureIndexes creates the indexes required by workItemData. Call once at application startup.
 // The partial unique index uk_workitem_active prevents concurrent insertion of duplicate
 // active (PENDING or IN_PROGRESS) items for the same (type, objectId).
 func EnsureIndexes(ctx context.Context, service *mongolks.LinkedService) error {

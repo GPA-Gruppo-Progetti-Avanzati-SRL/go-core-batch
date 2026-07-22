@@ -37,22 +37,22 @@ func convertDates(m bson.M) bson.M {
 	return m
 }
 
-// QueryData implements distributedjob.IQueryStore against a MongoDB collection.
-type QueryData struct {
+// queryData implements distributedjob.IQueryStore against a MongoDB collection.
+type queryData struct {
 	Service *mongolks.LinkedService
 }
 
-func NewQueryData(ms *mongolks.LinkedService) *QueryData {
-	return &QueryData{Service: ms}
+func newQueryData(ms *mongolks.LinkedService) *queryData {
+	return &queryData{Service: ms}
 }
 
-var _ distributedjob.IQueryStore = (*QueryData)(nil)
+var _ distributedjob.IQueryStore = (*queryData)(nil)
 
-func (q *QueryData) GetIds(ctx context.Context, collection, filter string, limit int) ([]string, *core.ApplicationError) {
+func (q *queryData) GetIds(ctx context.Context, collection, filter string, limit int) ([]string, *core.ApplicationError) {
 	return q.GetIdsSorted(ctx, collection, filter, "", limit)
 }
 
-func (q *QueryData) GetIdsSorted(ctx context.Context, collection, filter, sort string, limit int) ([]string, *core.ApplicationError) {
+func (q *queryData) GetIdsSorted(ctx context.Context, collection, filter, sort string, limit int) ([]string, *core.ApplicationError) {
 	coll := q.Service.GetCollection(collection, "")
 
 	var query bson.M

@@ -13,38 +13,38 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// BatchData implements store.IData using MongoDB.
-type BatchData struct {
+// batchData implements store.IData using MongoDB.
+type batchData struct {
 	Service *mongolks.LinkedService
 }
 
-func NewBatchData(ms *mongolks.LinkedService) *BatchData {
-	return &BatchData{Service: ms}
+func newBatchData(ms *mongolks.LinkedService) *batchData {
+	return &batchData{Service: ms}
 }
 
-var _ store.IData = (*BatchData)(nil)
+var _ store.IData = (*batchData)(nil)
 
-func (d *BatchData) SetTaskStart(ctx context.Context, taskid, jobid, typeTask, objectid string) {
+func (d *batchData) SetTaskStart(ctx context.Context, taskid, jobid, typeTask, objectid string) {
 	d.insertTask(ctx, taskid, jobid, typeTask, objectid, "START", "")
 }
 
-func (d *BatchData) SetTaskDone(ctx context.Context, taskid, jobid, typeTask, objectid string) {
+func (d *batchData) SetTaskDone(ctx context.Context, taskid, jobid, typeTask, objectid string) {
 	d.insertTask(ctx, taskid, jobid, typeTask, objectid, "DONE", "")
 }
 
-func (d *BatchData) SetTaskInError(ctx context.Context, taskid, jobid, typeTask, objectid, errMsg string) {
+func (d *batchData) SetTaskInError(ctx context.Context, taskid, jobid, typeTask, objectid, errMsg string) {
 	d.insertTask(ctx, taskid, jobid, typeTask, objectid, "ERROR", errMsg)
 }
 
-func (d *BatchData) SetTaskAssigned(ctx context.Context, taskid, jobid, typeTask, objectid string) {
+func (d *batchData) SetTaskAssigned(ctx context.Context, taskid, jobid, typeTask, objectid string) {
 	d.insertTask(ctx, taskid, jobid, typeTask, objectid, "ASSIGNED", "")
 }
 
-func (d *BatchData) SetTaskAssignationKO(ctx context.Context, taskid, jobid, typeTask, objectid, errMsg string) {
+func (d *batchData) SetTaskAssignationKO(ctx context.Context, taskid, jobid, typeTask, objectid, errMsg string) {
 	d.insertTask(ctx, taskid, jobid, typeTask, objectid, "ASSIGNEDKO", errMsg)
 }
 
-func (d *BatchData) insertTask(ctx context.Context, taskid, jobId, typeTask, objectid, status, errMsg string) {
+func (d *batchData) insertTask(ctx context.Context, taskid, jobId, typeTask, objectid, status, errMsg string) {
 	obj := &store.TaskLog{
 		TaskID:   taskid,
 		JobID:    jobId,

@@ -19,7 +19,7 @@ type Scheduler struct {
 
 var tracer = otel.Tracer("Scheduler")
 
-func NewScheduler(lc fx.Lifecycle, config []Config, redisClient *redis.Client, s Services) *Scheduler {
+func newScheduler(lc fx.Lifecycle, config []Config, redisClient *redis.Client, s Services) *Scheduler {
 	sm := NewSchedulerMetrics()
 	opts := make([]gocron.SchedulerOption, 0)
 	logger := gocron.NewLogger(-1)

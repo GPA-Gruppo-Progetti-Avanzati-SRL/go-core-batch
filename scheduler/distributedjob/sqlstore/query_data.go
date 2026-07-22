@@ -13,22 +13,22 @@ import (
 	"github.com/uptrace/bun"
 )
 
-// QueryDataSQL implements distributedjob.IQueryStore against a SQL database.
-type QueryDataSQL struct {
+// queryDataSQL implements distributedjob.IQueryStore against a SQL database.
+type queryDataSQL struct {
 	DB *bun.DB
 }
 
-func NewQueryDataSQL(db *bun.DB) *QueryDataSQL {
-	return &QueryDataSQL{DB: db}
+func newQueryDataSQL(db *bun.DB) *queryDataSQL {
+	return &queryDataSQL{DB: db}
 }
 
-var _ distributedjob.IQueryStore = (*QueryDataSQL)(nil)
+var _ distributedjob.IQueryStore = (*queryDataSQL)(nil)
 
-func (q *QueryDataSQL) GetIds(ctx context.Context, table, filter string, limit int) ([]string, *core.ApplicationError) {
+func (q *queryDataSQL) GetIds(ctx context.Context, table, filter string, limit int) ([]string, *core.ApplicationError) {
 	return q.GetIdsSorted(ctx, table, filter, "", limit)
 }
 
-func (q *QueryDataSQL) GetIdsSorted(ctx context.Context, table, filter, sort string, limit int) ([]string, *core.ApplicationError) {
+func (q *queryDataSQL) GetIdsSorted(ctx context.Context, table, filter, sort string, limit int) ([]string, *core.ApplicationError) {
 	query := q.DB.NewSelect().TableExpr(table).ColumnExpr("id")
 	if filter != "" {
 		query = query.Where(filter)

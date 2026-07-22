@@ -30,23 +30,23 @@ func (f workItemFilter) GetFilterTableName(ctx context.Context) string {
 	return store.TableWorkItems
 }
 
-// WorkItemDataSQL implements store.IWorkItemStore using a SQL database via bun.
-type WorkItemDataSQL struct {
+// workItemDataSQL implements store.IWorkItemStore using a SQL database via bun.
+type workItemDataSQL struct {
 	DB          *bun.DB
 	idxWarnOnce sync.Once
 }
 
-func NewWorkItemDataSQL(db *bun.DB) *WorkItemDataSQL {
-	return &WorkItemDataSQL{DB: db}
+func newWorkItemDataSQL(db *bun.DB) *workItemDataSQL {
+	return &workItemDataSQL{DB: db}
 }
 
-var _ store.IWorkItemStore = (*WorkItemDataSQL)(nil)
+var _ store.IWorkItemStore = (*workItemDataSQL)(nil)
 
 // warnIfActiveIndexMissing logga (una sola volta) un warning se l'indice partiale unico
 // uk_workitem_active non esiste. Senza quell'indice InsertIfNotActive (ON CONFLICT DO NOTHING)
 // non deduplica → rischio work item duplicati e doppia esecuzione. L'indice NON viene creato
 // in automatico (gestione manuale via EnsureIndexes o migration/ops).
-func (d *WorkItemDataSQL) warnIfActiveIndexMissing(ctx context.Context) {
+func (d *workItemDataSQL) warnIfActiveIndexMissing(ctx context.Context) {
 	d.idxWarnOnce.Do(func() {
 		var n int
 		if err := d.DB.NewRaw(
@@ -61,7 +61,7 @@ func (d *WorkItemDataSQL) warnIfActiveIndexMissing(ctx context.Context) {
 	})
 }
 
-func (d *WorkItemDataSQL) FindPending(ctx context.Context, workType, destination, objectType string) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemDataSQL) FindPending(ctx context.Context, workType, destination, objectType string) ([]*store.WorkItem, *core.ApplicationError) {
 	filter := workItemFilter{
 		Type:        workType,
 		Status:      store.StatusPending,
@@ -75,7 +75,7 @@ func (d *WorkItemDataSQL) FindPending(ctx context.Context, workType, destination
 // ClaimPending atomically selects up to limit PENDING items of workType,
 // marks them IN_PROGRESS with locked_at = now, and returns the full records.
 // Uses SELECT FOR UPDATE SKIP LOCKED — safe across multiple replicas.
-func (d *WorkItemDataSQL) ClaimPending(ctx context.Context, workType, destination, objectType string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemDataSQL) ClaimPending(ctx context.Context, workType, destination, objectType string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
 	now := time.Now()
 	var items []*store.WorkItem
 	err := d.DB.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
@@ -122,7 +122,7 @@ func (d *WorkItemDataSQL) ClaimPending(ctx context.Context, workType, destinatio
 // refreshing locked_at to now and incrementing retry. Returns the items for
 // immediate processing — no reset to PENDING, no waiting for the next tick.
 // Uses a CTE with FOR UPDATE SKIP LOCKED so it is safe across replicas.
-func (d *WorkItemDataSQL) RecoverOrphans(ctx context.Context, workType, destination, objectType string, maxAge time.Duration, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemDataSQL) RecoverOrphans(ctx context.Context, workType, destination, objectType string, maxAge time.Duration, limit int) ([]*store.WorkItem, *core.ApplicationError) {
 	cutoff := time.Now().Add(-maxAge)
 	now := time.Now()
 
@@ -160,7 +160,7 @@ func (d *WorkItemDataSQL) RecoverOrphans(ctx context.Context, workType, destinat
 
 // MarkDone transitions the given IN_PROGRESS items to DONE.
 // Returns an error if any id is not found in IN_PROGRESS state.
-func (d *WorkItemDataSQL) MarkDone(ctx context.Context, ids []string) *core.ApplicationError {
+func (d *workItemDataSQL) MarkDone(ctx context.Context, ids []string) *core.ApplicationError {
 	now := time.Now()
 	res, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
 		Set("status = ?", store.StatusDone).
@@ -180,7 +180,7 @@ func (d *WorkItemDataSQL) MarkDone(ctx context.Context, ids []string) *core.Appl
 
 // MarkFailed transitions the given IN_PROGRESS item to FAILED.
 // Returns an error if the item is not found in IN_PROGRESS state.
-func (d *WorkItemDataSQL) MarkFailed(ctx context.Context, id, reason string) *core.ApplicationError {
+func (d *workItemDataSQL) MarkFailed(ctx context.Context, id, reason string) *core.ApplicationError {
 	now := time.Now()
 	res, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
 		Set("status = ?", store.StatusFailed).
@@ -201,7 +201,7 @@ func (d *WorkItemDataSQL) MarkFailed(ctx context.Context, id, reason string) *co
 
 // MarkPending resets the given IN_PROGRESS item back to PENDING for retry.
 // Returns an error if the item is not found in IN_PROGRESS state.
-func (d *WorkItemDataSQL) MarkPending(ctx context.Context, id string, after time.Duration) *core.ApplicationError {
+func (d *workItemDataSQL) MarkPending(ctx context.Context, id string, after time.Duration) *core.ApplicationError {
 	now := time.Now()
 	nextRunAt := now.Add(after)
 	res, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
@@ -222,11 +222,11 @@ func (d *WorkItemDataSQL) MarkPending(ctx context.Context, id string, after time
 	return nil
 }
 
-func (d *WorkItemDataSQL) Insert(ctx context.Context, items []*store.WorkItem) *core.ApplicationError {
+func (d *workItemDataSQL) Insert(ctx context.Context, items []*store.WorkItem) *core.ApplicationError {
 	return coresql.InsertMany[store.WorkItem](ctx, d.DB, items)
 }
 
-func (d *WorkItemDataSQL) DeleteIfPending(ctx context.Context, id string) (bool, *core.ApplicationError) {
+func (d *workItemDataSQL) DeleteIfPending(ctx context.Context, id string) (bool, *core.ApplicationError) {
 	res, err := d.DB.NewDelete().TableExpr(store.TableWorkItems).
 		Where("id = ? AND status = ?", id, store.StatusPending).
 		Exec(ctx)
@@ -237,11 +237,11 @@ func (d *WorkItemDataSQL) DeleteIfPending(ctx context.Context, id string) (bool,
 	return affected == 1, nil
 }
 
-func (d *WorkItemDataSQL) GetById(ctx context.Context, id string) (*store.WorkItem, *core.ApplicationError) {
+func (d *workItemDataSQL) GetById(ctx context.Context, id string) (*store.WorkItem, *core.ApplicationError) {
 	return coresql.GetById[store.WorkItem](ctx, d.DB, id)
 }
 
-func (d *WorkItemDataSQL) HasActive(ctx context.Context, workType, objectId string) (bool, *core.ApplicationError) {
+func (d *workItemDataSQL) HasActive(ctx context.Context, workType, objectId string) (bool, *core.ApplicationError) {
 	var count int
 	if err := d.DB.NewSelect().TableExpr(store.TableWorkItems).
 		ColumnExpr("COUNT(*)").
@@ -256,7 +256,7 @@ func (d *WorkItemDataSQL) HasActive(ctx context.Context, workType, objectId stri
 // InsertIfNotActive inserts each item only if no active (PENDING or IN_PROGRESS) entry
 // exists for the same (type, object_id). Relies on the partial unique index
 // uk_workitem_active — call EnsureIndexes at startup to create it.
-func (d *WorkItemDataSQL) InsertIfNotActive(ctx context.Context, items []*store.WorkItem) (int, *core.ApplicationError) {
+func (d *workItemDataSQL) InsertIfNotActive(ctx context.Context, items []*store.WorkItem) (int, *core.ApplicationError) {
 	if len(items) == 0 {
 		return 0, nil
 	}
@@ -272,7 +272,7 @@ func (d *WorkItemDataSQL) InsertIfNotActive(ctx context.Context, items []*store.
 	return int(affected), nil
 }
 
-func (d *WorkItemDataSQL) List(ctx context.Context, workType, status string, paging *page.Paging, sort page.SortRequest) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemDataSQL) List(ctx context.Context, workType, status string, paging *page.Paging, sort page.SortRequest) ([]*store.WorkItem, *core.ApplicationError) {
 	q := d.DB.NewSelect().TableExpr(store.TableWorkItems).Where("type = ?", workType)
 	if status != "" {
 		q = q.Where("status = ?", status)
@@ -310,7 +310,7 @@ func (d *WorkItemDataSQL) List(ctx context.Context, workType, status string, pag
 	return items, nil
 }
 
-// EnsureIndexes creates the indexes required by WorkItemDataSQL. Call once at application startup.
+// EnsureIndexes creates the indexes required by workItemDataSQL. Call once at application startup.
 // The partial unique index uk_workitem_active prevents concurrent insertion of duplicate
 // active (PENDING or IN_PROGRESS) items for the same (type, object_id).
 func EnsureIndexes(ctx context.Context, db *bun.DB) error {

@@ -4,8 +4,8 @@
 //
 // Wiring (stile go-core-app): chiamare kafkajob.Module(cfg) o kafkajob.ModuleIf(cfg, modes...) in un
 // init(). La *kafka.Config viene passata come parametro e fornita a fx dal Module stesso (core.Supply
-// interno): l'app non deve più fare core.Supply. L'app fornisce solo store.IWorkItemStore via core.Provides
-// (mongostore.NewWorkItemData oppure sqlstore.NewWorkItemDataSQL).
+// interno): l'app non deve più fare core.Supply. L'app fornisce store.IWorkItemStore chiamando
+// mongostore.Module() oppure sqlstore.Module().
 //
 // Il ProducerService Kafka vive nel package internal/kafkaproducer: NON è importabile dalle
 // applicazioni, quindi non è iniettabile in un runner. Per inviare una notifica si crea un

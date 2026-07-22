@@ -2,7 +2,9 @@ package kafkaproducer
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/kafka"
@@ -51,6 +53,26 @@ func (kgoLogger) Log(level kgo.LogLevel, msg string, keyvals ...any) {
 	e.Msg(msg)
 }
 
+// buildTLSConfig costruisce la tls.Config per il dial verso i broker. Se caLocation è
+// valorizzato, il PEM (tipicamente il truststore con la CA privata) viene caricato in RootCAs:
+// senza questo, con una CA non nei root di sistema, la verifica fallisce con
+// "x509: certificate signed by unknown authority". skipVerify disabilita la verifica (insicuro).
+func buildTLSConfig(caLocation string, skipVerify bool) (*tls.Config, error) {
+	cfg := &tls.Config{InsecureSkipVerify: skipVerify}
+	if caLocation != "" {
+		pem, err := os.ReadFile(caLocation)
+		if err != nil {
+			return nil, fmt.Errorf("lettura ca-location %q: %w", caLocation, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("nessun certificato valido in ca-location %q", caLocation)
+		}
+		cfg.RootCAs = pool
+	}
+	return cfg, nil
+}
+
 // buildKafkaOptions traduce la *kafka.Config in opzioni franz-go. È plumbing
 // interno al producer: NON fa parte dell'API pubblica del package kafka.
 func buildKafkaOptions(cfgKafka *kafka.Config, extraConfig map[string]interface{}) []kgo.Opt {
@@ -62,12 +84,11 @@ func buildKafkaOptions(cfgKafka *kafka.Config, extraConfig map[string]interface{
 	// Security Protocol & SASL
 	switch cfgKafka.SecurityProtocol {
 	case "SSL":
-		tlsCfg := &tls.Config{
-			InsecureSkipVerify: cfgKafka.SSL.SkipVerify,
+		if tlsCfg, err := buildTLSConfig(cfgKafka.SSL.CaLocation, cfgKafka.SSL.SkipVerify); err != nil {
+			log.Error().Err(err).Msg("Kafka TLS (SSL): impossibile costruire la tls.Config")
+		} else {
+			opts = append(opts, kgo.DialTLSConfig(tlsCfg))
 		}
-		// Nota: Per caricare CA da file (CaLocation) servirebbe leggere il file e aggiungerlo a RootCAs
-		// Per ora manteniamo la logica di skip verify se configurato
-		opts = append(opts, kgo.DialTLSConfig(tlsCfg))
 
 	case "SASL_SSL", "SASL":
 		var mechanism sasl.Mechanism
@@ -97,10 +118,11 @@ func buildKafkaOptions(cfgKafka *kafka.Config, extraConfig map[string]interface{
 		opts = append(opts, kgo.SASL(mechanism))
 
 		if cfgKafka.SecurityProtocol == "SASL_SSL" || cfgKafka.SecurityProtocol == "SSL" {
-			tlsCfg := &tls.Config{
-				InsecureSkipVerify: cfgKafka.SASL.SkipVerify,
+			if tlsCfg, err := buildTLSConfig(cfgKafka.SASL.CaLocation, cfgKafka.SASL.SkipVerify); err != nil {
+				log.Error().Err(err).Msg("Kafka TLS (SASL_SSL): impossibile costruire la tls.Config")
+			} else {
+				opts = append(opts, kgo.DialTLSConfig(tlsCfg))
 			}
-			opts = append(opts, kgo.DialTLSConfig(tlsCfg))
 		}
 	default:
 		log.Trace().Str(kafka.SecurityProtocolPropertyName, cfgKafka.SecurityProtocol).Msg("No special security protocol configured")

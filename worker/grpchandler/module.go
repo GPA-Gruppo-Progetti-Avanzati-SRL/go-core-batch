@@ -34,18 +34,20 @@ func wire(p moduleParams) {
 
 // Module provvede il gRPC Server e wire il worker pool usando i TaskRunner registrati,
 // incondizionatamente. Call once (e.g. in an init()) in the worker process.
-// La *grpc.ServerConfig è passata come parametro e fornita a fx dal Module stesso
-// (core.Supply interno): l'app non deve più fare core.Supply. L'app fornisce solo
-// []worker.Config (pool size per task type).
-func Module(cfg *batchgrpc.ServerConfig) {
-	core.Supply(cfg)
+// La *grpc.ServerConfig e la []worker.Config (pool size per task type) sono passate come
+// parametri e fornite a fx dal Module stesso (core.Supply interno): l'app non deve più
+// fare core.Supply.
+func Module(grpcCfg *batchgrpc.ServerConfig, workerCfg []worker.Config) {
+	core.Supply(grpcCfg)
+	core.Supply(workerCfg)
 	core.Provides(grpctransport.NewServer)
 	core.Invoke(wire)
 }
 
 // ModuleIf è come Module ma attivo solo quando core.Mode è tra i modes indicati.
-func ModuleIf(cfg *batchgrpc.ServerConfig, modes ...string) {
-	core.SupplyIf(cfg, modes...)
+func ModuleIf(grpcCfg *batchgrpc.ServerConfig, workerCfg []worker.Config, modes ...string) {
+	core.SupplyIf(grpcCfg, modes...)
+	core.SupplyIf(workerCfg, modes...)
 	core.ProvidesIf(grpctransport.NewServer, modes...)
 	core.InvokeIf(wire, modes...)
 }
