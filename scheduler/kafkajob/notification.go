@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/kafkaproducer"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/kafka"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
@@ -24,7 +25,7 @@ var tracer = otel.Tracer("NotificationKafkaJob")
 const defaultKafkaOrphanTimeout = 10 * time.Minute
 const defaultKafkaLimit = 100
 
-func makeNotificationJobFactory(producer *kafka.ProducerService, items store.IWorkItemStore) scheduler.JobFactory {
+func makeNotificationJobFactory(producer *kafkaproducer.ProducerService, items store.IWorkItemStore) scheduler.JobFactory {
 	return func(name string, s *scheduler.Services, config scheduler.Config) gocron.Task {
 		return gocron.NewTask(func() error {
 			return notificationJobRun(name, producer, items, config)
@@ -32,7 +33,7 @@ func makeNotificationJobFactory(producer *kafka.ProducerService, items store.IWo
 	}
 }
 
-func notificationJobRun(name string, producer *kafka.ProducerService, items store.IWorkItemStore, config scheduler.Config) error {
+func notificationJobRun(name string, producer *kafkaproducer.ProducerService, items store.IWorkItemStore, config scheduler.Config) error {
 	p := config.Properties
 	jobId := jobID(name)
 
@@ -80,33 +81,18 @@ func notificationJobRun(name string, producer *kafka.ProducerService, items stor
 	)
 	defer span.End()
 
-	// 1. Re-claim orphans
-	orphans, appErr := items.RecoverOrphans(spanCtx, JobType, destination, object, orphanTimeout, limit)
+	// 1+2. Recupero orfani + claim dei PENDING freschi — loop comune (store.ClaimBatch).
+	all, norph, nfresh, appErr := store.ClaimBatch(spanCtx, items, jobId, JobType, destination, object, orphanTimeout, limit)
 	if appErr != nil {
-		log.Warn().Err(appErr).Msgf("[%s] orphan recovery failed", jobId)
-		orphans = nil
-	} else if len(orphans) > 0 {
-		log.Info().Msgf("[%s] re-claimed %d orphaned item(s)", jobId, len(orphans))
+		span.RecordError(appErr)
+		log.Error().Err(appErr).Msgf("[%s] ClaimPending failed", jobId)
+		return appErr
 	}
-
-	// 2. Claim fresh PENDING items
-	remaining := limit - len(orphans)
-	var fresh []*store.WorkItem
-	if remaining > 0 {
-		fresh, appErr = items.ClaimPending(spanCtx, JobType, destination, object, remaining)
-		if appErr != nil {
-			span.RecordError(appErr)
-			log.Error().Err(appErr).Msgf("[%s] ClaimPending failed", jobId)
-			return appErr
-		}
-	}
-
-	all := append(orphans, fresh...)
 	if len(all) == 0 {
 		log.Trace().Msgf("[%s] no pending items", jobId)
 		return nil
 	}
-	log.Info().Msgf("[%s] processing %d item(s) (%d orphaned, %d fresh)", jobId, len(all), len(orphans), len(fresh))
+	log.Info().Msgf("[%s] processing %d item(s) (%d orphaned, %d fresh)", jobId, len(all), norph, nfresh)
 
 	ids, kafkaMsgs := prepareMessages(all)
 	if len(kafkaMsgs) == 0 {

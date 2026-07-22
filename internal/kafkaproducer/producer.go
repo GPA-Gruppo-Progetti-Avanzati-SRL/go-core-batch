@@ -1,4 +1,9 @@
-package kafka
+// Package kafkaproducer contiene il ProducerService Kafka. È un package INTERNAL: importabile
+// solo da codice dentro go-core-batch (es. scheduler/kafkajob), NON dalle applicazioni.
+// In questo modo il producer non è iniettabile nei runner dell'app: l'unico modo di mandare
+// su Kafka è creare un WorkItem di tipo "NotificationKafka" (outbox), drenato dal job.
+// I tipi pubblici Config e Message restano nel package kafka.
+package kafkaproducer
 
 import (
 	"context"
@@ -8,7 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/kafka"
 	"github.com/rs/zerolog/log"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/plugin/kotel"
@@ -18,11 +24,11 @@ import (
 
 type ProducerService struct {
 	client         *kgo.Client
-	producerConfig *Config
+	producerConfig *kafka.Config
 	mu             sync.Mutex
 }
 
-func NewProducerService(lc fx.Lifecycle, cfg *Config) *ProducerService {
+func NewProducerService(lc fx.Lifecycle, cfg *kafka.Config) *ProducerService {
 	ks := &ProducerService{producerConfig: cfg}
 
 	lc.Append(fx.Hook{
@@ -51,9 +57,9 @@ func NewProducerService(lc fx.Lifecycle, cfg *Config) *ProducerService {
 	return ks
 }
 
-func newKafkaProducer(cfgKafka *Config) (*kgo.Client, error) {
+func newKafkaClient(cfgKafka *kafka.Config) (*kgo.Client, error) {
 
-	opts := NewKafkaOptions(cfgKafka, cfgKafka.Producer.ExtraConfig)
+	opts := kafka.NewKafkaOptions(cfgKafka, cfgKafka.Producer.ExtraConfig)
 
 	// Opzioni specifiche del producer
 	if cfgKafka.Producer.Acks != "" {
@@ -89,7 +95,7 @@ func newKafkaProducer(cfgKafka *Config) (*kgo.Client, error) {
 	return client, nil
 }
 
-func (ks *ProducerService) ProduceMessages(ctx context.Context, messages []*Message, topic string) *core.ApplicationError {
+func (ks *ProducerService) ProduceMessages(ctx context.Context, messages []*kafka.Message, topic string) *core.ApplicationError {
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
 	if ks.client == nil {
@@ -203,7 +209,7 @@ func (ks *ProducerService) initProducer(ctx context.Context) error {
 
 	log.Info().Msg("Producer not initialized... Initializing producer")
 	var errProd error
-	if ks.client, errProd = newKafkaProducer(ks.producerConfig); errProd != nil {
+	if ks.client, errProd = newKafkaClient(ks.producerConfig); errProd != nil {
 		log.Error().Err(errProd).Msg("Failed to create Kafka producer")
 		return core.TechnicalErrorWithError(errProd)
 	}
