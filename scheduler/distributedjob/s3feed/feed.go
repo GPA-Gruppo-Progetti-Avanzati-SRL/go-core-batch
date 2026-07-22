@@ -6,7 +6,7 @@ import (
 	"path"
 	"time"
 
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/s3"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/s3client"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"github.com/google/uuid"
 )
@@ -21,11 +21,11 @@ type S3Payload struct {
 
 // S3Feed implements distributedjob.IFeedSource by listing objects in an S3 bucket.
 type S3Feed struct {
-	reg *s3.Registry
+	reg *s3client.Registry
 }
 
 // New creates an S3Feed backed by the given registry.
-func New(reg *s3.Registry) *S3Feed {
+func New(reg *s3client.Registry) *S3Feed {
 	return &S3Feed{reg: reg}
 }
 

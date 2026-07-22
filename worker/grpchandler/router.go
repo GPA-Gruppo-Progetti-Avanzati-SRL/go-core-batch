@@ -7,8 +7,8 @@ import (
 	"context"
 	"errors"
 
-	batchgrpc "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/grpc"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/grpc/proto"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/grpctransport"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/worker"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
@@ -21,7 +21,7 @@ type Router[T any] struct {
 	taskServices worker.ITaskService[T]
 }
 
-func NewRouter[T any](w *worker.Workers[T], gs *batchgrpc.Server, service worker.ITaskService[T]) *Router[T] {
+func NewRouter[T any](w *worker.Workers[T], gs *grpctransport.Server, service worker.ITaskService[T]) *Router[T] {
 	r := &Router[T]{workers: w, taskServices: service}
 	proto.RegisterDistributionChannelServer(gs, r)
 	return r

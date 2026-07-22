@@ -59,7 +59,7 @@ func NewProducerService(lc fx.Lifecycle, cfg *kafka.Config) *ProducerService {
 
 func newKafkaClient(cfgKafka *kafka.Config) (*kgo.Client, error) {
 
-	opts := kafka.NewKafkaOptions(cfgKafka, cfgKafka.Producer.ExtraConfig)
+	opts := buildKafkaOptions(cfgKafka, cfgKafka.Producer.ExtraConfig)
 
 	// Opzioni specifiche del producer
 	if cfgKafka.Producer.Acks != "" {

@@ -1,4 +1,4 @@
-package grpc
+package grpctransport
 
 import (
 	"context"
@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"time"
+
+	batchgrpc "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/grpc"
 
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -22,7 +24,7 @@ type Server struct {
 	*gogrpc.Server
 }
 
-func NewServer(lc fx.Lifecycle, sh fx.Shutdowner, config *ServerConfig) *Server {
+func NewServer(lc fx.Lifecycle, sh fx.Shutdowner, config *batchgrpc.ServerConfig) *Server {
 	opts := []gogrpc.ServerOption{
 		gogrpc.KeepaliveParams(keepalive.ServerParameters{
 			MaxConnectionAge: time.Minute * 5,

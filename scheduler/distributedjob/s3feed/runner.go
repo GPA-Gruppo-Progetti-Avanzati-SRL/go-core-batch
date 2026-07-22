@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"path"
 
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/s3"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/s3client"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/runner"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"github.com/rs/zerolog/log"
@@ -15,7 +15,7 @@ import (
 // fileRunner wraps a runner.IFileRunner and handles S3 download/move lifecycle.
 // It implements runner.ITaskRunner so it can be registered in the MuxRunner.
 type fileRunner struct {
-	reg   *s3.Registry
+	reg   *s3client.Registry
 	inner runner.IFileRunner
 }
 
@@ -81,6 +81,6 @@ func decodePayload(raw any, out *S3Payload) error {
 }
 
 // newFileRunner creates a fileRunner that wraps the given IFileRunner with S3 lifecycle.
-func newFileRunner(reg *s3.Registry, inner runner.IFileRunner) *fileRunner {
+func newFileRunner(reg *s3client.Registry, inner runner.IFileRunner) *fileRunner {
 	return &fileRunner{reg: reg, inner: inner}
 }

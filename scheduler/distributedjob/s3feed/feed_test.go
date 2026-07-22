@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/s3"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/s3client"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 )
 
@@ -78,7 +78,7 @@ func TestS3Feed_Feed_FiltersAndLimits(t *testing.T) {
 	})
 
 	t.Run("unknown service returns error", func(t *testing.T) {
-		reg, _ := s3.NewRegistry(nil) // empty registry
+		reg, _ := s3client.NewRegistry(nil) // empty registry
 		feed := New(reg)
 		props := map[string]string{
 			"service": "nonexistent",

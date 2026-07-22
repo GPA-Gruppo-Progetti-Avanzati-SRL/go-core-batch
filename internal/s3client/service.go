@@ -1,4 +1,8 @@
-package s3
+// Package s3client contiene l'implementazione dei client S3 del framework batch.
+// È un package INTERNAL: importabile solo da codice dentro go-core-batch (s3feed),
+// NON dalle applicazioni. I tipi di config pubblici (Config/ServiceConfig) restano
+// nel package s3.
+package s3client
 
 import (
 	"context"

@@ -1,17 +1,7 @@
 package kafka
 
 import (
-	"crypto/tls"
-	"fmt"
-	"reflect"
-	"strings"
 	"time"
-
-	"github.com/rs/zerolog/log"
-	"github.com/twmb/franz-go/pkg/kgo"
-	"github.com/twmb/franz-go/pkg/sasl"
-	"github.com/twmb/franz-go/pkg/sasl/plain"
-	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
 const (
@@ -50,109 +40,6 @@ const (
 
 	KafkaNumberOfDeliveryAttemptsHeaderName = "Kafka-Delivery-Attempts"
 )
-
-func NewKafkaOptions(cfgKafka *Config, extraConfig map[string]interface{}) []kgo.Opt {
-	opts := []kgo.Opt{
-		kgo.SeedBrokers(strings.Split(cfgKafka.BootstrapServer, ",")...),
-	}
-
-	// Security Protocol & SASL
-	switch cfgKafka.SecurityProtocol {
-	case "SSL":
-		tlsCfg := &tls.Config{
-			InsecureSkipVerify: cfgKafka.SSL.SkipVerify,
-		}
-		// Nota: Per caricare CA da file (CaLocation) servirebbe leggere il file e aggiungerlo a RootCAs
-		// Per ora manteniamo la logica di skip verify se configurato
-		opts = append(opts, kgo.DialTLSConfig(tlsCfg))
-
-	case "SASL_SSL", "SASL":
-		var mechanism sasl.Mechanism
-		switch strings.ToUpper(cfgKafka.SASL.Mechanisms) {
-		case "PLAIN":
-			mechanism = plain.Auth{
-				User: cfgKafka.SASL.Username,
-				Pass: cfgKafka.SASL.Password,
-			}.AsMechanism()
-		case "SCRAM-SHA-256":
-			mechanism = scram.Auth{
-				User: cfgKafka.SASL.Username,
-				Pass: cfgKafka.SASL.Password,
-			}.AsSha256Mechanism()
-		case "SCRAM-SHA-512":
-			mechanism = scram.Auth{
-				User: cfgKafka.SASL.Username,
-				Pass: cfgKafka.SASL.Password,
-			}.AsSha512Mechanism()
-		default:
-			log.Warn().Str("mechanism", cfgKafka.SASL.Mechanisms).Msg("Unsupported SASL mechanism, defaulting to PLAIN")
-			mechanism = plain.Auth{
-				User: cfgKafka.SASL.Username,
-				Pass: cfgKafka.SASL.Password,
-			}.AsMechanism()
-		}
-		opts = append(opts, kgo.SASL(mechanism))
-
-		if cfgKafka.SecurityProtocol == "SASL_SSL" || cfgKafka.SecurityProtocol == "SSL" {
-			tlsCfg := &tls.Config{
-				InsecureSkipVerify: cfgKafka.SASL.SkipVerify,
-			}
-			opts = append(opts, kgo.DialTLSConfig(tlsCfg))
-		}
-	default:
-		log.Trace().Str(SecurityProtocolPropertyName, cfgKafka.SecurityProtocol).Msg("No special security protocol configured")
-	}
-
-	// Consumer Group
-	if cfgKafka.GroupId != "" {
-		opts = append(opts, kgo.ConsumerGroup(cfgKafka.GroupId))
-	}
-
-	// Extra Config handling (best effort mapping)
-	for key, value := range extraConfig {
-		k := strings.ReplaceAll(key, "_", ".")
-		switch k {
-		case AcksPropertyName:
-			if s, ok := value.(string); ok {
-				switch s {
-				case "all", "-1":
-					opts = append(opts, kgo.RequiredAcks(kgo.AllISRAcks()))
-				case "1":
-					opts = append(opts, kgo.RequiredAcks(kgo.LeaderAck()))
-				case "0":
-					opts = append(opts, kgo.RequiredAcks(kgo.NoAck()))
-				}
-			}
-		case TransactionalIdPropertyName:
-			if s, ok := value.(string); ok {
-				opts = append(opts, kgo.TransactionalID(s))
-			}
-		case AutoOffsetResetPropertyName:
-			if s, ok := value.(string); ok {
-				switch s {
-				case "earliest":
-					opts = append(opts, kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()))
-				case "latest":
-					opts = append(opts, kgo.ConsumeResetOffset(kgo.NewOffset().AtEnd()))
-				}
-			}
-		default:
-			log.Debug().Str("key", k).Interface("value", value).Msg("Extra config ignored or not directly mappable in NewKafkaOptions")
-		}
-	}
-
-	return opts
-}
-
-func NewKafkaConfigMap(cfgKafka *Config, extraConfig map[string]interface{}) map[string]string {
-	// Questo metodo rimane per compatibilità se usato altrove, ma restituisce una mappa di stringhe
-	res := make(map[string]string)
-	res[BootstrapServersPropertyName] = cfgKafka.BootstrapServer
-	for k, v := range extraConfig {
-		res[strings.ReplaceAll(k, "_", ".")] = fmt.Sprintf("%v", v)
-	}
-	return res
-}
 
 type Config struct {
 	Producer         ProducerConfig `yaml:"producer" mapstructure:"producer" json:"producer"`
@@ -212,19 +99,4 @@ type ProducerConfig struct {
 	ConnectionsMaxIdleMs  int                    `mapstructure:"connections-max-idle-ms,omitempty" json:"connections-max-idle-ms,omitempty" yaml:"connections-max-idle-ms,omitempty"`
 	MetadataMaxIdleMs     int                    `mapstructure:"metadata-max-idle-ms,omitempty" json:"metadata-max-idle-ms,omitempty" yaml:"metadata-max-idle-ms,omitempty"`
 	ExtraConfig           map[string]interface{} `mapstructure:"extra-config,omitempty" json:"extra-config,omitempty" yaml:"extra-config,omitempty"`
-}
-
-// castToType attempts to convert an interface{} to its underlying type using reflection.
-func CastToType(v interface{}) (interface{}, bool) {
-	val := reflect.ValueOf(v)
-	switch val.Kind() {
-	case reflect.String:
-		return v.(string), true
-	case reflect.Int:
-		return v.(int), true
-	case reflect.Bool:
-		return v.(bool), true
-	default:
-		return nil, false
-	}
 }

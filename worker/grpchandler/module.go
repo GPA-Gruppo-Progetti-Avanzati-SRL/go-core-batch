@@ -3,6 +3,7 @@ package grpchandler
 import (
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	batchgrpc "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/grpc"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/grpctransport"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/runner"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/worker"
@@ -19,7 +20,7 @@ type moduleParams struct {
 	fx.In
 	Lifecycle  fx.Lifecycle
 	WorkersCfg []worker.Config
-	GrpcServer *batchgrpc.Server
+	GrpcServer *grpctransport.Server
 	Items      store.IWorkItemStore
 	Data       store.IData
 	Runners    []*runner.TaskRunner `group:"batch_runners"`
@@ -33,15 +34,19 @@ func wire(p moduleParams) {
 
 // Module provvede il gRPC Server e wire il worker pool usando i TaskRunner registrati,
 // incondizionatamente. Call once (e.g. in an init()) in the worker process.
-// L'app deve fornire []worker.Config (pool size per task type) e la *batchgrpc.ServerConfig.
-func Module() {
-	core.Provides(batchgrpc.NewServer)
+// La *grpc.ServerConfig è passata come parametro e fornita a fx dal Module stesso
+// (core.Supply interno): l'app non deve più fare core.Supply. L'app fornisce solo
+// []worker.Config (pool size per task type).
+func Module(cfg *batchgrpc.ServerConfig) {
+	core.Supply(cfg)
+	core.Provides(grpctransport.NewServer)
 	core.Invoke(wire)
 }
 
 // ModuleIf è come Module ma attivo solo quando core.Mode è tra i modes indicati.
-func ModuleIf(modes ...string) {
-	core.ProvidesIf(batchgrpc.NewServer, modes...)
+func ModuleIf(cfg *batchgrpc.ServerConfig, modes ...string) {
+	core.SupplyIf(cfg, modes...)
+	core.ProvidesIf(grpctransport.NewServer, modes...)
 	core.InvokeIf(wire, modes...)
 }
 

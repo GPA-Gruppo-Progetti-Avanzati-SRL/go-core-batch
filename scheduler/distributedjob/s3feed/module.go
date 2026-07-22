@@ -5,7 +5,7 @@
 // Usage:
 //
 //	func init() {
-//	    s3feed.Module()
+//	    s3feed.Module(cfg.S3)
 //	    runner.RegisterFile[myS3Runner]("S3_IMPORT")
 //	}
 //
@@ -17,7 +17,7 @@ package s3feed
 
 import (
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
-	batch "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/s3client"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/s3"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/runner"
@@ -25,11 +25,11 @@ import (
 	"go.uber.org/fx"
 )
 
-func provideRegistry(cfg batch.Config) (*s3.Registry, error) {
-	return s3.NewRegistry(&cfg.S3)
+func provideRegistry(cfg s3.Config) (*s3client.Registry, error) {
+	return s3client.NewRegistry(&cfg)
 }
 
-func wrapFileRunners(reg *s3.Registry, fileRunners []*runner.FileTaskRunner) []*runner.TaskRunner {
+func wrapFileRunners(reg *s3client.Registry, fileRunners []*runner.FileTaskRunner) []*runner.TaskRunner {
 	wrapped := make([]*runner.TaskRunner, len(fileRunners))
 	for i, fr := range fileRunners {
 		wrapped[i] = runner.New(fr.TaskType, newFileRunner(reg, fr.Runner))
@@ -46,7 +46,7 @@ func wrappedRunnersProvide() interface{} {
 	)
 }
 
-func registerS3(d distributedjob.ITaskDispatcher, items store.IWorkItemStore, data store.IData, reg *s3.Registry) {
+func registerS3(d distributedjob.ITaskDispatcher, items store.IWorkItemStore, data store.IData, reg *s3client.Registry) {
 	feed := New(reg)
 	distributedjob.RegisterByS3File(d, items, feed, data)
 }
@@ -55,14 +55,18 @@ func registerS3(d distributedjob.ITaskDispatcher, items store.IWorkItemStore, da
 // It provides the S3 Registry, builds the S3Feed, registers the job,
 // and wraps all FileTaskRunners with S3 download/move lifecycle,
 // injecting them into the batch_runners group for the MuxRunner.
-func Module() {
+// La s3.Config è passata come parametro e fornita a fx dal Module stesso
+// (core.Supply interno): l'app non deve più fare core.Supply.
+func Module(cfg s3.Config) {
+	core.Supply(cfg)
 	core.Provides(provideRegistry)
 	core.Provides(wrappedRunnersProvide())
 	core.Invoke(registerS3)
 }
 
 // ModuleIf è come Module ma attivo solo quando core.Mode è tra i modes indicati.
-func ModuleIf(modes ...string) {
+func ModuleIf(cfg s3.Config, modes ...string) {
+	core.SupplyIf(cfg, modes...)
 	core.ProvidesIf(provideRegistry, modes...)
 	core.ProvidesIf(wrappedRunnersProvide(), modes...)
 	core.InvokeIf(registerS3, modes...)

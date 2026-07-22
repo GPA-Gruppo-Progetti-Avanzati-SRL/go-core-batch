@@ -1,11 +1,13 @@
-package s3
+package s3client
 
 import (
 	"fmt"
 
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/s3"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 // Registry holds named S3 Service instances, one per configured service.
@@ -15,7 +17,7 @@ type Registry struct {
 
 // NewRegistry creates a Registry from the given Config, initializing an S3 client
 // for each entry in Config.Services.
-func NewRegistry(cfg *Config) (*Registry, error) {
+func NewRegistry(cfg *s3.Config) (*Registry, error) {
 	if cfg == nil || len(cfg.Services) == 0 {
 		return &Registry{services: map[string]*Service{}}, nil
 	}
@@ -36,25 +38,25 @@ func (r *Registry) Get(name string) (*Service, bool) {
 	return svc, ok
 }
 
-func newServiceFromConfig(sc *ServiceConfig) (*Service, error) {
+func newServiceFromConfig(sc *s3.ServiceConfig) (*Service, error) {
 	region := sc.Region
 	if region == "" {
 		region = "us-east-1"
 	}
 
-	opts := []func(*s3.Options){
-		func(o *s3.Options) {
+	opts := []func(*awss3.Options){
+		func(o *awss3.Options) {
 			o.Region = region
 			o.Credentials = credentials.NewStaticCredentialsProvider(sc.AccessKey, sc.SecretKey, "")
 			o.UsePathStyle = sc.UsePathStyle
 		},
 	}
 	if sc.Endpoint != "" {
-		opts = append(opts, func(o *s3.Options) {
+		opts = append(opts, func(o *awss3.Options) {
 			o.BaseEndpoint = aws.String(sc.Endpoint)
 		})
 	}
 
-	client := s3.New(s3.Options{}, opts...)
+	client := awss3.New(awss3.Options{}, opts...)
 	return NewService(client, sc.Bucket), nil
 }
