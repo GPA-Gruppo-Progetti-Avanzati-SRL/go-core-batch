@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/page"
 	mongo "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/tpm-mongo-common/mongolks"
+	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	mgodriver "go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -32,11 +34,44 @@ func (f workItemFilter) GetFilterCollectionName(ctx context.Context) string {
 
 // WorkItemData implements store.IWorkItemStore using MongoDB.
 type WorkItemData struct {
-	Service *mongolks.LinkedService
+	Service     *mongolks.LinkedService
+	idxWarnOnce sync.Once
 }
 
 func NewWorkItemData(ms *mongolks.LinkedService) *WorkItemData {
 	return &WorkItemData{Service: ms}
+}
+
+// warnIfActiveIndexMissing logga (una sola volta) un warning se l'indice partiale unico
+// uk_workitem_active non esiste sulla collection work_items. Senza quell'indice
+// InsertIfNotActive NON deduplica (nessun duplicate-key da intercettare) → rischio di
+// work item duplicati e doppia esecuzione. L'indice NON viene creato in automatico
+// (gestione manuale via EnsureIndexes o migration/ops): il warning serve a rendere
+// l'eventuale assenza una scelta consapevole, non una svista.
+func (d *WorkItemData) warnIfActiveIndexMissing(ctx context.Context) {
+	d.idxWarnOnce.Do(func() {
+		coll := d.Service.GetCollection(store.CollectionWorkItems, "")
+		cur, err := coll.Indexes().List(ctx)
+		if err != nil {
+			log.Warn().Err(err).Str("collection", store.CollectionWorkItems).
+				Msg("go-core-batch: impossibile verificare l'indice uk_workitem_active")
+			return
+		}
+		defer cur.Close(ctx)
+		var idx []bson.M
+		if err := cur.All(ctx, &idx); err != nil {
+			log.Warn().Err(err).Str("collection", store.CollectionWorkItems).
+				Msg("go-core-batch: impossibile leggere gli indici di work_items")
+			return
+		}
+		for _, ix := range idx {
+			if name, _ := ix["name"].(string); name == "uk_workitem_active" {
+				return
+			}
+		}
+		log.Warn().Str("collection", store.CollectionWorkItems).
+			Msg("go-core-batch: indice partiale unico 'uk_workitem_active' ASSENTE — InsertIfNotActive NON deduplica (rischio work item duplicati / doppia esecuzione). Crearlo via mongostore.EnsureIndexes o migration, oppure confermare che l'assenza è voluta.")
+	})
 }
 
 var _ store.IWorkItemStore = (*WorkItemData)(nil)
@@ -272,6 +307,7 @@ func (d *WorkItemData) InsertIfNotActive(ctx context.Context, items []*store.Wor
 	if len(items) == 0 {
 		return 0, nil
 	}
+	d.warnIfActiveIndexMissing(ctx)
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	var inserted int
 	for _, item := range items {

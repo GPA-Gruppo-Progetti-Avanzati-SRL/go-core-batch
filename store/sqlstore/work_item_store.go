@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/page"
 	coresql "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-sql"
+	"github.com/rs/zerolog/log"
 
 	"github.com/uptrace/bun"
 
@@ -30,7 +32,8 @@ func (f workItemFilter) GetFilterTableName(ctx context.Context) string {
 
 // WorkItemDataSQL implements store.IWorkItemStore using a SQL database via bun.
 type WorkItemDataSQL struct {
-	DB *bun.DB
+	DB          *bun.DB
+	idxWarnOnce sync.Once
 }
 
 func NewWorkItemDataSQL(db *bun.DB) *WorkItemDataSQL {
@@ -38,6 +41,25 @@ func NewWorkItemDataSQL(db *bun.DB) *WorkItemDataSQL {
 }
 
 var _ store.IWorkItemStore = (*WorkItemDataSQL)(nil)
+
+// warnIfActiveIndexMissing logga (una sola volta) un warning se l'indice partiale unico
+// uk_workitem_active non esiste. Senza quell'indice InsertIfNotActive (ON CONFLICT DO NOTHING)
+// non deduplica → rischio work item duplicati e doppia esecuzione. L'indice NON viene creato
+// in automatico (gestione manuale via EnsureIndexes o migration/ops).
+func (d *WorkItemDataSQL) warnIfActiveIndexMissing(ctx context.Context) {
+	d.idxWarnOnce.Do(func() {
+		var n int
+		if err := d.DB.NewRaw(
+			"SELECT COUNT(*) FROM pg_indexes WHERE indexname = ?", "uk_workitem_active",
+		).Scan(ctx, &n); err != nil {
+			log.Warn().Err(err).Msg("go-core-batch: impossibile verificare l'indice uk_workitem_active")
+			return
+		}
+		if n == 0 {
+			log.Warn().Msg("go-core-batch: indice partiale unico 'uk_workitem_active' ASSENTE su work_items — InsertIfNotActive NON deduplica (rischio work item duplicati / doppia esecuzione). Crearlo via sqlstore.EnsureIndexes o migration, oppure confermare che l'assenza è voluta.")
+		}
+	})
+}
 
 func (d *WorkItemDataSQL) FindPending(ctx context.Context, workType, destination, objectType string) ([]*store.WorkItem, *core.ApplicationError) {
 	filter := workItemFilter{
@@ -238,6 +260,7 @@ func (d *WorkItemDataSQL) InsertIfNotActive(ctx context.Context, items []*store.
 	if len(items) == 0 {
 		return 0, nil
 	}
+	d.warnIfActiveIndexMissing(ctx)
 	res, err := d.DB.NewInsert().
 		Model(&items).
 		On("CONFLICT DO NOTHING").
