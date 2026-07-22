@@ -70,35 +70,20 @@ func jobRunWithClaiming(name string, dispatcher ITaskDispatcher, items store.IWo
 		runFeedPhase(spanCtx, feed, items, jobId, taskType, p, ilimit)
 	}
 
-	// 1. Re-claim orphans from previous crashed runs (refresh locked_at, keep IN_PROGRESS)
-	orphans, appErr := items.RecoverOrphans(spanCtx, taskType, "", "", orphanTimeout, ilimit)
+	// 1+2. Recupero orfani (IN_PROGRESS scaduti) + claim dei PENDING freschi — loop comune (store.ClaimBatch).
+	all, norph, nfresh, appErr := store.ClaimBatch(spanCtx, items, jobId, taskType, "", "", orphanTimeout, ilimit)
 	if appErr != nil {
-		log.Warn().Err(appErr).Msgf("[%s] orphan recovery failed", jobId)
-		orphans = nil
-	} else if len(orphans) > 0 {
-		log.Info().Msgf("[%s] re-claimed %d orphaned task(s) (timeout=%s)", jobId, len(orphans), orphanTimeout)
+		span.RecordError(appErr)
+		span.SetStatus(codes.Error, "claim failed")
+		log.Error().Err(appErr).Msgf("[%s] ClaimPending failed", jobId)
+		return appErr
 	}
-
-	// 2. Claim fresh PENDING items up to the remaining capacity
-	remaining := ilimit - len(orphans)
-	var fresh []*store.WorkItem
-	if remaining > 0 {
-		fresh, appErr = items.ClaimPending(spanCtx, taskType, "", "", remaining)
-		if appErr != nil {
-			span.RecordError(appErr)
-			span.SetStatus(codes.Error, "claim failed")
-			log.Error().Err(appErr).Msgf("[%s] ClaimPending failed", jobId)
-			return appErr
-		}
-	}
-
-	all := append(orphans, fresh...)
 	if len(all) == 0 {
 		log.Trace().Msgf("[%s] no pending items", jobId)
 		return nil
 	}
 
-	log.Info().Msgf("[%s] processing %d item(s) (%d orphaned, %d fresh)", jobId, len(all), len(orphans), len(fresh))
+	log.Info().Msgf("[%s] processing %d item(s) (%d orphaned, %d fresh)", jobId, len(all), norph, nfresh)
 
 	// 3. Dispatch each item
 	for i, item := range all {

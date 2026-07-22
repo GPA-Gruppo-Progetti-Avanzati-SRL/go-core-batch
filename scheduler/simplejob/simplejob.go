@@ -160,29 +160,15 @@ func run(name, workType string, selfFeed bool, timeout, orphanTimeout time.Durat
 		}
 	}
 
-	// 1. Re-claim orphans from previous crashed/timed-out runs (kept IN_PROGRESS,
-	// locked_at refreshed) so they are reprocessed instead of stuck forever.
-	orphans, appErr := items.RecoverOrphans(ctx, workType, "", "", orphanTimeout, limit)
-	if appErr != nil {
-		log.Warn().Err(appErr).Msgf("[%s] orphan recovery failed", jobID)
-		orphans = nil
-	} else if len(orphans) > 0 {
-		log.Info().Msgf("[%s] re-claimed %d orphaned item(s) (timeout=%s)", jobID, len(orphans), orphanTimeout)
-	}
-
-	// 2. Claim fresh PENDING items up to the remaining capacity. ClaimPending marks
-	// them IN_PROGRESS atomically, which is the precondition for MarkDone/MarkFailed/MarkPending.
-	pending := orphans
-	if remaining := limit - len(orphans); remaining > 0 {
-		fresh, claimErr := items.ClaimPending(ctx, workType, "", "", remaining)
-		if claimErr != nil {
-			log.Error().Err(claimErr).Msgf("[%s] ClaimPending failed", jobID)
-			if len(pending) == 0 {
-				return claimErr
-			}
-		} else {
-			pending = append(pending, fresh...)
+	// 1+2. Recupero orfani + claim dei PENDING freschi — loop comune (store.ClaimBatch).
+	// ClaimPending marca gli item IN_PROGRESS atomicamente (precondizione per MarkDone/Failed/Pending).
+	pending, _, _, claimErr := store.ClaimBatch(ctx, items, jobID, workType, "", "", orphanTimeout, limit)
+	if claimErr != nil {
+		log.Error().Err(claimErr).Msgf("[%s] ClaimPending failed", jobID)
+		if len(pending) == 0 {
+			return claimErr
 		}
+		// altrimenti si processano comunque gli orfani già recuperati
 	}
 	if len(pending) == 0 {
 		log.Trace().Msgf("[%s] no pending items", jobID)
