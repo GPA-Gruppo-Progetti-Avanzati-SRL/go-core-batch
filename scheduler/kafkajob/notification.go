@@ -2,6 +2,7 @@ package kafkajob
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -134,28 +135,23 @@ func prepareMessages(items []*store.WorkItem) ([]string, []*kafka.Message) {
 	var out []*kafka.Message
 
 	for _, item := range items {
-		d, ok := item.Payload.(bson.D)
+		native, ok := normalizePayload(item.Payload)
 		if !ok {
-			log.Error().Msgf("Payload non atteso per work item %s: %T", item.Id, item.Payload)
+			log.Error().Msgf("Payload di tipo non gestito per work item %s: %T", item.Id, item.Payload)
 			continue
 		}
-		kMap := make(map[string]interface{})
-		if err := decodeBsonD(d, &kMap); err != nil {
-			log.Error().Err(err).Msgf("Impossibile decodificare payload work item %s", item.Id)
-			continue
-		}
-		messageKey, ok := kMap["messageKey"]
+		messageKey, ok := native["messageKey"]
 		if !ok {
 			log.Error().Msgf("messageKey mancante in work item %s", item.Id)
 			continue
 		}
-		messageValue, ok := kMap["messageValue"]
+		messageValue, ok := native["messageValue"]
 		if !ok {
 			log.Error().Msgf("messageValue mancante in work item %s", item.Id)
 			continue
 		}
 		km := &kafka.Message{MessageKey: messageKey, MessageValue: messageValue}
-		if headersRaw, ok := kMap["messageHeaders"]; ok {
+		if headersRaw, ok := native["messageHeaders"]; ok {
 			headers, err := toStringMap(headersRaw)
 			if err != nil {
 				log.Error().Msgf("Impossibile mappare headers in work item %s", item.Id)
@@ -170,12 +166,71 @@ func prepareMessages(items []*store.WorkItem) ([]string, []*kafka.Message) {
 	return ids, out
 }
 
-func decodeBsonD(d bson.D, dest *map[string]interface{}) error {
-	temp, err := bson.MarshalExtJSON(d, true, true)
-	if err != nil {
-		return err
+// bsonToNative converte ricorsivamente i tipi bson (D/M/A) in tipi JSON-native
+// (map[string]interface{}, []interface{}), lasciando invariati gli scalari. Il Payload del WI,
+// riletto da Mongo, arriva come bson.D: senza questa conversione json.Marshal(bson.D)
+// produrrebbe un array [{Key,Value},...] invece di un oggetto, e gli header (bson.D) non
+// sarebbero mappabili da toStringMap.
+func bsonToNative(v interface{}) interface{} {
+	switch t := v.(type) {
+	case bson.D:
+		m := make(map[string]interface{}, len(t))
+		for _, e := range t {
+			m[e.Key] = bsonToNative(e.Value)
+		}
+		return m
+	case bson.M:
+		m := make(map[string]interface{}, len(t))
+		for k, val := range t {
+			m[k] = bsonToNative(val)
+		}
+		return m
+	case map[string]interface{}:
+		m := make(map[string]interface{}, len(t))
+		for k, val := range t {
+			m[k] = bsonToNative(val)
+		}
+		return m
+	case bson.A:
+		a := make([]interface{}, len(t))
+		for i, e := range t {
+			a[i] = bsonToNative(e)
+		}
+		return a
+	case []interface{}:
+		a := make([]interface{}, len(t))
+		for i, e := range t {
+			a[i] = bsonToNative(e)
+		}
+		return a
+	default:
+		return v
 	}
-	return bson.UnmarshalExtJSON(temp, true, dest)
+}
+
+// normalizePayload porta il Payload del WI a map[string]interface{} indipendentemente dal
+// backend: Mongo lo rilegge come bson.D, SQL (colonna jsonb) come map[string]interface{} o
+// []byte; se salvato come stringa JSON viene deserializzato. Ritorna (nil,false) se non gestibile.
+func normalizePayload(p interface{}) (map[string]interface{}, bool) {
+	switch v := p.(type) {
+	case bson.D, bson.M, map[string]interface{}:
+		m, ok := bsonToNative(v).(map[string]interface{})
+		return m, ok
+	case []byte:
+		var m map[string]interface{}
+		if json.Unmarshal(v, &m) != nil {
+			return nil, false
+		}
+		return m, true
+	case string:
+		var m map[string]interface{}
+		if json.Unmarshal([]byte(v), &m) != nil {
+			return nil, false
+		}
+		return m, true
+	default:
+		return nil, false
+	}
 }
 
 func toStringMap(input interface{}) (map[string]string, error) {
