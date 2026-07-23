@@ -57,17 +57,10 @@ func registerS3(d distributedjob.ITaskDispatcher, items store.IWorkItemStore, da
 // injecting them into the batch_runners group for the MuxRunner.
 // La s3.Config è passata come parametro e fornita a fx dal Module stesso
 // (core.Supply interno): l'app non deve più fare core.Supply.
-func Module(cfg s3.Config) {
-	core.Supply(cfg)
-	core.Provides(provideRegistry)
-	core.Provides(wrappedRunnersProvide())
-	core.Invoke(registerS3)
-}
-
-// ModuleIf è come Module ma attivo solo quando core.Mode è tra i modes indicati.
-func ModuleIf(cfg s3.Config, modes ...string) {
-	core.SupplyIf(cfg, modes...)
-	core.ProvideIf(provideRegistry, modes...)
-	core.ProvideIf(wrappedRunnersProvide(), modes...)
-	core.InvokeIf(registerS3, modes...)
+// Se modes è vuoto registra sempre; altrimenti solo quando core.Mode è tra i modes indicati.
+func Module(cfg s3.Config, modes ...string) {
+	core.Supply(cfg, modes...)
+	core.Provide(provideRegistry, modes...)
+	core.Provide(wrappedRunnersProvide(), modes...)
+	core.Invoke(registerS3, modes...)
 }

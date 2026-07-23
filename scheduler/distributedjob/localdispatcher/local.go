@@ -61,20 +61,12 @@ func register(d distributedjob.ITaskDispatcher, items store.IWorkItemStore, data
 	distributedjob.Register(d, items, data)
 }
 
-// Module registers the DistribuiteTask mux dispatcher with the fx application,
-// unconditionally. It provides ITaskDispatcher via fx so that queryfeed and s3feed
-// modules can depend on it. Call once (e.g. in an init()) before scheduler.NewScheduler.
-func Module() {
-	core.Provides(
-		newMuxRunner,
-		fx.Annotate(New, fx.As(new(distributedjob.ITaskDispatcher))),
-	)
-	core.Invoke(register)
-}
-
-// ModuleIf è come Module ma attivo solo quando core.Mode è tra i modes indicati.
-func ModuleIf(modes ...string) {
-	core.ProvideIf(newMuxRunner, modes...)
-	core.ProvideIf(fx.Annotate(New, fx.As(new(distributedjob.ITaskDispatcher))), modes...)
-	core.InvokeIf(register, modes...)
+// Module registers the DistribuiteTask mux dispatcher with the fx application.
+// It provides ITaskDispatcher via fx so that queryfeed and s3feed modules can depend
+// on it. Call once (e.g. in an init()) before scheduler.NewScheduler.
+// Se modes è vuoto registra sempre; altrimenti solo quando core.Mode è tra i modes indicati.
+func Module(modes ...string) {
+	core.Provide(newMuxRunner, modes...)
+	core.ProvideAs[distributedjob.ITaskDispatcher](New, modes...)
+	core.Invoke(register, modes...)
 }

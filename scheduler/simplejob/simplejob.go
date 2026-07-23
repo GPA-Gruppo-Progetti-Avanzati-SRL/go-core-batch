@@ -53,7 +53,7 @@ func New(jobType string, r ITaskRunner) *SimpleTaskRunner {
 // ProvideRunner registers a SimpleTaskRunner constructor into the batch_simple_runners fx group.
 // The constructor may declare any fx-injectable parameters and must return *SimpleTaskRunner.
 func ProvideRunner(constructor any) {
-	core.Provides(fx.Annotate(constructor, fx.ResultTags(`group:"`+Group+`"`)))
+	core.Provide(fx.Annotate(constructor, fx.ResultTags(`group:"`+Group+`"`)))
 }
 
 // RegisterRunner registers a struct type T as a simple job runner for the given jobType.

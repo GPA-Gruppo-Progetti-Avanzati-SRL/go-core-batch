@@ -2,7 +2,7 @@
 // It is intentionally separated from the scheduler package so that applications
 // that do not need Kafka do not pull franz-go into their dependency graph.
 //
-// Wiring (stile go-core-app): chiamare kafkajob.Module(cfg) o kafkajob.ModuleIf(cfg, modes...) in un
+// Wiring (stile go-core-app): chiamare kafkajob.Module(cfg, modes...) in un
 // init(). La *kafka.Config viene passata come parametro e fornita a fx dal Module stesso (core.Supply
 // interno): l'app non deve più fare core.Supply. L'app fornisce store.IWorkItemStore chiamando
 // mongostore.Module() oppure sqlstore.Module().
@@ -29,18 +29,12 @@ func Register(producer *kafkaproducer.ProducerService, items store.IWorkItemStor
 	scheduler.Jobs[JobType] = makeNotificationJobFactory(producer, items)
 }
 
-// Module registra il job NotificationKafka nel container go-core-app (Provides del producer +
-// Invoke di Register), incondizionatamente. Il producer è del package internal kafkaproducer,
-// quindi non iniettabile fuori dalla libreria.
-func Module(cfg *kafka.Config) {
-	core.Supply(cfg)
-	core.Provides(kafkaproducer.NewProducerService)
-	core.Invoke(Register)
-}
-
-// ModuleIf è come Module ma attiva solo quando core.Mode è tra i modes indicati.
-func ModuleIf(cfg *kafka.Config, modes ...string) {
-	core.SupplyIf(cfg, modes...)
-	core.ProvideIf(kafkaproducer.NewProducerService, modes...)
-	core.InvokeIf(Register, modes...)
+// Module registra il job NotificationKafka nel container go-core-app (Provide del producer +
+// Invoke di Register). Il producer è del package internal kafkaproducer, quindi non iniettabile
+// fuori dalla libreria. Se modes è vuoto registra sempre; altrimenti solo quando core.Mode è
+// tra i modes indicati.
+func Module(cfg *kafka.Config, modes ...string) {
+	core.Supply(cfg, modes...)
+	core.Provide(kafkaproducer.NewProducerService, modes...)
+	core.Invoke(Register, modes...)
 }

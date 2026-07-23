@@ -16,15 +16,10 @@ func registerByQuery(d distributedjob.ITaskDispatcher, items store.IWorkItemStor
 	distributedjob.RegisterByQuery(d, items, qs, data)
 }
 
-// Module registers the DistribuiteTaskByQuery job type unconditionally.
-// It requires an ITaskDispatcher, IWorkItemStore, IQueryStore, and IData
-// to be provided in the fx container.
-func Module() {
-	core.Invoke(registerByQuery)
-}
-
-// ModuleIf è come Module ma registra solo quando core.Mode è tra i modes indicati
-// (per binari multi-mode). Coerente con core.InvokeIf/ProvideIf.
-func ModuleIf(modes ...string) {
-	core.InvokeIf(registerByQuery, modes...)
+// Module registers the DistribuiteTaskByQuery job type. It requires an
+// ITaskDispatcher, IWorkItemStore, IQueryStore, and IData to be provided in the
+// fx container. Se modes è vuoto registra sempre; altrimenti solo quando core.Mode
+// è tra i modes indicati (per binari multi-mode).
+func Module(modes ...string) {
+	core.Invoke(registerByQuery, modes...)
 }

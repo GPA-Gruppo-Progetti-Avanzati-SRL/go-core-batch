@@ -86,7 +86,7 @@ func (r *MuxRunner) Run(ctx context.Context, objectId, taskType string, items st
 //	    return runner.New("MY_TASK", &myRunner{svc: svc})
 //	}
 func Provide(constructor any) {
-	core.Provides(fx.Annotate(constructor, fx.ResultTags(`group:"`+Group+`"`)))
+	core.Provide(fx.Annotate(constructor, fx.ResultTags(`group:"`+Group+`"`)))
 }
 
 // Register registers a struct type T as a task runner for the given taskType.
@@ -134,7 +134,7 @@ const FileGroup = "batch_file_runners"
 // ProvideFile registers a FileTaskRunner constructor into the batch_file_runners fx group.
 // The constructor may declare any fx-injectable parameters.
 func ProvideFile(constructor any) {
-	core.Provides(fx.Annotate(constructor, fx.ResultTags(`group:"`+FileGroup+`"`)))
+	core.Provide(fx.Annotate(constructor, fx.ResultTags(`group:"`+FileGroup+`"`)))
 }
 
 // RegisterFile registers a struct type T as a file-based task runner for the given taskType.

@@ -259,7 +259,7 @@ scheduler:
 Utile per un singolo task type o quando non si usa il pattern `app/batch/`.
 
 ```go
-// main.go — prima di core.Invoke(scheduler.NewScheduler)
+// main.go — prima di scheduler.Module(cfg.Scheduler)
 core.Invoke(func(items store.IWorkItemStore, data store.IData) {
     distributedjob.Register(
         localdispatcher.New(runner.NewMux([]*runner.TaskRunner{
@@ -390,15 +390,10 @@ scheduler:
 
 ```go
 // services/services.go
-core.Provides(
-    batchredis.NewService,
-    fx.Annotate(mongostore.NewBatchData,    fx.As(new(store.IData))),
-    fx.Annotate(mongostore.NewWorkItemData, fx.As(new(store.IWorkItemStore))),
-    scheduler.NewScheduler,
-)
-
-// app-config.go
-core.Supply(&cfg.Batch.Redis, cfg.Scheduler)
+core.Supply(&cfg.Batch.Redis)   // config del lock Redis
+core.Provide(batchredis.NewService)
+mongostore.Module()             // store.IData + store.IWorkItemStore (unico entry-point)
+scheduler.Module(cfg.Scheduler) // fornisce la config da sé + Provide/Invoke interni
 ```
 
 ---
@@ -663,7 +658,7 @@ In gRPC, `limit` e pool size sono dimensioni ortogonali: lo scheduler può claim
 
 ## Trappole
 
-- **`core.Invoke(func(_ *scheduler.Scheduler) {})`** è obbligatorio — senza di esso lo scheduler non viene costruito da Fx.
+- **L'Invoke sullo `*scheduler.Scheduler`** è obbligatorio per forzarne la costruzione da Fx — lo fa già `scheduler.Module()` internamente (non serve aggiungerlo a mano).
 - **`distributedjob.Register` / `localdispatcher.Module()`** deve essere invocato prima dello scheduler — gli Invoke Fx sono ordinati.
 - **`runner.Provide(constructor)`** deve essere chiamato in `init()` — Fx raccoglie il gruppo `batch_runners` prima di invocare `Module()`.
 - **`gocron.NewTask` deve usare una closure zero-arg** che cattura le dipendenze — non passare interface nil come `...any` o gocron va in panic in reflect.
