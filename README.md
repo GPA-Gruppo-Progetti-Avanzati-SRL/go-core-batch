@@ -25,56 +25,72 @@ Raccoglie i sotto-config di tutti i pezzi cablati da `Module`. L'app tipicamente
 
 ### `batch.Module(cfg *batch.Config, opts ...batch.Option)`
 
-Wira ogni componente **esplicitamente** e lo gate **solo** tramite i suoi modes: non c'è alcun `if` sul valore del config, è il `core.Mode` a runtime a decidere cosa viene effettivamente costruito. Le opzioni scelgono solo la topologia (store, dispatch, feed/job opzionali).
+Wira ogni componente **esplicitamente** e lo gate **solo** tramite i suoi modes: è il `core.Mode` a runtime a decidere cosa viene effettivamente costruito, non un `if` sul valore del config. I backend (store, dispatcher, feed, job Kafka, worker pool) **non sono selezionati da enum ma iniettati dall'app come `batch.ModuleFunc` per riferimento diretto** (niente closure). Così il package `batch` non importa nessun package di backend — solo i loro `Config`, struct leggere — e ogni app trascina in `go.mod` **solo** le dipendenze di ciò che passa: un'app mongo-only non si porta dietro `uptrace/bun`, una senza Kafka non si porta dietro `franz-go`.
+
+`ModuleFunc` è la firma comune di tutti i `Module()` componibili — `func(modes ...string)`, ormai **modes-only**: il config non è più un parametro ma viene iniettato da fx, ed è `batch.Module` a fornirlo con `core.Supply` della Config unificata. I config dei backend (grpc client/server, kafka, s3, worker) sono suppliti **solo se valorizzati**: se un componente attivo richiede un config non impostato, fx fallisce subito con un chiaro "missing dependency" invece di far girare il backend con valori vuoti. La `RedisConfig` è l'unica supplita senza quel guard (lo Scheduler richiede sempre `*redis.Client` come hard dependency).
 
 **Opzioni:**
 
-| Opzione | Effetto | Default |
-|---|---|---|
-| `WithSchedulerModes(...string)` | limita i componenti lato scheduler (dispatcher, feed, kafkajob, query store, Scheduler) ai `core.Mode` indicati | sempre attivi |
-| `WithWorkerModes(...string)` | limita il worker pool gRPC (`grpchandler`) ai `core.Mode` indicati | sempre attivo |
-| `WithMongoStore()` | backend MongoDB per `IData`/`IWorkItemStore` + `IQueryStore` | ✅ default |
-| `WithSqlStore()` | backend SQL (bun) per `IData`/`IWorkItemStore` + `IQueryStore` | |
-| `WithLocalDispatch()` | dispatch in-process (`localdispatcher`) | ✅ default |
-| `WithGrpcDispatch()` | dispatch via gRPC verso worker remoti (`grpcdispatcher`) | |
-| `WithQueryFeed()` | attiva `DistribuiteTaskByQuery` (IQueryStore + queryfeed) | opt-in |
-| `WithS3Feed()` | attiva `DistribuiteTaskByS3File` (usa `S3.Services`) | opt-in |
-| `WithKafkaJob()` | attiva `NotificationKafka` (usa `KafkaConfig`) | opt-in |
-| `WithGrpcWorker()` | attiva il worker pool gRPC lato worker (usa `Grpc.Server` + `WorkersConfig`) | opt-in |
+| Opzione | Effetto |
+|---|---|
+| `WithSchedulerModes(...string)` | gate dei componenti lato scheduler (dispatcher, feed, kafkajob, query store) e dello Scheduler ai `core.Mode` indicati; vuoto = sempre attivi |
+| `WithWorkerModes(...string)` | gate dei componenti lato worker (worker pool gRPC) ai `core.Mode` indicati; vuoto = sempre attivo |
+| `WithStore(m batch.ModuleFunc)` | **obbligatorio** (panic se assente); wirato **sempre** (no mode gate, serve sia a scheduler che a worker): `storemongo.Module` / `storesql.Module` (copre `IData`/`IWorkItemStore`) |
+| `WithModule(m ...batch.ModuleFunc)` | componenti lato **scheduler** (gate scheduler modes), accumula su più chiamate: `grpcdispatcher.Module`/`localdispatcher.Module`, `djmongo.Module`(o `djsql.Module`) **+** `queryfeed.Module`, `s3feed.Module`, `kafkajob.Module` |
+| `WithWorkerModule(m ...batch.ModuleFunc)` | componenti lato **worker** (gate worker modes): tipicamente `grpchandler.Module` |
+
+**Nessun default implicito:** `WithStore` è obbligatorio ed esplicito (Mongo o SQL); non esistono coppie store/dispatch mutuamente esclusive né un default Mongo/local: si passano esplicitamente i `Module` desiderati.
 
 **Vincolo d'ordine (garantito internamente da `Module`):**
 
 ```
-store → redis → dispatcher → (query store + queryfeed) → s3feed → kafkajob → grpchandler → Scheduler (PER ULTIMO)
+store → redis → config supply → componenti scheduler → componenti worker → Scheduler (PER ULTIMO)
 ```
 
-L'ordine non è cosmetico: `newScheduler` legge la mappa globale `scheduler.Jobs` al momento della costruzione e gli `fx.Invoke` girano nell'ordine di registrazione. Registrare lo Scheduler prima di dispatcher/feed/kafkajob lo costruirebbe con la mappa job type ancora vuota → `"Job Type ... not found"`.
+L'ordine dello Scheduler non è cosmetico: `newScheduler` legge la mappa globale `scheduler.Jobs` al momento della costruzione (popolata dai `Register()` dei componenti) e gli `fx.Invoke` girano nell'ordine di registrazione. Registrarlo prima di dispatcher/feed/kafkajob lo costruirebbe con la mappa job type ancora vuota → `"Job Type ... not found"`. L'ordine **relativo** dei componenti è invece indifferente: fx risolve i Provide per tipo.
 
 **Restano a carico dell'app:** registrare i task runner (`runner.Provide` / `runner.Register[T]` / `grpchandler.Provide`) e fornire il driver DB (`coremongo.NewService` o `coresql.NewService`). Il **simplejob NON è coperto** dall'orchestratore: resta wiring separato (vedi la sezione dedicata).
 
 ### Esempio — distribuito (gRPC + Mongo)
 
 ```go
+import (
+    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch"
+    storemongo "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store/mongostore"
+    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/grpcdispatcher"
+    djmongo "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/mongostore"
+    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/queryfeed"
+    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/kafkajob"
+    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/worker/grpchandler"
+)
+
 batch.Module(&cfg.BatchConfig,
     batch.WithSchedulerModes(engine.Scheduler, engine.Batch),
     batch.WithWorkerModes(engine.Worker, engine.Batch),
-    batch.WithGrpcDispatch(),
-    batch.WithGrpcWorker(),
-    batch.WithQueryFeed(),
-    batch.WithKafkaJob(),
-)   // WithMongoStore() implicito (default)
+    batch.WithStore(storemongo.Module),          // obbligatorio
+    batch.WithModule(                            // gate scheduler modes, riferimento diretto
+        grpcdispatcher.Module,                   // dispatch via gRPC
+        djmongo.Module, queryfeed.Module,        // feed by-query (query store + feed)
+        kafkajob.Module,                         // job NotificationKafka
+    ),
+    batch.WithWorkerModule(grpchandler.Module),  // gate worker modes
+)
 ```
 
 ### Esempio — single-instance (in-process + Mongo)
 
 ```go
+// import localdispatcher "...go-core-batch/scheduler/distributedjob/localdispatcher"
 batch.Module(&cfg.BatchConfig,
-    batch.WithLocalDispatch(),
-    batch.WithQueryFeed(),
+    batch.WithStore(storemongo.Module),          // obbligatorio
+    batch.WithModule(
+        localdispatcher.Module,                  // dispatch in-process (niente gRPC)
+        djmongo.Module, queryfeed.Module,        // feed by-query
+    ),
 )
 ```
 
-> I singoli `*.Module()` (`localdispatcher`, `grpcdispatcher`, `queryfeed`, `s3feed`, `kafkajob`, `mongostore`/`sqlstore`, `grpchandler`, `scheduler`, …) **restano validi**: sono il livello sotto l'orchestratore, documentato nelle sezioni seguenti. `batch.Module` non fa che comporli in un'unica chiamata gate-ata per mode.
+> I singoli `*.Module()` (`localdispatcher`, `grpcdispatcher`, `queryfeed`, `s3feed`, `kafkajob`, `mongostore`/`sqlstore`, `grpchandler`, `scheduler`, …) **restano validi** per il wiring manuale: sono il livello sotto l'orchestratore, documentato nelle sezioni seguenti. Essendo modes-only, lì il config va fornito prima con `core.Supply` (es. `core.Supply(&cfg.Client); grpcdispatcher.Module()`). `batch.Module` non fa che comporli in un'unica chiamata gate-ata per mode.
 
 ---
 
