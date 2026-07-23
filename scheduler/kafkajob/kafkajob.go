@@ -2,10 +2,10 @@
 // It is intentionally separated from the scheduler package so that applications
 // that do not need Kafka do not pull franz-go into their dependency graph.
 //
-// Wiring (stile go-core-app): chiamare kafkajob.Module(cfg, modes...) in un
-// init(). La *kafka.Config viene passata come parametro e fornita a fx dal Module stesso (core.Supply
-// interno): l'app non deve più fare core.Supply. L'app fornisce store.IWorkItemStore chiamando
-// mongostore.Module() oppure sqlstore.Module().
+// Wiring (stile go-core-app): chiamare kafkajob.Module(modes...) in un init(). È modes-only:
+// la *kafka.Config viene iniettata da fx — la fornisce batch.Module (core.Supply della Config
+// unificata) o, nel wiring manuale, l'app con core.Supply(&cfg) prima di Module(). L'app fornisce
+// store.IWorkItemStore chiamando mongostore.Module() oppure sqlstore.Module().
 //
 // Il ProducerService Kafka vive nel package internal/kafkaproducer: NON è importabile dalle
 // applicazioni, quindi non è iniettabile in un runner. Per inviare una notifica si crea un
@@ -15,7 +15,6 @@ package kafkajob
 import (
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/kafkaproducer"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/kafka"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 )
@@ -33,8 +32,10 @@ func Register(producer *kafkaproducer.ProducerService, items store.IWorkItemStor
 // Invoke di Register). Il producer è del package internal kafkaproducer, quindi non iniettabile
 // fuori dalla libreria. Se modes è vuoto registra sempre; altrimenti solo quando core.Mode è
 // tra i modes indicati.
-func Module(cfg *kafka.Config, modes ...string) {
-	core.Supply(cfg, modes...)
+// Module è modes-only: la *kafka.Config NON è più un parametro ma viene iniettata da fx —
+// la fornisce batch.Module (core.Supply della Config unificata) oppure, nel wiring manuale
+// standalone, l'app con core.Supply(&cfg) prima di chiamare Module().
+func Module(modes ...string) {
 	core.Provide(kafkaproducer.NewProducerService, modes...)
 	core.Invoke(Register, modes...)
 }

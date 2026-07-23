@@ -2,7 +2,6 @@ package grpchandler
 
 import (
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
-	batchgrpc "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/grpc"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/grpctransport"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/runner"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
@@ -33,13 +32,12 @@ func wire(p moduleParams) {
 }
 
 // Module provvede il gRPC Server e wire il worker pool usando i TaskRunner registrati.
-// Call once (e.g. in an init()) in the worker process. La *grpc.ServerConfig e la
-// []worker.Config (pool size per task type) sono passate come parametri e fornite a fx dal
-// Module stesso (core.Supply interno): l'app non deve più fare core.Supply.
+// Call once (e.g. in an init()) in the worker process. È modes-only: la *grpc.ServerConfig e
+// la []worker.Config (pool size per task type) sono iniettate da fx — le fornisce batch.Module
+// (core.Supply della Config unificata) oppure, nel wiring manuale, l'app con
+// core.Supply(&cfg.Server) + core.Supply(workersCfg) prima di Module().
 // Se modes è vuoto registra sempre; altrimenti solo quando core.Mode è tra i modes indicati.
-func Module(grpcCfg *batchgrpc.ServerConfig, workerCfg []worker.Config, modes ...string) {
-	core.Supply(grpcCfg, modes...)
-	core.Supply(workerCfg, modes...)
+func Module(modes ...string) {
 	core.Provide(grpctransport.NewServer, modes...)
 	core.Invoke(wire, modes...)
 }

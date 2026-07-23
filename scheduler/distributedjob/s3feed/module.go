@@ -2,10 +2,12 @@
 // It wires an S3-based feed into the distributedjob claiming pipeline and wraps
 // file runners with S3 download/move lifecycle.
 //
-// Usage:
+// Usage (modes-only: la s3.Config è iniettata da fx — la fornisce batch.Module, o l'app con
+// core.Supply(cfg.S3) prima di Module() nel wiring manuale):
 //
 //	func init() {
-//	    s3feed.Module(cfg.S3)
+//	    core.Supply(cfg.S3)
+//	    s3feed.Module()
 //	    runner.RegisterFile[myS3Runner]("S3_IMPORT")
 //	}
 //
@@ -55,11 +57,10 @@ func registerS3(d distributedjob.ITaskDispatcher, items store.IWorkItemStore, da
 // It provides the S3 Registry, builds the S3Feed, registers the job,
 // and wraps all FileTaskRunners with S3 download/move lifecycle,
 // injecting them into the batch_runners group for the MuxRunner.
-// La s3.Config è passata come parametro e fornita a fx dal Module stesso
-// (core.Supply interno): l'app non deve più fare core.Supply.
+// La s3.Config è iniettata da fx (la fornisce batch.Module con core.Supply della Config
+// unificata, oppure l'app con core.Supply(cfg.S3) nel wiring manuale): NON è più un parametro.
 // Se modes è vuoto registra sempre; altrimenti solo quando core.Mode è tra i modes indicati.
-func Module(cfg s3.Config, modes ...string) {
-	core.Supply(cfg, modes...)
+func Module(modes ...string) {
 	core.Provide(provideRegistry, modes...)
 	core.Provide(wrappedRunnersProvide(), modes...)
 	core.Invoke(registerS3, modes...)

@@ -7,7 +7,6 @@ import (
 	"context"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
-	batchgrpc "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/grpc"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/grpctransport"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
@@ -38,8 +37,11 @@ func register(d distributedjob.ITaskDispatcher, items store.IWorkItemStore, data
 // come parametro e fornita a fx dal Module stesso (core.Supply interno): l'app non deve
 // più fare core.Supply. Call once (e.g. in an init()) before scheduler.NewScheduler.
 // Se modes è vuoto registra sempre; altrimenti solo quando core.Mode è tra i modes indicati.
-func Module(cfg *batchgrpc.ClientConfig, modes ...string) {
-	core.Supply(cfg, modes...)
+// Module registra il dispatcher gRPC. È modes-only: il *grpc.ClientConfig NON è più un
+// parametro ma viene iniettato da fx — lo fornisce batch.Module (core.Supply della Config
+// unificata) oppure, nel wiring manuale standalone, l'app con core.Supply(&cfg.Client) prima
+// di chiamare Module().
+func Module(modes ...string) {
 	core.Provide(grpctransport.NewClient, modes...)
 	core.ProvideAs[distributedjob.ITaskDispatcher](NewGrpcDispatcher, modes...)
 	core.Invoke(register, modes...)
