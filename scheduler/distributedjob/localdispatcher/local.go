@@ -74,7 +74,7 @@ func Module() {
 
 // ModuleIf è come Module ma attivo solo quando core.Mode è tra i modes indicati.
 func ModuleIf(modes ...string) {
-	core.ProvidesIf(newMuxRunner, modes...)
-	core.ProvidesIf(fx.Annotate(New, fx.As(new(distributedjob.ITaskDispatcher))), modes...)
+	core.ProvideIf(newMuxRunner, modes...)
+	core.ProvideIf(fx.Annotate(New, fx.As(new(distributedjob.ITaskDispatcher))), modes...)
 	core.InvokeIf(register, modes...)
 }

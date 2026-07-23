@@ -67,7 +67,7 @@ func Module(cfg s3.Config) {
 // ModuleIf è come Module ma attivo solo quando core.Mode è tra i modes indicati.
 func ModuleIf(cfg s3.Config, modes ...string) {
 	core.SupplyIf(cfg, modes...)
-	core.ProvidesIf(provideRegistry, modes...)
-	core.ProvidesIf(wrappedRunnersProvide(), modes...)
+	core.ProvideIf(provideRegistry, modes...)
+	core.ProvideIf(wrappedRunnersProvide(), modes...)
 	core.InvokeIf(registerS3, modes...)
 }

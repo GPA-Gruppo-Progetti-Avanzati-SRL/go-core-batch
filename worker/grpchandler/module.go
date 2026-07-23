@@ -48,7 +48,7 @@ func Module(grpcCfg *batchgrpc.ServerConfig, workerCfg []worker.Config) {
 func ModuleIf(grpcCfg *batchgrpc.ServerConfig, workerCfg []worker.Config, modes ...string) {
 	core.SupplyIf(grpcCfg, modes...)
 	core.SupplyIf(workerCfg, modes...)
-	core.ProvidesIf(grpctransport.NewServer, modes...)
+	core.ProvideIf(grpctransport.NewServer, modes...)
 	core.InvokeIf(wire, modes...)
 }
 

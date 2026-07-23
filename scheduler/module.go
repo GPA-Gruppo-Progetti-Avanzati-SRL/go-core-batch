@@ -21,6 +21,6 @@ func Module(config []Config) {
 // ModuleIf è come Module ma attivo solo quando core.Mode è tra i modes indicati.
 func ModuleIf(config []Config, modes ...string) {
 	core.SupplyIf(config, modes...)
-	core.ProvidesIf(newScheduler, modes...)
+	core.ProvideIf(newScheduler, modes...)
 	core.InvokeIf(func(*Scheduler) {}, modes...)
 }

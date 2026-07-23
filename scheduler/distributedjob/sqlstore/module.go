@@ -15,5 +15,5 @@ func Module() {
 
 // ModuleIf è come Module ma attivo solo quando core.Mode è tra i modes indicati.
 func ModuleIf(modes ...string) {
-	core.ProvidesIf(fx.Annotate(newQueryDataSQL, fx.As(new(distributedjob.IQueryStore))), modes...)
+	core.ProvideIf(fx.Annotate(newQueryDataSQL, fx.As(new(distributedjob.IQueryStore))), modes...)
 }

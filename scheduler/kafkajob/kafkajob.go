@@ -41,6 +41,6 @@ func Module(cfg *kafka.Config) {
 // ModuleIf è come Module ma attiva solo quando core.Mode è tra i modes indicati.
 func ModuleIf(cfg *kafka.Config, modes ...string) {
 	core.SupplyIf(cfg, modes...)
-	core.ProvidesIf(kafkaproducer.NewProducerService, modes...)
+	core.ProvideIf(kafkaproducer.NewProducerService, modes...)
 	core.InvokeIf(Register, modes...)
 }

@@ -24,7 +24,7 @@ func Module() {
 }
 
 // ModuleIf è come Module ma registra solo quando core.Mode è tra i modes indicati
-// (per binari multi-mode). Coerente con core.InvokeIf/ProvidesIf.
+// (per binari multi-mode). Coerente con core.InvokeIf/ProvideIf.
 func ModuleIf(modes ...string) {
 	core.InvokeIf(registerByQuery, modes...)
 }

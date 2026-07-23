@@ -18,6 +18,6 @@ func Module() {
 
 // ModuleIf è come Module ma attivo solo quando core.Mode è tra i modes indicati.
 func ModuleIf(modes ...string) {
-	core.ProvidesIf(fx.Annotate(newBatchDataSQL, fx.As(new(store.IData))), modes...)
-	core.ProvidesIf(fx.Annotate(newWorkItemDataSQL, fx.As(new(store.IWorkItemStore))), modes...)
+	core.ProvideIf(fx.Annotate(newBatchDataSQL, fx.As(new(store.IData))), modes...)
+	core.ProvideIf(fx.Annotate(newWorkItemDataSQL, fx.As(new(store.IWorkItemStore))), modes...)
 }

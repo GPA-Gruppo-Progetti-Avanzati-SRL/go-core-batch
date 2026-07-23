@@ -52,7 +52,7 @@ func Module(cfg *batchgrpc.ClientConfig) {
 // ModuleIf è come Module ma attivo solo quando core.Mode è tra i modes indicati.
 func ModuleIf(cfg *batchgrpc.ClientConfig, modes ...string) {
 	core.SupplyIf(cfg, modes...)
-	core.ProvidesIf(grpctransport.NewClient, modes...)
-	core.ProvidesIf(fx.Annotate(NewGrpcDispatcher, fx.As(new(distributedjob.ITaskDispatcher))), modes...)
+	core.ProvideIf(grpctransport.NewClient, modes...)
+	core.ProvideIf(fx.Annotate(NewGrpcDispatcher, fx.As(new(distributedjob.ITaskDispatcher))), modes...)
 	core.InvokeIf(register, modes...)
 }
