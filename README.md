@@ -6,6 +6,78 @@ Framework per batch processing distribuito. Gestisce job schedulati, claiming at
 
 ---
 
+## Orchestratore — `batch.Module` (wiring consigliato)
+
+Il package **root** `batch` espone un unico entry-point che sostituisce la sfilza di `*.Module()` da chiamare a mano negli `init()`. È il modo **consigliato** di cablare il sottosistema batch: una `batch.Config` unificata + una sola chiamata a `batch.Module(...)` con opzioni dichiarative.
+
+### `batch.Config` — config unificata
+
+Raccoglie i sotto-config di tutti i pezzi cablati da `Module`. L'app tipicamente la embedda nella propria `Config` come campo `BatchConfig batch.Config` e la carica come singola sezione YAML: sono i `Module()` dei singoli package a fare il `core.Supply` interno, quindi l'app non deve suppliere nulla a Fx.
+
+| Campo | Tipo | Tag yaml/mapstructure/json |
+|---|---|---|
+| `RedisConfig` | `redis.Config` | `redis` |
+| `Grpc` | `grpc.Config` (`Client{Url}`, `Server{Hostname,Port}`) | `grpc` |
+| `S3` | `s3.Config` | `s3` |
+| `JobsConfig` | `[]scheduler.Config` | `jobs` |
+| `WorkersConfig` | `[]worker.Config` | `workers` |
+| `KafkaConfig` | `kafka.Config` | `kafka` |
+
+### `batch.Module(cfg *batch.Config, opts ...batch.Option)`
+
+Wira ogni componente **esplicitamente** e lo gate **solo** tramite i suoi modes: non c'è alcun `if` sul valore del config, è il `core.Mode` a runtime a decidere cosa viene effettivamente costruito. Le opzioni scelgono solo la topologia (store, dispatch, feed/job opzionali).
+
+**Opzioni:**
+
+| Opzione | Effetto | Default |
+|---|---|---|
+| `WithSchedulerModes(...string)` | limita i componenti lato scheduler (dispatcher, feed, kafkajob, query store, Scheduler) ai `core.Mode` indicati | sempre attivi |
+| `WithWorkerModes(...string)` | limita il worker pool gRPC (`grpchandler`) ai `core.Mode` indicati | sempre attivo |
+| `WithMongoStore()` | backend MongoDB per `IData`/`IWorkItemStore` + `IQueryStore` | ✅ default |
+| `WithSqlStore()` | backend SQL (bun) per `IData`/`IWorkItemStore` + `IQueryStore` | |
+| `WithLocalDispatch()` | dispatch in-process (`localdispatcher`) | ✅ default |
+| `WithGrpcDispatch()` | dispatch via gRPC verso worker remoti (`grpcdispatcher`) | |
+| `WithQueryFeed()` | attiva `DistribuiteTaskByQuery` (IQueryStore + queryfeed) | opt-in |
+| `WithS3Feed()` | attiva `DistribuiteTaskByS3File` (usa `S3.Services`) | opt-in |
+| `WithKafkaJob()` | attiva `NotificationKafka` (usa `KafkaConfig`) | opt-in |
+| `WithGrpcWorker()` | attiva il worker pool gRPC lato worker (usa `Grpc.Server` + `WorkersConfig`) | opt-in |
+
+**Vincolo d'ordine (garantito internamente da `Module`):**
+
+```
+store → redis → dispatcher → (query store + queryfeed) → s3feed → kafkajob → grpchandler → Scheduler (PER ULTIMO)
+```
+
+L'ordine non è cosmetico: `newScheduler` legge la mappa globale `scheduler.Jobs` al momento della costruzione e gli `fx.Invoke` girano nell'ordine di registrazione. Registrare lo Scheduler prima di dispatcher/feed/kafkajob lo costruirebbe con la mappa job type ancora vuota → `"Job Type ... not found"`.
+
+**Restano a carico dell'app:** registrare i task runner (`runner.Provide` / `runner.Register[T]` / `grpchandler.Provide`) e fornire il driver DB (`coremongo.NewService` o `coresql.NewService`). Il **simplejob NON è coperto** dall'orchestratore: resta wiring separato (vedi la sezione dedicata).
+
+### Esempio — distribuito (gRPC + Mongo)
+
+```go
+batch.Module(&cfg.BatchConfig,
+    batch.WithSchedulerModes(engine.Scheduler, engine.Batch),
+    batch.WithWorkerModes(engine.Worker, engine.Batch),
+    batch.WithGrpcDispatch(),
+    batch.WithGrpcWorker(),
+    batch.WithQueryFeed(),
+    batch.WithKafkaJob(),
+)   // WithMongoStore() implicito (default)
+```
+
+### Esempio — single-instance (in-process + Mongo)
+
+```go
+batch.Module(&cfg.BatchConfig,
+    batch.WithLocalDispatch(),
+    batch.WithQueryFeed(),
+)
+```
+
+> I singoli `*.Module()` (`localdispatcher`, `grpcdispatcher`, `queryfeed`, `s3feed`, `kafkajob`, `mongostore`/`sqlstore`, `grpchandler`, `scheduler`, …) **restano validi**: sono il livello sotto l'orchestratore, documentato nelle sezioni seguenti. `batch.Module` non fa che comporli in un'unica chiamata gate-ata per mode.
+
+---
+
 ## Modalità (job families)
 
 Tre famiglie di job, ciascuna un modulo Fx self-contained registrato in `scheduler.Jobs`. Condividono lo scheduler (gocron + **Redis distributed job lock**, applicato a *ogni* job) e lo store `work_items`.
@@ -395,6 +467,8 @@ core.Provide(batchredis.NewService)
 mongostore.Module()             // store.IData + store.IWorkItemStore (unico entry-point)
 scheduler.Module(cfg.Scheduler) // fornisce la config da sé + Provide/Invoke interni
 ```
+
+> Questo wiring manuale è il livello sotto l'orchestratore: `batch.Module(&cfg.BatchConfig, ...)` compone `mongostore.Module()`/`sqlstore.Module()`, `redis`, dispatcher, feed, kafkajob, grpchandler e `scheduler.Module()` in un'unica chiamata, nell'ordine corretto e gate-ata per mode (vedi "Orchestratore — `batch.Module`"). Usalo a mano solo quando serve un controllo fine non coperto dalle opzioni.
 
 ---
 
