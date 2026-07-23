@@ -393,7 +393,7 @@ func init() {
 ```go
 // app/batch/s3_import.go
 type myS3Runner struct {
-    fx.In
+    core.In
     Svc mysvc.IService
 }
 
@@ -403,6 +403,8 @@ func (r *myS3Runner) Run(ctx context.Context, key string, content io.Reader) err
     return nil
 }
 ```
+
+> Gli esempi usano `core.In`/`core.Out`, alias di `fx.In`/`fx.Out` esportati da go-core-app, così da non importare direttamente `go.uber.org/fx`. Sono equivalenti e mescolabili con `fx.In`/`fx.Out`.
 
 ```yaml
 batch:
@@ -575,7 +577,7 @@ import "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/simp
 
 func init() {
     simplejob.Module()
-    simplejob.RegisterRunner[myRunner]("MY_JOB")   // T: fx.In + store.ITaskRunner
+    simplejob.RegisterRunner[myRunner]("MY_JOB")   // T: core.In + store.ITaskRunner
 }
 ```
 
@@ -587,7 +589,7 @@ In alternativa `simplejob.ProvideRunner(constructor)` (costruttore esplicito che
 
 ```go
 type myRunner struct {
-    fx.In
+    core.In
     Svc mysvc.IService
 }
 
@@ -606,7 +608,7 @@ func (r *myRunner) Run(ctx context.Context, item *store.WorkItem) error {
 
 ```go
 type myRunner struct {
-    fx.In
+    core.In
     Svc   mysvc.IService
     Items store.IWorkItemStore   // iniettato da fx per il MarkDone transazionale
 }
