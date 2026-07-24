@@ -113,45 +113,51 @@ func Module(cfg *Config, opts ...Option) {
 	sched := o.schedulerModes
 	work := o.workerModes
 
-	// store.IData + store.IWorkItemStore: consumati sia lato scheduler che lato worker, quindi
-	// sempre attivi (nessun mode gate → chiamata senza modes).
-	o.store()
+	// Tutte le registrazioni del sottosistema batch confluiscono in un fx.Module("batch")
+	// per il namespacing del grafo/log fx. I provide NON sono privati: restano visibili
+	// all'app e i value group (batch_runners forniti dall'app a root, batch_jobs) aggregano
+	// come prima. Il mode-gating resta per-registrazione dentro ogni core.Provide/Supply.
+	core.Module("batch", func() {
+		// store.IData + store.IWorkItemStore: consumati sia lato scheduler che lato worker, quindi
+		// sempre attivi (nessun mode gate → chiamata senza modes).
+		o.store()
 
-	// RedisConfig + client: sempre (lo Scheduler richiede *redis.Client come hard dependency,
-	// vedi newScheduler → redislock.NewRedisLocker).
-	core.Supply(&cfg.RedisConfig, sched...)
-	core.Provide(redis.NewService, sched...)
+		// RedisConfig + client: sempre (lo Scheduler richiede *redis.Client come hard dependency,
+		// vedi newScheduler → redislock.NewRedisLocker).
+		core.Supply(&cfg.RedisConfig, sched...)
+		core.Provide(redis.NewService, sched...)
 
-	// Config dei backend: suppliti a fx SOLO se valorizzati. Un config non impostato non viene
-	// supplito, così se un componente attivo lo richiede fx fallisce subito con un chiaro
-	// "missing dependency" invece di far girare il backend con valori vuoti (fallimento tardivo).
-	if cfg.Grpc.Client.Url != "" {
-		core.Supply(&cfg.Grpc.Client, sched...)
-	}
-	if cfg.KafkaConfig.BootstrapServer != "" {
-		core.Supply(&cfg.KafkaConfig, sched...)
-	}
-	if len(cfg.S3.Services) > 0 {
-		core.Supply(cfg.S3, sched...)
-	}
-	if cfg.Grpc.Server.Port != 0 {
-		core.Supply(&cfg.Grpc.Server, work...)
-	}
-	if len(cfg.WorkersConfig) > 0 {
-		core.Supply(cfg.WorkersConfig, work...)
-	}
+		// Config dei backend: suppliti a fx SOLO se valorizzati. Un config non impostato non viene
+		// supplito, così se un componente attivo lo richiede fx fallisce subito con un chiaro
+		// "missing dependency" invece di far girare il backend con valori vuoti (fallimento tardivo).
+		if cfg.Grpc.Client.Url != "" {
+			core.Supply(&cfg.Grpc.Client, sched...)
+		}
+		if cfg.KafkaConfig.BootstrapServer != "" {
+			core.Supply(&cfg.KafkaConfig, sched...)
+		}
+		if len(cfg.S3.Services) > 0 {
+			core.Supply(cfg.S3, sched...)
+		}
+		if cfg.Grpc.Server.Port != 0 {
+			core.Supply(&cfg.Grpc.Server, work...)
+		}
+		if len(cfg.WorkersConfig) > 0 {
+			core.Supply(cfg.WorkersConfig, work...)
+		}
 
-	// Componenti lato scheduler (dispatcher, feed, job Kafka, query store): gate-ati sched.
-	for _, m := range o.modules {
-		m(sched...)
-	}
+		// Componenti lato scheduler (dispatcher, feed, job Kafka, query store): gate-ati sched.
+		for _, m := range o.modules {
+			m(sched...)
+		}
 
-	// Componenti lato worker (worker pool gRPC): gate-ati work.
-	for _, m := range o.workerModules {
-		m(work...)
-	}
+		// Componenti lato worker (worker pool gRPC): gate-ati work.
+		for _, m := range o.workerModules {
+			m(work...)
+		}
 
-	// Scheduler: i job confluiscono nel value group batch_jobs, quindi l'ordine di
-	// registrazione è indifferente (vedi nota sull'ordine sopra).
-	scheduler.Module(cfg.JobsConfig, sched...)
+		// Scheduler: i job confluiscono nel value group batch_jobs, quindi l'ordine di
+		// registrazione è indifferente (vedi nota sull'ordine sopra).
+		scheduler.Module(cfg.JobsConfig, sched...)
+	})
 }
