@@ -87,12 +87,12 @@ func newJobRegistrations(items store.IWorkItemStore, runners []*SimpleTaskRunner
 // emitting one JobRegistration per runner into the batch_jobs group (flatten). L'ordine
 // rispetto allo scheduler è indifferente: fx risolve il gruppo prima di newScheduler.
 // Call once in batch.go init().
-func Module() {
+func Module(modes ...string) {
 	core.Provide(fx.Annotate(
 		newJobRegistrations,
 		fx.ParamTags(``, `group:"`+Group+`"`),
 		fx.ResultTags(`group:"`+scheduler.JobGroup+`,flatten"`),
-	))
+	), modes...)
 }
 
 const (
