@@ -41,13 +41,9 @@ Wira ogni componente **esplicitamente** e lo gate **solo** tramite i suoi modes:
 
 **Nessun default implicito:** `WithStore` è obbligatorio ed esplicito (Mongo o SQL); non esistono coppie store/dispatch mutuamente esclusive né un default Mongo/local: si passano esplicitamente i `Module` desiderati.
 
-**Vincolo d'ordine (garantito internamente da `Module`):**
+**Ordine di registrazione indifferente.** I job type confluiscono nel value group fx `batch_jobs` (`scheduler.ProvideJob`) e `newScheduler` li consuma dal gruppo: fx risolve tutti i contributori prima di costruire lo scheduler, a prescindere dall'ordine di registrazione. Tutte le registrazioni di `Module` sono inoltre raggruppate in un `fx.Module("batch")` per il namespacing del grafo/log fx (nessun `fx.Private`: i provide restano visibili all'app, i value group aggregano come prima).
 
-```
-store → redis → config supply → componenti scheduler → componenti worker → Scheduler (PER ULTIMO)
-```
-
-L'ordine dello Scheduler non è cosmetico: `newScheduler` legge la mappa globale `scheduler.Jobs` al momento della costruzione (popolata dai `Register()` dei componenti) e gli `fx.Invoke` girano nell'ordine di registrazione. Registrarlo prima di dispatcher/feed/kafkajob lo costruirebbe con la mappa job type ancora vuota → `"Job Type ... not found"`. L'ordine **relativo** dei componenti è invece indifferente: fx risolve i Provide per tipo.
+> In precedenza lo Scheduler doveva essere registrato **per ultimo** perché `newScheduler` leggeva una mappa globale `scheduler.Jobs` alla costruzione (popolata dai `Register()` dei componenti); registrarlo prima dava `"Job Type ... not found"`. Con il value group `batch_jobs` questo vincolo non esiste più.
 
 **Restano a carico dell'app:** registrare i task runner (`runner.Provide` / `runner.Register[T]` / `grpchandler.Provide`) e fornire il driver DB (`coremongo.NewService` o `coresql.NewService`). Il **simplejob NON è coperto** dall'orchestratore: resta wiring separato (vedi la sezione dedicata).
 
@@ -96,7 +92,7 @@ batch.Module(&cfg.BatchConfig,
 
 ## Modalità (job families)
 
-Tre famiglie di job, ciascuna un modulo Fx self-contained registrato in `scheduler.Jobs`. Condividono lo scheduler (gocron + **Redis distributed job lock**, applicato a *ogni* job) e lo store `work_items`.
+Tre famiglie di job, ciascuna un modulo Fx self-contained che registra la propria `scheduler.JobRegistration` nel value group `batch_jobs` (via `scheduler.ProvideJob`). Condividono lo scheduler (gocron + **Redis distributed job lock**, applicato a *ogni* job) e lo store `work_items`.
 
 | Famiglia | Job type / registrazione | Quando usarla |
 |---|---|---|
@@ -185,7 +181,7 @@ go-core-batch/
 ├── scheduler/
 │   ├── scheduler.go              # NewScheduler — gocron + Redis lock
 │   ├── config.go                 # Config: Name, Type, Cron, Disabled, SingletonMode, LockTimeout, Properties
-│   ├── registry.go               # Jobs map[string]JobFactory
+│   ├── registry.go               # JobRegistration, JobGroup ("batch_jobs"), ProvideJob, JobFactory
 │   ├── metrics.go                # Prometheus: TaskAssigned, TaskAssignedKO, JobExecution
 │   │
 │   ├── distributedjob/           # Job type distribuiti — claiming sempre attivo
@@ -347,9 +343,9 @@ scheduler:
 Utile per un singolo task type o quando non si usa il pattern `app/batch/`.
 
 ```go
-// main.go — prima di scheduler.Module(cfg.Scheduler)
-core.Invoke(func(items store.IWorkItemStore, data store.IData) {
-    distributedjob.Register(
+// main.go — l'ordine rispetto a scheduler.Module non conta (value group batch_jobs)
+scheduler.ProvideJob(func(items store.IWorkItemStore, data store.IData) scheduler.JobRegistration {
+    return distributedjob.Register(
         localdispatcher.New(runner.NewMux([]*runner.TaskRunner{
             runner.New("MY_TASK", &batch.MyRunner{}),
         }), items, data),
@@ -357,6 +353,8 @@ core.Invoke(func(items store.IWorkItemStore, data store.IData) {
     )
 })
 ```
+
+> `distributedjob.Register`/`RegisterByQuery`/`RegisterByS3File` ora **ritornano** una `scheduler.JobRegistration` (non scrivono più una mappa globale): vanno passate a `scheduler.ProvideJob`, che le inserisce nel value group `batch_jobs`. Nel wiring normale ci pensano `localdispatcher.Module()`/`grpcdispatcher.Module()`/`queryfeed.Module()`/`s3feed.Module()`.
 
 ### Con feed DB — DistribuiteTaskByQuery
 
@@ -597,7 +595,7 @@ func init() {
 }
 ```
 
-In alternativa `simplejob.ProvideRunner(constructor)` (costruttore esplicito che ritorna `*simplejob.SimpleTaskRunner`). Resta disponibile anche la registrazione low-level `simplejob.Register("MY_JOB", items, runner)`.
+In alternativa `simplejob.ProvideRunner(constructor)` (costruttore esplicito che ritorna `*simplejob.SimpleTaskRunner`). `simplejob.Module()` raccoglie i runner dal gruppo `batch_simple_runners` ed emette una `scheduler.JobRegistration` per runner nel gruppo `batch_jobs`.
 
 ### Runner — lifecycle dal valore di ritorno
 
@@ -751,7 +749,7 @@ In gRPC, `limit` e pool size sono dimensioni ortogonali: lo scheduler può claim
 ## Trappole
 
 - **L'Invoke sullo `*scheduler.Scheduler`** è obbligatorio per forzarne la costruzione da Fx — lo fa già `scheduler.Module()` internamente (non serve aggiungerlo a mano).
-- **`distributedjob.Register` / `localdispatcher.Module()`** deve essere invocato prima dello scheduler — gli Invoke Fx sono ordinati.
+- **`localdispatcher.Module()` / `grpcdispatcher.Module()`** possono essere registrati in qualunque ordine rispetto allo scheduler: la `scheduler.JobRegistration` confluisce nel value group `batch_jobs`, che fx risolve prima di costruire `newScheduler`.
 - **`runner.Provide(constructor)`** deve essere chiamato in `init()` — Fx raccoglie il gruppo `batch_runners` prima di invocare `Module()`.
 - **`gocron.NewTask` deve usare una closure zero-arg** che cattura le dipendenze — non passare interface nil come `...any` o gocron va in panic in reflect.
 - **Tabelle**: `work_items` e `task_logs` (costanti `store.TableWorkItems`, `store.TableTaskLogs`).
