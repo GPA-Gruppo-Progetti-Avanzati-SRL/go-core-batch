@@ -21,11 +21,12 @@ import (
 
 const JobType = "NotificationKafka"
 
-// Register registra il job NotificationKafka nella registry dello scheduler. Consuma il
+// Register costruisce la JobRegistration del job NotificationKafka. Consuma il
 // ProducerService (dal package internal kafkaproducer, non importabile dalle app) e lo store.
+// È un costruttore fx: il risultato confluisce nel value group batch_jobs via scheduler.ProvideJob.
 // lc e config vivono nel costruttore kafkaproducer.NewProducerService, non qui.
-func Register(producer *kafkaproducer.ProducerService, items store.IWorkItemStore) {
-	scheduler.Jobs[JobType] = makeNotificationJobFactory(producer, items)
+func Register(producer *kafkaproducer.ProducerService, items store.IWorkItemStore) scheduler.JobRegistration {
+	return scheduler.JobRegistration{Type: JobType, Factory: makeNotificationJobFactory(producer, items)}
 }
 
 // Module registra il job NotificationKafka nel container go-core-app (Provide del producer +
@@ -37,5 +38,5 @@ func Register(producer *kafkaproducer.ProducerService, items store.IWorkItemStor
 // standalone, l'app con core.Supply(&cfg) prima di chiamare Module().
 func Module(modes ...string) {
 	core.Provide(kafkaproducer.NewProducerService, modes...)
-	core.Invoke(Register, modes...)
+	scheduler.ProvideJob(Register, modes...)
 }

@@ -8,8 +8,8 @@ import (
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/grpctransport"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 )
 
 // GrpcDispatcher implements distributedjob.ITaskDispatcher by forwarding tasks via gRPC.
@@ -28,10 +28,6 @@ func (d *GrpcDispatcher) DispatchTask(ctx context.Context, jobId, taskId, object
 	return err
 }
 
-func register(d distributedjob.ITaskDispatcher, items store.IWorkItemStore, data store.IData) {
-	distributedjob.Register(d, items, data)
-}
-
 // Module wires the gRPC client and GrpcDispatcher, providing ITaskDispatcher via fx
 // so that queryfeed and s3feed modules can depend on it. La *grpc.ClientConfig è passata
 // come parametro e fornita a fx dal Module stesso (core.Supply interno): l'app non deve
@@ -44,5 +40,5 @@ func register(d distributedjob.ITaskDispatcher, items store.IWorkItemStore, data
 func Module(modes ...string) {
 	core.Provide(grpctransport.NewClient, modes...)
 	core.ProvideAs[distributedjob.ITaskDispatcher](NewGrpcDispatcher, modes...)
-	core.Invoke(register, modes...)
+	scheduler.ProvideJob(distributedjob.Register, modes...)
 }

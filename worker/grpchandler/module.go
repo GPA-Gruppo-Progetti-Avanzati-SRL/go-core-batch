@@ -16,7 +16,7 @@ func Provide(constructor any) {
 }
 
 type moduleParams struct {
-	fx.In
+	core.In
 	Lifecycle  fx.Lifecycle
 	WorkersCfg []worker.Config
 	GrpcServer *grpctransport.Server

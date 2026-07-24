@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	redislock "github.com/go-co-op/gocron-redis-lock/v2"
 	gocron "github.com/go-co-op/gocron/v2"
 	redis "github.com/redis/go-redis/v9"
@@ -19,11 +20,23 @@ type Scheduler struct {
 
 var tracer = otel.Tracer("Scheduler")
 
-func newScheduler(lc fx.Lifecycle, config []Config, redisClient *redis.Client, s Services) *Scheduler {
+// schedulerParams raccoglie le dipendenze di newScheduler. Jobs arriva dal value group
+// batch_jobs: fx risolve tutti i contributori del gruppo prima di costruire lo scheduler,
+// quindi l'ordine di registrazione dei job non è più load-bearing.
+type schedulerParams struct {
+	fx.In
+	LC          fx.Lifecycle
+	Config      []Config
+	RedisClient *redis.Client
+	Data        store.IData
+	Jobs        []JobRegistration `group:"batch_jobs"`
+}
+
+func newScheduler(p schedulerParams) *Scheduler {
 	sm := NewSchedulerMetrics()
 	opts := make([]gocron.SchedulerOption, 0)
 	logger := gocron.NewLogger(-1)
-	locker, err := redislock.NewRedisLocker(redisClient, redislock.WithTries(1))
+	locker, err := redislock.NewRedisLocker(p.RedisClient, redislock.WithTries(1))
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to connect to redis locker")
 	}
@@ -34,11 +47,17 @@ func newScheduler(lc fx.Lifecycle, config []Config, redisClient *redis.Client, s
 		log.Fatal().Err(err).Msg("Init scheduler")
 	}
 
-	for _, jobConfig := range config {
+	factories := make(map[string]JobFactory, len(p.Jobs))
+	for _, jr := range p.Jobs {
+		factories[jr.Type] = jr.Factory
+	}
+	s := Services{Data: p.Data}
+
+	for _, jobConfig := range p.Config {
 		if jobConfig.Disabled {
 			continue
 		}
-		runjob, ok := Jobs[jobConfig.Type]
+		runjob, ok := factories[jobConfig.Type]
 		if !ok {
 			log.Error().Msgf("Job Type '%s' not found", jobConfig.Type)
 			continue
@@ -52,7 +71,7 @@ func newScheduler(lc fx.Lifecycle, config []Config, redisClient *redis.Client, s
 		log.Info().Msgf("Istanced job %s", j.Name())
 	}
 
-	lc.Append(fx.Hook{
+	p.LC.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
 			scheduler.Start()
 			return nil

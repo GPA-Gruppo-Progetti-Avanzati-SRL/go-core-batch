@@ -7,10 +7,10 @@ import (
 	"context"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/runner"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
-	"go.uber.org/fx"
 )
 
 // LocalDispatcher implements distributedjob.ITaskDispatcher by running tasks in-process.
@@ -47,7 +47,7 @@ func (d *LocalDispatcher) DispatchTask(ctx context.Context, jobId, taskId, objec
 }
 
 type muxParams struct {
-	fx.In
+	core.In
 	Items   store.IWorkItemStore
 	Data    store.IData
 	Runners []*runner.TaskRunner `group:"batch_runners"`
@@ -57,16 +57,13 @@ func newMuxRunner(p muxParams) *runner.MuxRunner {
 	return runner.NewMux(p.Runners)
 }
 
-func register(d distributedjob.ITaskDispatcher, items store.IWorkItemStore, data store.IData) {
-	distributedjob.Register(d, items, data)
-}
-
 // Module registers the DistribuiteTask mux dispatcher with the fx application.
 // It provides ITaskDispatcher via fx so that queryfeed and s3feed modules can depend
-// on it. Call once (e.g. in an init()) before scheduler.NewScheduler.
+// on it. La JobRegistration del tipo DistribuiteTask confluisce nel value group batch_jobs
+// (scheduler.ProvideJob), quindi l'ordine rispetto allo scheduler è indifferente.
 // Se modes è vuoto registra sempre; altrimenti solo quando core.Mode è tra i modes indicati.
 func Module(modes ...string) {
 	core.Provide(newMuxRunner, modes...)
 	core.ProvideAs[distributedjob.ITaskDispatcher](New, modes...)
-	core.Invoke(register, modes...)
+	scheduler.ProvideJob(distributedjob.Register, modes...)
 }

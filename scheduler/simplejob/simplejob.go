@@ -68,31 +68,31 @@ func RegisterRunner[T any, PT interface {
 	})
 }
 
-type moduleParams struct {
-	fx.In
-	Items   store.IWorkItemStore
-	Runners []*SimpleTaskRunner `group:"batch_simple_runners"`
+// newJobRegistrations trasforma i SimpleTaskRunner raccolti dal gruppo batch_simple_runners
+// in JobRegistration, una per runner. Il job trova tutti i WorkItem pending di quel tipo e
+// chiama runner.Run per ciascuno. Items che riescono → DONE, che falliscono → FAILED. Un
+// runner può ritornare store.Retry/store.RetryWithCause per riportare l'item a PENDING (con
+// next_run_at schedulato) invece di fallirlo definitivamente, o store.ErrHandled per segnalare
+// di aver già finalizzato l'item (es. MarkDone insieme a insert figli in transazione), così il
+// framework non applica alcun Mark* di default.
+func newJobRegistrations(items store.IWorkItemStore, runners []*SimpleTaskRunner) []scheduler.JobRegistration {
+	regs := make([]scheduler.JobRegistration, len(runners))
+	for i, r := range runners {
+		regs[i] = scheduler.JobRegistration{Type: r.JobType, Factory: makeFactory(items, r.Runner)}
+	}
+	return regs
 }
 
-// Module registers all SimpleTaskRunners collected via the batch_simple_runners fx group.
-// Call once in batch.go init() before scheduler.NewScheduler.
+// Module registers all SimpleTaskRunners collected via the batch_simple_runners fx group,
+// emitting one JobRegistration per runner into the batch_jobs group (flatten). L'ordine
+// rispetto allo scheduler è indifferente: fx risolve il gruppo prima di newScheduler.
+// Call once in batch.go init().
 func Module() {
-	core.Invoke(func(p moduleParams) {
-		for _, r := range p.Runners {
-			Register(r.JobType, p.Items, r.Runner)
-		}
-	})
-}
-
-// Register adds a job type with the given name to the global scheduler registry.
-// The job finds all pending WorkItems of that type and calls runner.Run for each.
-// Items that succeed are marked DONE; items that fail are marked FAILED. A runner
-// may return store.Retry/store.RetryWithCause to reset the item to PENDING (with a
-// scheduled next_run_at) instead of failing it permanently, or store.ErrHandled to
-// signal it has already finalized the item itself (e.g. MarkDone together with child
-// inserts in a transaction) so the framework applies no default Mark*.
-func Register(jobType string, items store.IWorkItemStore, runner ITaskRunner) {
-	scheduler.Jobs[jobType] = makeFactory(items, runner)
+	core.Provide(fx.Annotate(
+		newJobRegistrations,
+		fx.ParamTags(``, `group:"`+Group+`"`),
+		fx.ResultTags(`group:"`+scheduler.JobGroup+`,flatten"`),
+	))
 }
 
 const (

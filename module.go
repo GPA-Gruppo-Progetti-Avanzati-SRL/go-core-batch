@@ -94,11 +94,11 @@ func WithWorkerModule(m ...ModuleFunc) Option {
 // WithWorkerModule sui worker modes. Lo store fa eccezione: è wirato sempre (serve a entrambi i lati).
 // È il core.Mode a runtime a decidere cosa viene effettivamente costruito.
 //
-// Ordine di registrazione: store → config supply → componenti scheduler → componenti worker →
-// Scheduler PER ULTIMO. L'ordine dello Scheduler non è cosmetico: newScheduler legge la mappa
-// globale scheduler.Jobs al momento della costruzione, popolata dai Register() dei componenti;
-// registrarlo prima lo costruirebbe con la mappa job type ancora vuota ("Job Type ... not found").
-// L'ordine RELATIVO dei componenti scheduler è invece indifferente: fx risolve i Provide per tipo.
+// Ordine di registrazione: indifferente. I job type confluiscono nel value group batch_jobs
+// (scheduler.ProvideJob) e newScheduler li consuma dal gruppo, quindi fx risolve tutti i
+// contributori prima di costruire lo Scheduler a prescindere dall'ordine di registrazione.
+// (In precedenza lo Scheduler doveva essere registrato per ultimo perché newScheduler leggeva
+// la mappa globale scheduler.Jobs al momento della costruzione.)
 //
 // Restano a carico dell'app: la registrazione dei task runner (runner.Provide / grpchandler.Provide)
 // e la fornitura del driver DB (coremongo.NewService / coresql.NewService).
@@ -151,6 +151,7 @@ func Module(cfg *Config, opts ...Option) {
 		m(work...)
 	}
 
-	// Scheduler: DEVE restare l'ultimo Module registrato (vedi nota sull'ordine sopra).
+	// Scheduler: i job confluiscono nel value group batch_jobs, quindi l'ordine di
+	// registrazione è indifferente (vedi nota sull'ordine sopra).
 	scheduler.Module(cfg.JobsConfig, sched...)
 }

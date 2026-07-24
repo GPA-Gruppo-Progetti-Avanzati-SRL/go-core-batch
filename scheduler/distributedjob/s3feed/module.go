@@ -21,6 +21,7 @@ import (
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/s3client"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/s3"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/runner"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
@@ -48,9 +49,9 @@ func wrappedRunnersProvide() interface{} {
 	)
 }
 
-func registerS3(d distributedjob.ITaskDispatcher, items store.IWorkItemStore, data store.IData, reg *s3client.Registry) {
+func registerS3(d distributedjob.ITaskDispatcher, items store.IWorkItemStore, data store.IData, reg *s3client.Registry) scheduler.JobRegistration {
 	feed := New(reg)
-	distributedjob.RegisterByS3File(d, items, feed, data)
+	return distributedjob.RegisterByS3File(d, items, feed, data)
 }
 
 // Module registers the DistribuiteTaskByS3File job type unconditionally.
@@ -63,5 +64,5 @@ func registerS3(d distributedjob.ITaskDispatcher, items store.IWorkItemStore, da
 func Module(modes ...string) {
 	core.Provide(provideRegistry, modes...)
 	core.Provide(wrappedRunnersProvide(), modes...)
-	core.Invoke(registerS3, modes...)
+	scheduler.ProvideJob(registerS3, modes...)
 }
