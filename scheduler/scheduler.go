@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/lock"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/gocronlock"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
-	redislock "github.com/go-co-op/gocron-redis-lock/v2"
 	gocron "github.com/go-co-op/gocron/v2"
-	redis "github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/otel"
 	"go.uber.org/fx"
@@ -25,21 +25,22 @@ var tracer = otel.Tracer("Scheduler")
 // quindi l'ordine di registrazione dei job non è più load-bearing.
 type schedulerParams struct {
 	fx.In
-	LC          fx.Lifecycle
-	Config      []Config
-	RedisClient *redis.Client
-	Data        store.IData
-	Jobs        []JobRegistration `group:"batch_jobs"`
+	LC     fx.Lifecycle
+	Config []Config
+	Locker lock.Locker
+	Data   store.IData
+	Jobs   []JobRegistration `group:"batch_jobs"`
 }
 
 func newScheduler(p schedulerParams) *Scheduler {
 	sm := NewSchedulerMetrics()
 	opts := make([]gocron.SchedulerOption, 0)
 	logger := gocron.NewLogger(-1)
-	locker, err := redislock.NewRedisLocker(p.RedisClient, redislock.WithTries(1))
-	if err != nil {
-		log.Fatal().Err(err).Msg("failed to connect to redis locker")
-	}
+	// The distributed lock is a dispatch-dedup optimization across replicas, not
+	// the correctness mechanism (that is the DB claiming in the job runners). The
+	// concrete backend (Redis/Mongo/SQL) is injected as a neutral lock.Locker and
+	// adapted to gocron here.
+	locker := gocronlock.Adapt(p.Locker)
 	opts = append(opts, gocron.WithDistributedLocker(locker), gocron.WithMonitor(sm), gocron.WithLogger(logger))
 
 	scheduler, err := gocron.NewScheduler(opts...)

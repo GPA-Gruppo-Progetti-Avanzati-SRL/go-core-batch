@@ -2,16 +2,14 @@ package batch
 
 import (
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/redis"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 )
 
 // ModuleFunc è la firma comune di TUTTI i Module() componibili di go-core-batch (store,
 // dispatcher, query store, feed, job Kafka, worker pool). Ogni package espone ormai un
 // Module() modes-only `func(modes ...string)`: il config non è più un parametro, ma viene
-// iniettato da fx. È batch.Module a fornirlo (core.Supply della Config unificata), esattamente
-// come fa da sempre per la RedisConfig. Così ogni Module si passa per RIFERIMENTO DIRETTO —
-// niente closure.
+// iniettato da fx. È batch.Module a fornirlo (core.Supply della Config unificata). Così ogni
+// Module si passa per RIFERIMENTO DIRETTO — niente closure.
 //
 // È questo il pattern che preserva la modularità COMPILE-TIME: il package `batch` NON importa
 // nessun package di backend (importa solo i loro Config, che sono struct leggere), quindi è
@@ -28,6 +26,7 @@ type options struct {
 	schedulerModes []string
 	workerModes    []string
 	store          ModuleFunc   // obbligatorio, sempre attivo
+	locker         ModuleFunc   // obbligatorio, gate-ato sui scheduler modes
 	modules        []ModuleFunc // gate-ati sui scheduler modes
 	workerModules  []ModuleFunc // gate-ati sui worker modes
 }
@@ -54,6 +53,19 @@ func WithWorkerModes(modes ...string) Option {
 //	batch.WithStore(storemongo.Module)   // l'app importa SOLO storemongo → niente bun
 func WithStore(m ModuleFunc) Option {
 	return func(o *options) { o.store = m }
+}
+
+// WithLocker inietta il backend del lock distribuito dello scheduler (un lock.Locker).
+// È OBBLIGATORIO (come WithStore): rende esplicita la scelta infrastrutturale. Il lock è
+// un'ottimizzazione di dispatch-dedup tra repliche, NON la garanzia di correttezza (quella
+// è il DB claiming nei runner). Il backend è iniettato per riferimento diretto e gate-ato
+// sui scheduler modes; il suo eventuale config è gestito dalla sua lib (non da batch).
+//
+//	batch.WithLocker(redislocker.Module)   // da go-core-redis/locker (+ redis.Module per il client)
+//	batch.WithLocker(mongolocker.Module)   // da go-core-mongo/locker — nessun Redis richiesto
+//	batch.WithLocker(sqllocker.Module)     // da go-core-sql/locker
+func WithLocker(m ModuleFunc) Option {
+	return func(o *options) { o.locker = m }
 }
 
 // WithModule aggiunge uno o più componenti lato scheduler, gate-ati sui scheduler modes. I
@@ -87,8 +99,8 @@ func WithWorkerModule(m ...ModuleFunc) Option {
 // tipi Config sono leggeri, supplirli non introduce dipendenze pesanti). I config dei backend
 // (grpc client/server, kafka, s3, worker) sono suppliti SOLO se valorizzati: un config non
 // impostato non viene supplito e, se un componente attivo lo richiede, fx fallisce subito con un
-// chiaro "missing dependency" invece di far girare il backend con valori vuoti. La RedisConfig fa
-// eccezione: è supplita sempre perché lo Scheduler richiede *redis.Client (hard dependency).
+// chiaro "missing dependency" invece di far girare il backend con valori vuoti. Il lock distribuito
+// non è più un'eccezione: è un backend iniettato (WithLocker), come store e gli altri.
 //
 // Gating: i componenti di WithModule e lo Scheduler girano sui scheduler modes; quelli di
 // WithWorkerModule sui worker modes. Lo store fa eccezione: è wirato sempre (serve a entrambi i lati).
@@ -110,6 +122,9 @@ func Module(cfg *Config, opts ...Option) {
 	if o.store == nil {
 		panic("batch.Module: WithStore è obbligatorio (store.IData/IWorkItemStore serve a scheduler e worker)")
 	}
+	if o.locker == nil {
+		panic("batch.Module: WithLocker è obbligatorio (lock distribuito dello scheduler: redis/mongo/sql)")
+	}
 	sched := o.schedulerModes
 	work := o.workerModes
 
@@ -122,10 +137,9 @@ func Module(cfg *Config, opts ...Option) {
 		// sempre attivi (nessun mode gate → chiamata senza modes).
 		o.store()
 
-		// RedisConfig + client: sempre (lo Scheduler richiede *redis.Client come hard dependency,
-		// vedi newScheduler → redislock.NewRedisLocker).
-		core.Supply(&cfg.RedisConfig, sched...)
-		core.Provide(redis.NewService, sched...)
+		// Lock distribuito: backend iniettato (redis/mongo/sql), gate-ato sui scheduler modes.
+		// Il suo eventuale config è fornito dalla sua lib (es. redis.Module dell'app), non da batch.
+		o.locker(sched...)
 
 		// Config dei backend: suppliti a fx SOLO se valorizzati. Un config non impostato non viene
 		// supplito, così se un componente attivo lo richiede fx fallisce subito con un chiaro

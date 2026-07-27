@@ -18,9 +18,9 @@ type jobGroupConsumer struct {
 // fornite via il group tag batch_jobs (come fa scheduler.ProvideJob) sono raccolte da un
 // consumer con lo stesso tag ANCHE quando sono fornite a fx DOPO il consumer nella lista di
 // opzioni. È la prova che il vecchio vincolo "scheduler per ultimo" (mappa globale letta a
-// build time) è rimosso: fx risolve l'intero gruppo prima di iniettarlo. La costruzione dei
-// gocron.Task da parte di newScheduler richiede un redis vivo (redislock pinga in dial) ed è
-// coperta a livello integrazione; qui si verifica il wiring fx del gruppo.
+// build time) è rimosso: fx risolve l'intero gruppo prima di iniettarlo. La costruzione dello
+// Scheduler da parte di newScheduler richiede un lock.Locker iniettato (backend redis/mongo/sql)
+// ed è coperta a livello integrazione; qui si verifica il wiring fx del gruppo.
 func TestJobValueGroupOrderIndependent(t *testing.T) {
 	var got jobGroupConsumer
 	provideJob := func(typ string) fx.Option {
