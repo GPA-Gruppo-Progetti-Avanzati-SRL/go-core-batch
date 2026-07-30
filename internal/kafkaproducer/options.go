@@ -53,7 +53,8 @@ func (kgoLogger) Log(level kgo.LogLevel, msg string, keyvals ...any) {
 	e.Msg(msg)
 }
 
-// buildTLSConfig costruisce la tls.Config per il dial verso i broker. Se caLocation è
+// buildTLSConfig costruisce
+// la tls.Config per il dial verso i broker. Se caLocation è
 // valorizzato, il PEM (tipicamente il truststore con la CA privata) viene caricato in RootCAs:
 // senza questo, con una CA non nei root di sistema, la verifica fallisce con
 // "x509: certificate signed by unknown authority". skipVerify disabilita la verifica (insicuro).
@@ -71,6 +72,13 @@ func buildTLSConfig(caLocation string, skipVerify bool) (*tls.Config, error) {
 		cfg.RootCAs = pool
 	}
 	return cfg, nil
+}
+
+// transactionalID ritorna il transactional.id configurato (campo di primo livello
+// producer.transactional-id) e se è valorizzato. Serve al ProducerService per il fail-fast:
+// senza un id il client franz-go NON è transazionale e BeginTransaction fallirebbe.
+func transactionalID(p kafka.ProducerConfig) (string, bool) {
+	return p.TransactionalID, p.TransactionalID != ""
 }
 
 // buildKafkaOptions traduce la *kafka.Config in opzioni franz-go. È plumbing
@@ -133,6 +141,11 @@ func buildKafkaOptions(cfgKafka *kafka.Config, extraConfig map[string]interface{
 		opts = append(opts, kgo.ConsumerGroup(cfgKafka.GroupId))
 	}
 
+	// Transactional producer (EOS): id come campo di primo livello producer.transactional-id.
+	if cfgKafka.Producer.TransactionalID != "" {
+		opts = append(opts, kgo.TransactionalID(cfgKafka.Producer.TransactionalID))
+	}
+
 	// Extra Config handling (best effort mapping)
 	for key, value := range extraConfig {
 		k := strings.ReplaceAll(key, "_", ".")
@@ -147,10 +160,6 @@ func buildKafkaOptions(cfgKafka *kafka.Config, extraConfig map[string]interface{
 				case "0":
 					opts = append(opts, kgo.RequiredAcks(kgo.NoAck()))
 				}
-			}
-		case kafka.TransactionalIdPropertyName:
-			if s, ok := value.(string); ok {
-				opts = append(opts, kgo.TransactionalID(s))
 			}
 		case kafka.AutoOffsetResetPropertyName:
 			if s, ok := value.(string); ok {

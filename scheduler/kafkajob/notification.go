@@ -23,7 +23,6 @@ import (
 
 var tracer = otel.Tracer("NotificationKafkaJob")
 
-const defaultKafkaOrphanTimeout = 10 * time.Minute
 const defaultKafkaLimit = 100
 
 func makeNotificationJobFactory(producer *kafkaproducer.ProducerService, items store.IWorkItemStore) scheduler.JobFactory {
@@ -58,19 +57,11 @@ func notificationJobRun(name string, producer *kafkaproducer.ProducerService, it
 		}
 	}
 
-	timeout := 30 * time.Second
-	if v := p["timeout"]; v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			timeout = time.Duration(n) * time.Second
-		}
-	}
+	// Convenzione unica (scheduler.Config.ResolveTimeouts): LockTimeout governa sia il timeout
+	// del context di run sia l'età di orphan. Prima il run usava il knob ad-hoc properties["timeout"].
+	runTimeout, orphanTimeout := config.ResolveTimeouts()
 
-	orphanTimeout := config.LockTimeout
-	if orphanTimeout == 0 {
-		orphanTimeout = defaultKafkaOrphanTimeout
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
 	defer cancel()
 
 	spanCtx, span := tracer.Start(ctx, name)
@@ -95,43 +86,47 @@ func notificationJobRun(name string, producer *kafkaproducer.ProducerService, it
 	}
 	log.Info().Msgf("[%s] processing %d item(s) (%d orphaned, %d fresh)", jobId, len(all), norph, nfresh)
 
-	ids, kafkaMsgs := prepareMessages(all)
+	valid, kafkaMsgs := prepareMessages(all)
 	if len(kafkaMsgs) == 0 {
-		// all items had invalid payload — mark them failed individually
+		// all items had invalid payload — mark them failed individually (fenced dal token)
 		for _, item := range all {
-			items.MarkFailed(spanCtx, item.Id, "invalid payload")
+			items.MarkFailed(spanCtx, item.Id, item.LockToken, "invalid payload")
 		}
 		return nil
 	}
 
 	if errProduce := producer.ProduceMessages(spanCtx, kafkaMsgs, topic); errProduce != nil {
 		span.RecordError(errProduce)
-		log.Error().Err(errProduce).Msgf("[%s] Kafka produce failed — resetting %d items to PENDING", jobId, len(ids))
+		log.Error().Err(errProduce).Msgf("[%s] Kafka produce failed — resetting %d items to PENDING", jobId, len(valid))
 		// Transient Kafka failure — reset claimed items so they are retried next tick.
 		var retryErr *store.RetryError
 		var after time.Duration
 		if errors.As(errProduce, &retryErr) {
 			after = retryErr.After
 		}
-		for _, id := range ids {
-			items.MarkPending(spanCtx, id, after)
+		for _, item := range valid {
+			items.MarkPending(spanCtx, item.Id, item.LockToken, after)
 		}
 		return errProduce
 	}
 
-	// At-least-once: if MarkDone fails, items will be re-sent on the next tick.
-	if errMark := items.MarkDone(spanCtx, ids); errMark != nil {
-		span.RecordError(errMark)
-		log.Error().Err(errMark).Msgf("[%s] ATTENZIONE: Kafka produce OK ma MarkDone fallito — %d items saranno ri-inviati", jobId, len(ids))
-		return errMark
+	// At-least-once: se un MarkDone non matcha (token stale) l'item verrà ri-inviato al tick
+	// successivo. MarkDone è per-item (ogni item ha il suo fencing token) e idempotente.
+	for _, item := range valid {
+		if errMark := items.MarkDone(spanCtx, item.Id, item.LockToken); errMark != nil {
+			span.RecordError(errMark)
+			log.Error().Err(errMark).Msgf("[%s] MarkDone fallito per item %s", jobId, item.Id)
+		}
 	}
 
-	log.Info().Msgf("[%s] sent %d message(s) to topic %s", jobId, len(ids), topic)
+	log.Info().Msgf("[%s] sent %d message(s) to topic %s", jobId, len(valid), topic)
 	return nil
 }
 
-func prepareMessages(items []*store.WorkItem) ([]string, []*kafka.Message) {
-	var ids []string
+// prepareMessages ritorna gli item con payload valido (allineati ai messaggi Kafka prodotti):
+// restituire gli item — non solo gli id — permette ai Mark* di usare il fencing token di ciascuno.
+func prepareMessages(items []*store.WorkItem) ([]*store.WorkItem, []*kafka.Message) {
+	var valid []*store.WorkItem
 	var out []*kafka.Message
 
 	for _, item := range items {
@@ -160,10 +155,10 @@ func prepareMessages(items []*store.WorkItem) ([]string, []*kafka.Message) {
 			km.MessageHeader = headers
 		}
 		out = append(out, km)
-		ids = append(ids, item.Id)
+		valid = append(valid, item)
 	}
-	log.Debug().Msgf("S - preparati %d messaggi su %d work items", len(ids), len(items))
-	return ids, out
+	log.Debug().Msgf("S - preparati %d messaggi su %d work items", len(valid), len(items))
+	return valid, out
 }
 
 // bsonToNative converte ricorsivamente i tipi bson (D/M/A) in tipi JSON-native

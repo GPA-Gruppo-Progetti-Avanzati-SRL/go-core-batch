@@ -6,13 +6,38 @@ package s3client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 )
+
+// ErrObjectNotFound è ritornato (wrapped) da Get quando l'oggetto non esiste nel bucket.
+// Permette al chiamante di distinguere "file non presente" (es. già spostato da un tentativo
+// precedente) da un errore di download transitorio, con errors.Is.
+var ErrObjectNotFound = errors.New("s3client: object not found")
+
+// isNotFound riconosce l'errore S3 di oggetto mancante, sia come tipo (*types.NoSuchKey)
+// sia come APIError generico con codice NoSuchKey/NotFound (404).
+func isNotFound(err error) bool {
+	var nsk *types.NoSuchKey
+	if errors.As(err, &nsk) {
+		return true
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "NoSuchKey", "NotFound":
+			return true
+		}
+	}
+	return false
+}
 
 // Object represents a single S3 object returned by List.
 type Object struct {
@@ -60,6 +85,9 @@ func (s *Service) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 		Key:    aws.String(key),
 	})
 	if err != nil {
+		if isNotFound(err) {
+			return nil, fmt.Errorf("s3 get key=%q: %w", key, ErrObjectNotFound)
+		}
 		return nil, fmt.Errorf("s3 get key=%q: %w", key, err)
 	}
 	return out.Body, nil

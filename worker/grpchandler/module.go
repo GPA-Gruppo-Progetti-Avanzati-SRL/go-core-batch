@@ -62,20 +62,15 @@ func (s *runnerService) GetTaskExecutions(taskType string) (worker.RunTask[*runn
 	if !ok {
 		return nil, false
 	}
-	return func(t *worker.Task, _ *runnerService, items store.IWorkItemStore) *core.ApplicationError {
+	// Solo adattamento: carica il WorkItem ed esegue il runner. La finalizzazione del
+	// lifecycle (store.ApplyResult) è centralizzata in worker.Run, che riceve questo errore.
+	return func(t *worker.Task, _ *runnerService, items store.IWorkItemStore) error {
 		item, appErr := items.GetById(t.Context, t.ObjectId)
 		if appErr != nil {
 			return appErr
 		}
-		runErr := r.Run(t.Context, item)
-		outcome, markErr := store.ApplyResult(t.Context, items, t.ObjectId, runErr)
-		if markErr != nil {
-			return core.TechnicalErrorWithError(markErr)
-		}
-		// Done/Handled → success; Retry/Failed → surface the error for task_logs.
-		if outcome == store.OutcomeDone || outcome == store.OutcomeHandled {
-			return nil
-		}
-		return core.TechnicalErrorWithError(runErr)
+		// Passa il fencing token (fresco) a worker.Run, che finalizzerà via store.ApplyResult.
+		t.LockToken = item.LockToken
+		return r.Run(t.Context, item)
 	}, true
 }

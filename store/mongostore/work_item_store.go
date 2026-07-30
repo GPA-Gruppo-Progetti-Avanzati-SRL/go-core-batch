@@ -3,7 +3,6 @@ package mongostore
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 
@@ -128,6 +127,8 @@ func (d *workItemData) ClaimPending(ctx context.Context, workType, destination, 
 		return nil, core.TechnicalErrorWithError(err)
 	}
 
+	token := store.NewLockToken()
+	host := store.Hostname()
 	var claimed []*store.WorkItem
 	for _, item := range candidates {
 		claimFilter := workItemFilter{Id: item.Id, Status: store.StatusPending}
@@ -135,6 +136,8 @@ func (d *workItemData) ClaimPending(ctx context.Context, workType, destination, 
 			"status":     store.StatusInProgress,
 			"lockedAt":   now,
 			"updateTime": now,
+			"lockToken":  token,
+			"lockedBy":   host,
 		}}
 		if err := mongo.UpdateOne(ctx, d.Service, claimFilter, update); err != nil {
 			if err.Code == "MON-AGGINC" {
@@ -144,6 +147,8 @@ func (d *workItemData) ClaimPending(ctx context.Context, workType, destination, 
 		}
 		item.Status = store.StatusInProgress
 		item.LockedAt = &now
+		item.LockToken = token
+		item.LockedBy = host
 		claimed = append(claimed, item)
 	}
 	return claimed, nil
@@ -179,17 +184,24 @@ func (d *workItemData) RecoverOrphans(ctx context.Context, workType, destination
 		return nil, core.TechnicalErrorWithError(err)
 	}
 
+	token := store.NewLockToken()
+	host := store.Hostname()
 	var claimed []*store.WorkItem
 	for _, item := range candidates {
 		res, err := coll.UpdateOne(ctx,
 			bson.M{"_id": item.Id, "status": store.StatusInProgress, "lockedAt": bson.M{"$lt": cutoff}},
-			bson.M{"$set": bson.M{"lockedAt": now, "updateTime": now}, "$inc": bson.M{"retry": 1}},
+			bson.M{
+				"$set": bson.M{"lockedAt": now, "updateTime": now, "lockToken": token, "lockedBy": host},
+				"$inc": bson.M{"retry": 1},
+			},
 		)
 		if err != nil {
 			return claimed, core.TechnicalErrorWithError(err)
 		}
 		if res.ModifiedCount == 1 {
 			item.LockedAt = &now
+			item.LockToken = token
+			item.LockedBy = host
 			item.Retry++
 			claimed = append(claimed, item)
 		}
@@ -197,52 +209,53 @@ func (d *workItemData) RecoverOrphans(ctx context.Context, workType, destination
 	return claimed, nil
 }
 
-// MarkDone transitions the given IN_PROGRESS items to DONE.
-// Returns an error if any id is not found in IN_PROGRESS state.
-func (d *workItemData) MarkDone(ctx context.Context, ids []string) *core.ApplicationError {
+// fencedFilter è il filtro base dei Mark*: item ancora IN_PROGRESS E con il fencing token
+// del claim corrente. Se il token non matcha (item ri-claimato da un'altra replica) l'update
+// non tocca nulla → il worker stale non può finalizzare l'item.
+func fencedFilter(id, token string) bson.M {
+	return bson.M{"_id": id, "status": store.StatusInProgress, "lockToken": token}
+}
+
+// MarkDone transitions a single IN_PROGRESS item to DONE, fenced dal token. Idempotente:
+// 0 righe modificate (item già finalizzato o token stale) NON è un errore — è l'esito atteso
+// quando un worker stale prova a finalizzare un item ri-claimato altrove.
+func (d *workItemData) MarkDone(ctx context.Context, id, token string) *core.ApplicationError {
 	now := time.Now()
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
-	res, err := coll.UpdateMany(ctx,
-		bson.M{"_id": bson.M{"$in": ids}, "status": store.StatusInProgress},
+	res, err := coll.UpdateOne(ctx, fencedFilter(id, token),
 		bson.M{"$set": bson.M{"status": store.StatusDone, "updateTime": now, "lockedAt": nil}},
 	)
 	if err != nil {
 		return core.TechnicalErrorWithError(err)
 	}
-	if int(res.ModifiedCount) != len(ids) {
-		return core.TechnicalErrorWithCodeAndMessage("WIS-MD-001",
-			fmt.Sprintf("MarkDone: expected %d IN_PROGRESS items, modified %d", len(ids), res.ModifiedCount))
+	if res.ModifiedCount == 0 {
+		log.Debug().Msgf("MarkDone: item %q non aggiornato (già finalizzato o token stale)", id)
 	}
 	return nil
 }
 
-// MarkFailed transitions the given IN_PROGRESS item to FAILED.
-// Returns an error if the item is not found in IN_PROGRESS state.
-func (d *workItemData) MarkFailed(ctx context.Context, id, reason string) *core.ApplicationError {
+// MarkFailed transitions a single IN_PROGRESS item to FAILED, fenced dal token (idempotente).
+func (d *workItemData) MarkFailed(ctx context.Context, id, token, reason string) *core.ApplicationError {
 	now := time.Now()
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
-	res, err := coll.UpdateOne(ctx,
-		bson.M{"_id": id, "status": store.StatusInProgress},
+	res, err := coll.UpdateOne(ctx, fencedFilter(id, token),
 		bson.M{"$set": bson.M{"status": store.StatusFailed, "error": reason, "updateTime": now, "lockedAt": nil}},
 	)
 	if err != nil {
 		return core.TechnicalErrorWithError(err)
 	}
 	if res.ModifiedCount == 0 {
-		return core.TechnicalErrorWithCodeAndMessage("WIS-MF-001",
-			fmt.Sprintf("MarkFailed: item %q not found in IN_PROGRESS state", id))
+		log.Debug().Msgf("MarkFailed: item %q non aggiornato (già finalizzato o token stale)", id)
 	}
 	return nil
 }
 
-// MarkPending resets the given IN_PROGRESS item back to PENDING for retry.
-// Returns an error if the item is not found in IN_PROGRESS state.
-func (d *workItemData) MarkPending(ctx context.Context, id string, after time.Duration) *core.ApplicationError {
+// MarkPending resets a single IN_PROGRESS item back to PENDING for retry, fenced dal token (idempotente).
+func (d *workItemData) MarkPending(ctx context.Context, id, token string, after time.Duration) *core.ApplicationError {
 	now := time.Now()
 	nextRunAt := now.Add(after)
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
-	res, err := coll.UpdateOne(ctx,
-		bson.M{"_id": id, "status": store.StatusInProgress},
+	res, err := coll.UpdateOne(ctx, fencedFilter(id, token),
 		bson.M{
 			"$set": bson.M{"status": store.StatusPending, "lockedAt": nil, "updateTime": now, "nextRunAt": nextRunAt},
 			"$inc": bson.M{"retry": 1},
@@ -252,8 +265,7 @@ func (d *workItemData) MarkPending(ctx context.Context, id string, after time.Du
 		return core.TechnicalErrorWithError(err)
 	}
 	if res.ModifiedCount == 0 {
-		return core.TechnicalErrorWithCodeAndMessage("WIS-MP-001",
-			fmt.Sprintf("MarkPending: item %q not found in IN_PROGRESS state", id))
+		log.Debug().Msgf("MarkPending: item %q non aggiornato (già finalizzato o token stale)", id)
 	}
 	return nil
 }

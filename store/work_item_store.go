@@ -22,14 +22,18 @@ type IWorkItemStore interface {
 	// immediate processing in the current run — no reset to PENDING, no waiting for
 	// the next tick. destination and objectType are optional — pass "" to skip.
 	RecoverOrphans(ctx context.Context, workType, destination, objectType string, maxAge time.Duration, limit int) ([]*WorkItem, *core.ApplicationError)
-	MarkDone(ctx context.Context, ids []string) *core.ApplicationError
-	MarkFailed(ctx context.Context, id, reason string) *core.ApplicationError
+	// MarkDone transitions a single IN_PROGRESS item to DONE. È fenced dal token: la
+	// transizione avviene solo se lock_token coincide con quello passato (il claim corrente).
+	// È idempotente: se nessuna riga matcha (item già finalizzato o token stale) ritorna nil.
+	MarkDone(ctx context.Context, id, token string) *core.ApplicationError
+	MarkFailed(ctx context.Context, id, token, reason string) *core.ApplicationError
 	// MarkPending resets an item back to PENDING and increments retry.
-	// Use this when a task returns store.ErrRetry.
+	// Use this when a task returns store.RetryError.
 	// retryDelay controls when the item becomes claimable again:
 	//   0              → next_run_at = now (immediately claimable)
-	//   > 0            → next_run_at = now + retry * retryDelay (linear backoff)
-	MarkPending(ctx context.Context, id string, retryDelay time.Duration) *core.ApplicationError
+	//   > 0            → next_run_at = now + retryDelay
+	// È fenced dal token come gli altri Mark*.
+	MarkPending(ctx context.Context, id, token string, retryDelay time.Duration) *core.ApplicationError
 	Insert(ctx context.Context, items []*WorkItem) *core.ApplicationError
 	// InsertIfNotActive inserts workitems only when no PENDING or IN_PROGRESS entry
 	// already exists for the same (type, object_id). Returns the number inserted.

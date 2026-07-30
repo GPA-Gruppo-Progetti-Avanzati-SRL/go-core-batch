@@ -19,8 +19,6 @@ import (
 
 var tracer = otel.Tracer("DistribuiteTask")
 
-const defaultOrphanTimeout = 10 * time.Minute
-
 func jobID(name string) string {
 	return fmt.Sprintf("%s-%s", name, time.Now().Format("20060102150405"))
 }
@@ -48,13 +46,12 @@ func jobRunWithClaiming(name string, dispatcher ITaskDispatcher, items store.IWo
 		return fmt.Errorf("property 'limit' is not an integer: %s", limit)
 	}
 
-	orphanTimeout := config.LockTimeout
-	if orphanTimeout == 0 {
-		orphanTimeout = defaultOrphanTimeout
-	}
+	// Convenzione unica (scheduler.Config.ResolveTimeouts): LockTimeout governa sia il timeout
+	// del context di run sia l'età di orphan. Prima qui il run era hardcoded a 5m, ignorando LockTimeout.
+	runTimeout, orphanTimeout := config.ResolveTimeouts()
 
 	jobId := jobID(name)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
 	defer cancel()
 
 	spanCtx, span := tracer.Start(ctx, name)

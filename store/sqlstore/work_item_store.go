@@ -2,7 +2,6 @@ package sqlstore
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -77,6 +76,8 @@ func (d *workItemDataSQL) FindPending(ctx context.Context, workType, destination
 // Uses SELECT FOR UPDATE SKIP LOCKED — safe across multiple replicas.
 func (d *workItemDataSQL) ClaimPending(ctx context.Context, workType, destination, objectType string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
 	now := time.Now()
+	token := store.NewLockToken()
+	host := store.Hostname()
 	var items []*store.WorkItem
 	err := d.DB.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		q := `SELECT * FROM work_items WHERE type = ? AND status = ?
@@ -103,11 +104,15 @@ func (d *workItemDataSQL) ClaimPending(ctx context.Context, workType, destinatio
 			ids[i] = it.Id
 			it.Status = store.StatusInProgress
 			it.LockedAt = &now
+			it.LockToken = token
+			it.LockedBy = host
 		}
 		_, err := tx.NewUpdate().TableExpr(store.TableWorkItems).
 			Set("status = ?", store.StatusInProgress).
 			Set("locked_at = ?", now).
 			Set("update_time = ?", now).
+			Set("lock_token = ?", token).
+			Set("locked_by = ?", host).
 			Where("id IN (?)", bun.List(ids)).
 			Exec(ctx)
 		return err
@@ -126,6 +131,9 @@ func (d *workItemDataSQL) RecoverOrphans(ctx context.Context, workType, destinat
 	cutoff := time.Now().Add(-maxAge)
 	now := time.Now()
 
+	token := store.NewLockToken()
+	host := store.Hostname()
+
 	where := `type = ? AND status = ? AND locked_at < ?`
 	args := []any{workType, store.StatusInProgress, cutoff}
 	if destination != "" {
@@ -136,7 +144,7 @@ func (d *workItemDataSQL) RecoverOrphans(ctx context.Context, workType, destinat
 		where += ` AND object_type = ?`
 		args = append(args, objectType)
 	}
-	args = append(args, limit, now, now)
+	args = append(args, limit, now, token, host, now)
 
 	var items []*store.WorkItem
 	err := d.DB.NewRaw(`
@@ -148,7 +156,7 @@ func (d *workItemDataSQL) RecoverOrphans(ctx context.Context, workType, destinat
 			FOR UPDATE SKIP LOCKED
 		)
 		UPDATE work_items
-		SET locked_at = ?, retry = retry + 1, update_time = ?
+		SET locked_at = ?, lock_token = ?, locked_by = ?, retry = retry + 1, update_time = ?
 		WHERE id IN (SELECT id FROM recovered)
 		RETURNING *
 	`, args...).Scan(ctx, &items)
@@ -158,50 +166,47 @@ func (d *workItemDataSQL) RecoverOrphans(ctx context.Context, workType, destinat
 	return items, nil
 }
 
-// MarkDone transitions the given IN_PROGRESS items to DONE.
-// Returns an error if any id is not found in IN_PROGRESS state.
-func (d *workItemDataSQL) MarkDone(ctx context.Context, ids []string) *core.ApplicationError {
+// MarkDone transitions a single IN_PROGRESS item to DONE, fenced dal token (WHERE lock_token = ?).
+// Idempotente: 0 righe (item già finalizzato o token stale) NON è un errore — è l'esito atteso
+// quando un worker stale prova a finalizzare un item ri-claimato altrove.
+func (d *workItemDataSQL) MarkDone(ctx context.Context, id, token string) *core.ApplicationError {
 	now := time.Now()
 	res, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
 		Set("status = ?", store.StatusDone).
 		Set("update_time = ?", now).
 		Set("locked_at = NULL").
-		Where("id IN (?) AND status = ?", bun.List(ids), store.StatusInProgress).
+		Where("id = ? AND status = ? AND lock_token = ?", id, store.StatusInProgress, token).
 		Exec(ctx)
 	if err != nil {
 		return core.TechnicalErrorWithError(err)
 	}
-	if affected, _ := res.RowsAffected(); int(affected) != len(ids) {
-		return core.TechnicalErrorWithCodeAndMessage("WIS-MD-001",
-			fmt.Sprintf("MarkDone: expected %d IN_PROGRESS items, modified %d", len(ids), affected))
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		log.Debug().Msgf("MarkDone: item %q non aggiornato (già finalizzato o token stale)", id)
 	}
 	return nil
 }
 
-// MarkFailed transitions the given IN_PROGRESS item to FAILED.
-// Returns an error if the item is not found in IN_PROGRESS state.
-func (d *workItemDataSQL) MarkFailed(ctx context.Context, id, reason string) *core.ApplicationError {
+// MarkFailed transitions a single IN_PROGRESS item to FAILED, fenced dal token (idempotente).
+func (d *workItemDataSQL) MarkFailed(ctx context.Context, id, token, reason string) *core.ApplicationError {
 	now := time.Now()
 	res, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
 		Set("status = ?", store.StatusFailed).
 		Set("error = ?", reason).
 		Set("update_time = ?", now).
 		Set("locked_at = NULL").
-		Where("id = ? AND status = ?", id, store.StatusInProgress).
+		Where("id = ? AND status = ? AND lock_token = ?", id, store.StatusInProgress, token).
 		Exec(ctx)
 	if err != nil {
 		return core.TechnicalErrorWithError(err)
 	}
 	if affected, _ := res.RowsAffected(); affected == 0 {
-		return core.TechnicalErrorWithCodeAndMessage("WIS-MF-001",
-			fmt.Sprintf("MarkFailed: item %q not found in IN_PROGRESS state", id))
+		log.Debug().Msgf("MarkFailed: item %q non aggiornato (già finalizzato o token stale)", id)
 	}
 	return nil
 }
 
-// MarkPending resets the given IN_PROGRESS item back to PENDING for retry.
-// Returns an error if the item is not found in IN_PROGRESS state.
-func (d *workItemDataSQL) MarkPending(ctx context.Context, id string, after time.Duration) *core.ApplicationError {
+// MarkPending resets a single IN_PROGRESS item back to PENDING for retry, fenced dal token (idempotente).
+func (d *workItemDataSQL) MarkPending(ctx context.Context, id, token string, after time.Duration) *core.ApplicationError {
 	now := time.Now()
 	nextRunAt := now.Add(after)
 	res, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
@@ -210,14 +215,13 @@ func (d *workItemDataSQL) MarkPending(ctx context.Context, id string, after time
 		Set("update_time = ?", now).
 		Set("retry = retry + 1").
 		Set("next_run_at = ?", nextRunAt).
-		Where("id = ? AND status = ?", id, store.StatusInProgress).
+		Where("id = ? AND status = ? AND lock_token = ?", id, store.StatusInProgress, token).
 		Exec(ctx)
 	if err != nil {
 		return core.TechnicalErrorWithError(err)
 	}
 	if affected, _ := res.RowsAffected(); affected == 0 {
-		return core.TechnicalErrorWithCodeAndMessage("WIS-MP-001",
-			fmt.Sprintf("MarkPending: item %q not found in IN_PROGRESS state", id))
+		log.Debug().Msgf("MarkPending: item %q non aggiornato (già finalizzato o token stale)", id)
 	}
 	return nil
 }
@@ -310,10 +314,22 @@ func (d *workItemDataSQL) List(ctx context.Context, workType, status string, pag
 	return items, nil
 }
 
-// EnsureIndexes creates the indexes required by workItemDataSQL. Call once at application startup.
-// The partial unique index uk_workitem_active prevents concurrent insertion of duplicate
-// active (PENDING or IN_PROGRESS) items for the same (type, object_id).
+// EnsureIndexes creates the indexes and columns required by workItemDataSQL. Call once at
+// application startup. Include:
+//   - le colonne di fencing lock_token/locked_by (ADD COLUMN IF NOT EXISTS) usate da ClaimPending/
+//     RecoverOrphans/Mark* per impedire che un worker stale finalizzi un item ri-claimato;
+//   - l'indice partiale unico uk_workitem_active, che impedisce l'inserimento concorrente di
+//     item attivi (PENDING o IN_PROGRESS) duplicati per lo stesso (type, object_id).
+//
+// È Postgres-specifico (come il resto delle utility DDL del modulo). Su MySQL/SQLite le colonne
+// e l'indice vanno creati manualmente via migration.
 func EnsureIndexes(ctx context.Context, db *bun.DB) error {
+	if _, err := db.ExecContext(ctx, `
+		ALTER TABLE work_items ADD COLUMN IF NOT EXISTS lock_token TEXT;
+		ALTER TABLE work_items ADD COLUMN IF NOT EXISTS locked_by  TEXT;
+	`); err != nil {
+		return err
+	}
 	_, err := db.ExecContext(ctx, `
 		CREATE UNIQUE INDEX IF NOT EXISTS uk_workitem_active
 		ON work_items (type, object_id)

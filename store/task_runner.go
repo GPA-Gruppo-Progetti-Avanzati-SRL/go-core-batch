@@ -40,16 +40,18 @@ const (
 //	other error  → MarkFailed
 //
 // It returns the classified Outcome and any error raised while persisting the status.
-func ApplyResult(ctx context.Context, items IWorkItemStore, id string, runErr error) (Outcome, *core.ApplicationError) {
+// token è il fencing token del claim corrente (item.LockToken): i Mark* lo richiedono, così
+// un worker stale non può finalizzare un item ri-claimato da un'altra replica.
+func ApplyResult(ctx context.Context, items IWorkItemStore, id, token string, runErr error) (Outcome, *core.ApplicationError) {
 	if runErr == nil {
-		return OutcomeDone, items.MarkDone(ctx, []string{id})
+		return OutcomeDone, items.MarkDone(ctx, id, token)
 	}
 	if errors.Is(runErr, ErrHandled) {
 		return OutcomeHandled, nil
 	}
 	var re *RetryError
 	if errors.As(runErr, &re) {
-		return OutcomeRetry, items.MarkPending(ctx, id, re.After)
+		return OutcomeRetry, items.MarkPending(ctx, id, token, re.After)
 	}
-	return OutcomeFailed, items.MarkFailed(ctx, id, runErr.Error())
+	return OutcomeFailed, items.MarkFailed(ctx, id, token, runErr.Error())
 }

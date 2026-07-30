@@ -28,9 +28,16 @@ type WorkItem struct {
 	CreateTime  time.Time  `bson:"createTime"                bun:"create_time"`
 	UpdateTime  *time.Time `bson:"updateTime,omitempty"      bun:"update_time,nullzero"`
 	LockedAt    *time.Time `bson:"lockedAt,omitempty"        bun:"locked_at,nullzero"`
-	NextRunAt   *time.Time `bson:"nextRunAt,omitempty"       bun:"next_run_at,nullzero"`
-	Retry       int        `bson:"retry"                     bun:"retry"`
-	Error       string     `bson:"error,omitempty"           bun:"error,nullzero"`
+	// LockToken è il fencing token: un valore unico rigenerato ad OGNI claim/recover.
+	// I Mark* lo richiedono in WHERE, così un worker "stale" (il cui item è stato ri-claimato
+	// da RecoverOrphans) non può più finalizzare l'item — il suo token non matcha più.
+	LockToken string `bson:"lockToken,omitempty" bun:"lock_token,nullzero"`
+	// LockedBy è l'hostname del worker/replica che ha in carico l'item — solo osservabilità,
+	// NON partecipa al fencing.
+	LockedBy  string     `bson:"lockedBy,omitempty"        bun:"locked_by,nullzero"`
+	NextRunAt *time.Time `bson:"nextRunAt,omitempty"       bun:"next_run_at,nullzero"`
+	Retry     int        `bson:"retry"                     bun:"retry"`
+	Error     string     `bson:"error,omitempty"           bun:"error,nullzero"`
 }
 
 func (w WorkItem) GetCollectionName(ctx context.Context) string { return CollectionWorkItems }

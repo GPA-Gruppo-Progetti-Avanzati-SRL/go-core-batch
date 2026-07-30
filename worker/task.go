@@ -6,7 +6,6 @@ import (
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog/log"
 )
@@ -16,13 +15,21 @@ type ITaskService[T any] interface {
 	GetServices() T
 }
 
-type RunTask[T any] func(t *Task, s T, items store.IWorkItemStore) *core.ApplicationError
+// RunTask esegue il task e ritorna l'esito secondo la convenzione runner condivisa
+// (vedi store.ApplyResult): nil → done, store.ErrHandled → già finalizzato dal runner,
+// *store.RetryError → retry, qualsiasi altro errore → failed. NON deve chiamare i Mark*
+// da sé: è worker.Run l'UNICO punto che applica store.ApplyResult sul valore di ritorno.
+type RunTask[T any] func(t *Task, s T, items store.IWorkItemStore) error
 
 type Task struct {
-	Id        string
-	JobId     string
-	Type      string
-	ObjectId  string
+	Id       string
+	JobId    string
+	Type     string
+	ObjectId string
+	// LockToken è il fencing token del claim dell'item: lo popola chi carica il WorkItem
+	// (es. grpchandler dopo GetById) e worker.Run lo passa a store.ApplyResult per finalizzare
+	// in modo fenced. Vuoto finché non impostato.
+	LockToken string
 	StartTime time.Time
 	Context   context.Context
 	Cancel    context.CancelFunc

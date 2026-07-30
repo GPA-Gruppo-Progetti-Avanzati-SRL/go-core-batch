@@ -64,7 +64,7 @@ func (r *MuxRunner) Run(ctx context.Context, objectId, taskType string, items st
 		return appErr
 	}
 	runErr := runner.Run(ctx, item)
-	outcome, markErr := store.ApplyResult(ctx, items, objectId, runErr)
+	outcome, markErr := store.ApplyResult(ctx, items, item.Id, item.LockToken, runErr)
 	if markErr != nil {
 		return markErr
 	}

@@ -5,37 +5,94 @@ package localdispatcher
 
 import (
 	"context"
+	"errors"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/runner"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
+	"github.com/rs/zerolog/log"
+	"go.uber.org/fx"
+)
+
+const (
+	// defaultMaxConcurrent limita quante task in-process girano contemporaneamente. Senza,
+	// tick lenti che si accumulano farebbero crescere le goroutine senza limite.
+	defaultMaxConcurrent = 100
+	// defaultTaskTimeout è il cap per una singola task: una task bloccata oltre questo tempo
+	// viene interrotta (context cancel), liberando lo slot; l'item resta IN_PROGRESS e sarà
+	// recuperato come orfano. Generoso per non troncare task legittimamente lunghe.
+	defaultTaskTimeout = 30 * time.Minute
 )
 
 // LocalDispatcher implements distributedjob.ITaskDispatcher by running tasks in-process.
 // It logs the full task lifecycle to task_logs via store.IData and updates the source
-// record status via store.IWorkItemStore.
+// record status via store.IWorkItemStore. Le task in volo sono tracciate da un WaitGroup e
+// drenate su OnStop; la concorrenza è limitata da un semaforo.
 type LocalDispatcher struct {
-	mux   *runner.MuxRunner
-	items store.IWorkItemStore
-	data  store.IData
+	mux         *runner.MuxRunner
+	items       store.IWorkItemStore
+	data        store.IData
+	sem         chan struct{}  // cap di concorrenza (non-bloccante)
+	wg          sync.WaitGroup // task in volo, per il drain su OnStop
+	stopping    atomic.Bool    // dopo OnStop rifiuta nuovi dispatch
+	taskTimeout time.Duration
 }
 
 var _ distributedjob.ITaskDispatcher = (*LocalDispatcher)(nil)
 
-func New(mux *runner.MuxRunner, items store.IWorkItemStore, data store.IData) *LocalDispatcher {
-	return &LocalDispatcher{mux: mux, items: items, data: data}
+func New(lc fx.Lifecycle, mux *runner.MuxRunner, items store.IWorkItemStore, data store.IData) *LocalDispatcher {
+	d := &LocalDispatcher{
+		mux:         mux,
+		items:       items,
+		data:        data,
+		sem:         make(chan struct{}, defaultMaxConcurrent),
+		taskTimeout: defaultTaskTimeout,
+	}
+	lc.Append(fx.Hook{
+		OnStop: func(ctx context.Context) error {
+			// Niente nuovi dispatch, poi attendi il drain delle task in volo fino al deadline
+			// del context di stop di fx. Oltre, le task residue vengono abbandonate: i loro item
+			// restano IN_PROGRESS e verranno recuperati come orfani al riavvio.
+			d.stopping.Store(true)
+			done := make(chan struct{})
+			go func() { d.wg.Wait(); close(done) }()
+			select {
+			case <-done:
+				log.Info().Msg("localdispatcher: tutte le task in volo drenate")
+			case <-ctx.Done():
+				log.Warn().Msg("localdispatcher: drain scaduto, task residue abbandonate (saranno recuperate come orfani)")
+			}
+			return nil
+		},
+	})
+	return d
 }
 
-// DispatchTask launches the task in a goroutine and returns immediately.
-// Concurrency is naturally bounded by the limit property in the scheduler config
-// (ClaimPending returns at most limit items per run).
-// context.WithoutCancel detaches the goroutine from the job context, which is
-// canceled as soon as the job function returns — before the goroutine completes.
+// DispatchTask launches the task in a goroutine and returns immediately. La concorrenza è
+// limitata da un semaforo non-bloccante: a slot esauriti ritorna errore (il chiamante segna
+// SetTaskAssignationKO, l'item resta IN_PROGRESS e sarà recuperato), come il worker gRPC su
+// canale pieno. context.WithoutCancel + WithTimeout scollega la task dal context del tick
+// (cancellato appena il tick ritorna) dandole un proprio deadline.
 func (d *LocalDispatcher) DispatchTask(ctx context.Context, jobId, taskId, objectId, taskType string) error {
-	taskCtx := context.WithoutCancel(ctx)
+	if d.stopping.Load() {
+		return errors.New("localdispatcher: shutting down, dispatch rejected")
+	}
+	select {
+	case d.sem <- struct{}{}:
+	default:
+		return errors.New("localdispatcher: max concurrency reached")
+	}
+	d.wg.Add(1)
+	taskCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), d.taskTimeout)
 	go func() {
+		defer d.wg.Done()
+		defer cancel()
+		defer func() { <-d.sem }()
 		d.data.SetTaskStart(taskCtx, taskId, jobId, taskType, objectId)
 		if err := d.mux.Run(taskCtx, objectId, taskType, d.items); err != nil {
 			d.data.SetTaskInError(taskCtx, taskId, jobId, taskType, objectId, err.Error())

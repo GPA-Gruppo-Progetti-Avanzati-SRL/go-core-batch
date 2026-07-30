@@ -28,7 +28,17 @@ type ProducerService struct {
 	mu             sync.Mutex
 }
 
-func NewProducerService(lc fx.Lifecycle, cfg *kafka.Config) *ProducerService {
+// NewProducerService costruisce il producer Kafka. Fail-fast: se manca transactional.id in
+// producer.extra-config l'app NON parte. Il producer usa SEMPRE le transazioni EOS
+// (BeginTransaction/EndTransaction) e senza un transactional.id il client franz-go non è
+// transazionale, quindi BeginTransaction fallirebbe ad ogni tick (retry-loop permanente):
+// meglio bloccare subito con un errore chiaro. Il costruttore è lazy (fx lo invoca solo se il
+// kafkajob è wirato), quindi il vincolo scatta solo quando il producer è effettivamente usato.
+func NewProducerService(lc fx.Lifecycle, cfg *kafka.Config) (*ProducerService, error) {
+	if _, ok := transactionalID(cfg.Producer); !ok {
+		return nil, fmt.Errorf("kafka producer: transactional.id mancante in producer.extra-config, " +
+			"richiesto per le transazioni EOS del kafkajob")
+	}
 	ks := &ProducerService{producerConfig: cfg}
 
 	lc.Append(fx.Hook{
@@ -54,7 +64,7 @@ func NewProducerService(lc fx.Lifecycle, cfg *kafka.Config) *ProducerService {
 			return nil
 		},
 	})
-	return ks
+	return ks, nil
 }
 
 func newKafkaClient(cfgKafka *kafka.Config) (*kgo.Client, error) {
@@ -104,8 +114,7 @@ func (ks *ProducerService) ProduceMessages(ctx context.Context, messages []*kafk
 		}
 	}
 
-	// Franz-go gestisce le transazioni in modo leggermente diverso.
-	// Iniziamo la transazione.
+	// Il producer è sempre transazionale (transactional.id validato nel costruttore).
 	if errBegin := ks.client.BeginTransaction(); errBegin != nil {
 		log.Error().Err(errBegin).Msg("Failed to begin transaction ... Destroying Producer")
 		ks.client.Close()
@@ -116,7 +125,7 @@ func (ks *ProducerService) ProduceMessages(ctx context.Context, messages []*kafk
 	transactionInProgress := true
 	defer func() {
 		if transactionInProgress && ctx.Err() != nil {
-			fmt.Println("Timeout o cancellazione rilevata, interrompo transazione...")
+			log.Warn().Msg("Timeout o cancellazione rilevata, interrompo transazione kafka...")
 			if abortErr := ks.client.EndTransaction(context.Background(), kgo.TryAbort); abortErr != nil {
 				log.Error().Err(abortErr).Msgf("Errore durante l'interruzione della transazione kafka : %v\n", abortErr)
 			} else {
@@ -133,18 +142,14 @@ func (ks *ProducerService) ProduceMessages(ctx context.Context, messages []*kafk
 		key, errSerKey := json.Marshal(message.MessageKey)
 		if errSerKey != nil {
 			log.Error().Err(errSerKey).Msgf("Impossibile serializzare la chiave : %s", errSerKey.Error())
-			if errAbort := ks.client.EndTransaction(ctx, kgo.TryAbort); errAbort != nil {
-				log.Error().Err(errAbort).Msgf("Errore durante l'interruzione della transazione kafka : %v\n", errAbort)
-			}
+			ks.abort(ctx)
 			return core.TechnicalErrorWithError(errSerKey)
 		}
 
 		value, errSerMessage := json.Marshal(message.MessageValue)
 		if errSerMessage != nil {
 			log.Error().Err(errSerMessage).Msgf("Impossibile serializzare il messaggio : %s", errSerMessage.Error())
-			if errAbort := ks.client.EndTransaction(ctx, kgo.TryAbort); errAbort != nil {
-				log.Error().Err(errAbort).Msgf("Errore durante l'interruzione della transazione kafka : %v\n", errAbort)
-			}
+			ks.abort(ctx)
 			return core.TechnicalErrorWithError(errSerMessage)
 		}
 
@@ -182,9 +187,7 @@ func (ks *ProducerService) ProduceMessages(ctx context.Context, messages []*kafk
 
 	if produceErr != nil {
 		log.Error().Err(produceErr).Msg("Error during produce")
-		if errAbort := ks.client.EndTransaction(ctx, kgo.TryAbort); errAbort != nil {
-			log.Error().Err(errAbort).Msgf("Errore durante l'interruzione della transazione kafka : %v\n", errAbort)
-		}
+		ks.abort(ctx)
 		return core.TechnicalErrorWithError(produceErr)
 	}
 
@@ -203,6 +206,14 @@ func (ks *ProducerService) ProduceMessages(ctx context.Context, messages []*kafk
 
 	transactionInProgress = false
 	return nil
+}
+
+// abort interrompe la transazione corrente (TryAbort), loggando un eventuale errore.
+// Consolida i vari punti di rollback di ProduceMessages in un unico helper.
+func (ks *ProducerService) abort(ctx context.Context) {
+	if errAbort := ks.client.EndTransaction(ctx, kgo.TryAbort); errAbort != nil {
+		log.Error().Err(errAbort).Msgf("Errore durante l'interruzione della transazione kafka : %v", errAbort)
+	}
 }
 
 func (ks *ProducerService) initProducer(ctx context.Context) error {

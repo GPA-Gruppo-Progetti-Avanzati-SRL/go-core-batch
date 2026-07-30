@@ -2,6 +2,14 @@ package scheduler
 
 import "time"
 
+const (
+	// DefaultRunTimeout è il timeout del context di un singolo tick quando LockTimeout non è impostato.
+	DefaultRunTimeout = 30 * time.Second
+	// DefaultOrphanTimeout è l'età oltre la quale un item IN_PROGRESS è considerato orfano
+	// (run crashato/scaduto) e ri-claimato da RecoverOrphans, quando LockTimeout non è impostato.
+	DefaultOrphanTimeout = 10 * time.Minute
+)
+
 type Config struct {
 	Name          string `mapstructure:"name"`
 	Type          string `mapstructure:"type"`
@@ -12,4 +20,16 @@ type Config struct {
 	// considered orphaned and re-claimed by RecoverOrphans. Configurable per job.
 	LockTimeout time.Duration     `mapstructure:"lock-timeout"`
 	Properties  map[string]string `mapstructure:"properties"`
+}
+
+// ResolveTimeouts deriva, con convenzione UNICA per tutte le famiglie di job (distributedjob,
+// simplejob, kafkajob), il timeout del context di run e l'età di orphan. LockTimeout (se > 0)
+// governa entrambi; altrimenti si usano i default (run breve, orphan lungo).
+func (c Config) ResolveTimeouts() (run, orphan time.Duration) {
+	run, orphan = DefaultRunTimeout, DefaultOrphanTimeout
+	if c.LockTimeout > 0 {
+		run = c.LockTimeout
+		orphan = c.LockTimeout
+	}
+	return
 }

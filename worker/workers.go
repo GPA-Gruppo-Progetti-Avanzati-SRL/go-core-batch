@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -115,22 +116,46 @@ func Run[T any](semaphore chan struct{}, t *Task, services ITaskService[T], data
 	}()
 	log.Trace().Msgf("W - %s - %s - Executing task %T", t.GetJobId(), t.GetId(), t)
 	t.LogStart(data)
-	run, ok := services.GetTaskExecutions(t.Type)
-	if !ok {
-		errMsg := "Execution type not found"
-		log.Error().Msgf("W - %s - %s - Esecuzione non trovata per tipo: %s", t.GetJobId(), t.GetId(), t.Type)
-		t.LogTaskError(data, errMsg)
-		if items != nil {
-			items.MarkFailed(t.Context, t.ObjectId, errMsg)
-		}
-		return
-	}
-	err := run(t, services.GetServices(), items)
-	if err != nil {
-		log.Error().Msgf("W - %s - %s - Error executing task: %s", t.GetJobId(), t.GetId(), err.Error())
-		t.LogTaskError(data, err.Error())
+
+	// Esegue il task. Il tipo sconosciuto è trattato come un errore normale: confluisce nello
+	// stesso punto di finalizzazione sotto (ApplyResult → MarkFailed), niente ramo separato.
+	var runErr error
+	if run, ok := services.GetTaskExecutions(t.Type); ok {
+		// La RunTask (es. bridge grpchandler) carica il WorkItem e popola t.LockToken.
+		runErr = run(t, services.GetServices(), items)
 	} else {
+		log.Error().Msgf("W - %s - %s - Esecuzione non trovata per tipo: %s", t.GetJobId(), t.GetId(), t.Type)
+		runErr = fmt.Errorf("execution type not found: %s", t.Type)
+		// Nessun RunTask ha caricato l'item: recupero il fencing token per poterlo comunque
+		// finalizzare (MarkFailed) in modo fenced, evitando un orphan-loop sul tipo sconosciuto.
+		if items != nil {
+			if it, e := items.GetById(t.Context, t.ObjectId); e == nil {
+				t.LockToken = it.LockToken
+			}
+		}
+	}
+
+	// worker.Run è l'UNICO punto che finalizza il lifecycle del workitem per il worker pool:
+	// applica la convenzione condivisa store.ApplyResult (nil→Done, ErrHandled→no-op,
+	// RetryError→Pending, altro→Failed), fenced dal token del claim (t.LockToken). Senza items
+	// (no claiming) si salta la finalizzazione.
+	outcome := store.OutcomeDone
+	if items != nil {
+		o, markErr := store.ApplyResult(t.Context, items, t.ObjectId, t.LockToken, runErr)
+		outcome = o
+		if markErr != nil {
+			log.Error().Msgf("W - %s - %s - finalizzazione lifecycle fallita: %v", t.GetJobId(), t.GetId(), markErr)
+		}
+	} else if runErr != nil {
+		outcome = store.OutcomeFailed
+	}
+
+	// Task log (osservabilità): Done/Handled = successo, Retry/Failed = errore.
+	if outcome == store.OutcomeDone || outcome == store.OutcomeHandled {
 		log.Trace().Msgf("W - %s - %s - Executed task %T", t.GetJobId(), t.GetId(), t)
 		t.LogDone(data)
+	} else {
+		log.Error().Msgf("W - %s - %s - Error executing task: %v", t.GetJobId(), t.GetId(), runErr)
+		t.LogTaskError(data, runErr.Error())
 	}
 }

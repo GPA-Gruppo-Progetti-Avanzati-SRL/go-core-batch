@@ -89,6 +89,7 @@ type ConsumerConfig struct {
 type ProducerConfig struct {
 	// Producer related configs
 	Acks                  string                 `mapstructure:"acks" json:"acks" yaml:"acks"`
+	TransactionalID       string                 `mapstructure:"transactional-id" json:"transactional-id" yaml:"transactional-id"`
 	MaxTimeoutMs          int                    `mapstructure:"max-timeout-ms" json:"max-timeout-ms" yaml:"max-timeout-ms"`
 	DeliveryTimeout       time.Duration          `mapstructure:"delivery-timeout"`
 	FlushTimeout          time.Duration          `mapstructure:"flush-timeout"`

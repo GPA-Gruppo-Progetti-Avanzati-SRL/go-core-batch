@@ -95,15 +95,8 @@ func Module(modes ...string) {
 	), modes...)
 }
 
-const (
-	// defaultRunTimeout bounds a single tick's processing when lock-timeout is unset.
-	defaultRunTimeout = 30 * time.Second
-	// defaultOrphanTimeout is the age after which an IN_PROGRESS item is considered
-	// orphaned (from a crashed/timed-out run) and re-claimed, when lock-timeout is unset.
-	defaultOrphanTimeout = 10 * time.Minute
-	// defaultBatchLimit caps how many items a single tick claims when no "limit" property is set.
-	defaultBatchLimit = 100
-)
+// defaultBatchLimit caps how many items a single tick claims when no "limit" property is set.
+const defaultBatchLimit = 100
 
 func makeFactory(items store.IWorkItemStore, runner ITaskRunner) scheduler.JobFactory {
 	return func(name string, _ *scheduler.Services, config scheduler.Config) gocron.Task {
@@ -124,14 +117,9 @@ func makeFactory(items store.IWorkItemStore, runner ITaskRunner) scheduler.JobFa
 				log.Warn().Msgf("[%s] invalid 'limit' property %q, using default %d", name, v, defaultBatchLimit)
 			}
 		}
-		// lock-timeout serves two roles: the run context timeout (so long-running jobs
-		// are not cut off by the default) and the orphan age used by RecoverOrphans.
-		timeout := defaultRunTimeout
-		orphanTimeout := defaultOrphanTimeout
-		if config.LockTimeout > 0 {
-			timeout = config.LockTimeout
-			orphanTimeout = config.LockTimeout
-		}
+		// Convenzione unica (scheduler.Config.ResolveTimeouts): LockTimeout governa sia il
+		// timeout del context di run sia l'età di orphan usata da RecoverOrphans.
+		timeout, orphanTimeout := config.ResolveTimeouts()
 		return gocron.NewTask(func() error {
 			return run(name, workType, selfFeed, timeout, orphanTimeout, limit, items, runner)
 		})
@@ -182,7 +170,7 @@ func run(name, workType string, selfFeed bool, timeout, orphanTimeout time.Durat
 		// Same lifecycle convention as distributedjob (store.ApplyResult):
 		// nil→MarkDone, store.Retry→MarkPending, err→MarkFailed, store.ErrHandled→untouched.
 		runErr := runner.Run(ctx, item)
-		outcome, markErr := store.ApplyResult(ctx, items, item.Id, runErr)
+		outcome, markErr := store.ApplyResult(ctx, items, item.Id, item.LockToken, runErr)
 		if markErr != nil {
 			log.Error().Err(markErr).Msgf("[%s] persisting outcome failed for item %s", jobID, item.Id)
 		}
