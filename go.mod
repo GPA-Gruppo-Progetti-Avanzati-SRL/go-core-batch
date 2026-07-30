@@ -5,7 +5,7 @@ go 1.26.5
 require (
 	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app v0.0.28
 	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo v0.0.19
-	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-sql v0.0.0-20260715093734-dc04c63fb025
+	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-sql v0.0.1
 	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/tpm-mongo-common v1.0.16-0.20260625084127-6c7a35eb03d4
 	github.com/aws/aws-sdk-go-v2 v1.42.1
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.26
