@@ -75,6 +75,17 @@ func (d *workItemData) warnIfActiveIndexMissing(ctx context.Context) {
 
 var _ store.IWorkItemStore = (*workItemData)(nil)
 
+func (d *workItemData) FindPending(ctx context.Context, workType, destination, objectType string) ([]*store.WorkItem, *core.ApplicationError) {
+	filter := workItemFilter{
+		Type:        workType,
+		Status:      store.StatusPending,
+		Destination: destination,
+		ObjectType:  objectType,
+	}
+	sort := page.SortRequest{{Field: "createTime", Dir: page.Asc}}
+	return mongo.GetObjectsByFilterSorted[store.WorkItem](ctx, d.Service, filter, sort)
+}
+
 // ClaimPending atomically claims up to limit PENDING items using optimistic locking.
 // For each candidate found, it attempts an UpdateOne WHERE status=PENDING — only items
 // still PENDING at the time of the update are successfully claimed.

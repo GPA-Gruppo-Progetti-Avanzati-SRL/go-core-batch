@@ -60,6 +60,17 @@ func (d *workItemDataSQL) warnIfActiveIndexMissing(ctx context.Context) {
 	})
 }
 
+func (d *workItemDataSQL) FindPending(ctx context.Context, workType, destination, objectType string) ([]*store.WorkItem, *core.ApplicationError) {
+	filter := workItemFilter{
+		Type:        workType,
+		Status:      store.StatusPending,
+		Destination: destination,
+		ObjectType:  objectType,
+	}
+	sort := page.SortRequest{{Field: "create_time", Dir: page.Asc}}
+	return coresql.GetAllByFilterSorted[store.WorkItem](ctx, d.DB, filter, sort)
+}
+
 // ClaimPending atomically selects up to limit PENDING items of workType,
 // marks them IN_PROGRESS with locked_at = now, and returns the full records.
 // Uses SELECT FOR UPDATE SKIP LOCKED — safe across multiple replicas.

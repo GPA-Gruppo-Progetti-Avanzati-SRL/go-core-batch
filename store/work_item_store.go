@@ -11,6 +11,10 @@ import (
 // IWorkItemStore is the persistence interface for the outbox/work-item pattern.
 // Implementations live in store/mongostore and store/sqlstore.
 type IWorkItemStore interface {
+	// FindPending returns PENDING items matching the filters (read-only, no claiming),
+	// ordered by create time. Utile a consumer che vogliono ispezionare la coda senza
+	// prenderla in carico (il claiming è ClaimPending/ClaimBatch).
+	FindPending(ctx context.Context, workType, destination, objectType string) ([]*WorkItem, *core.ApplicationError)
 	// ClaimPending atomically selects up to limit PENDING items matching the given filters,
 	// marks them IN_PROGRESS (with locked_at = now), and returns them.
 	// destination and objectType are optional — pass "" to skip.
