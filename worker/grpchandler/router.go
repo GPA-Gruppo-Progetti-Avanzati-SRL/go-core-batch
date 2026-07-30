@@ -15,8 +15,11 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// Router embedda UnimplementedDistributionChannelServer (default gRPC forward-compatible): i
+// metodi non implementati ritornano codes.Unimplemented, e nuovi metodi nel proto non rompono
+// la compilazione. Implementa solo DistribuiteTask; DistribuiteSimpleTask resta non implementato.
 type Router[T any] struct {
-	proto.DistributionChannelServer
+	proto.UnimplementedDistributionChannelServer
 	workers      *worker.Workers[T]
 	taskServices worker.ITaskService[T]
 }
@@ -25,11 +28,6 @@ func NewRouter[T any](w *worker.Workers[T], gs *grpctransport.Server, service wo
 	r := &Router[T]{workers: w, taskServices: service}
 	proto.RegisterDistributionChannelServer(gs, r)
 	return r
-}
-
-func (r *Router[T]) DistribuiteSimpleTask(ctx context.Context, s *proto.SampleTaskMessage) (*proto.TaskStatus, error) {
-	log.Info().Msgf("G - %s - %s - Distribuisco Task su Worker", s.JobId, s.TaskId)
-	return okStatus()
 }
 
 func (r *Router[T]) DistribuiteTask(ctx context.Context, s *proto.TaskMessage) (*proto.TaskStatus, error) {

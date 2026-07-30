@@ -111,11 +111,16 @@ func notificationJobRun(name string, producer *kafkaproducer.ProducerService, it
 	}
 
 	// At-least-once: se un MarkDone non matcha (token stale) l'item verrà ri-inviato al tick
-	// successivo. MarkDone è per-item (ogni item ha il suo fencing token) e idempotente.
+	// successivo. MarkDone è batch + fenced: gli item di un tick hanno al più 2 token (gruppo
+	// orfani + gruppo fresh), quindi li raggruppiamo per token e facciamo ≤2 update invece di N.
+	byToken := make(map[string][]string, 2)
 	for _, item := range valid {
-		if errMark := items.MarkDone(spanCtx, item.Id, item.LockToken); errMark != nil {
+		byToken[item.LockToken] = append(byToken[item.LockToken], item.Id)
+	}
+	for token, doneIds := range byToken {
+		if errMark := items.MarkDone(spanCtx, doneIds, token); errMark != nil {
 			span.RecordError(errMark)
-			log.Error().Err(errMark).Msgf("[%s] MarkDone fallito per item %s", jobId, item.Id)
+			log.Error().Err(errMark).Msgf("[%s] MarkDone fallito per %d item", jobId, len(doneIds))
 		}
 	}
 

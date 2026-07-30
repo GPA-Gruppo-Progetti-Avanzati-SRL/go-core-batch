@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
@@ -86,9 +85,4 @@ func (q *queryDataSQL) GetIdsSorted(ctx context.Context, table, filter, sort str
 		return nil, core.TechnicalErrorWithError(err)
 	}
 	return ids, nil
-}
-
-// parseLimit converts the "limit" property string to int.
-func parseLimit(s string) (int, error) {
-	return strconv.Atoi(s)
 }

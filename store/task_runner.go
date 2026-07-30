@@ -44,7 +44,7 @@ const (
 // un worker stale non può finalizzare un item ri-claimato da un'altra replica.
 func ApplyResult(ctx context.Context, items IWorkItemStore, id, token string, runErr error) (Outcome, *core.ApplicationError) {
 	if runErr == nil {
-		return OutcomeDone, items.MarkDone(ctx, id, token)
+		return OutcomeDone, items.MarkDone(ctx, []string{id}, token)
 	}
 	if errors.Is(runErr, ErrHandled) {
 		return OutcomeHandled, nil

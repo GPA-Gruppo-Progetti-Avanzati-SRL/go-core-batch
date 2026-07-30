@@ -75,17 +75,6 @@ func (d *workItemData) warnIfActiveIndexMissing(ctx context.Context) {
 
 var _ store.IWorkItemStore = (*workItemData)(nil)
 
-func (d *workItemData) FindPending(ctx context.Context, workType, destination, objectType string) ([]*store.WorkItem, *core.ApplicationError) {
-	filter := workItemFilter{
-		Type:        workType,
-		Status:      store.StatusPending,
-		Destination: destination,
-		ObjectType:  objectType,
-	}
-	sort := page.SortRequest{{Field: "createTime", Dir: page.Asc}}
-	return mongo.GetObjectsByFilterSorted[store.WorkItem](ctx, d.Service, filter, sort)
-}
-
 // ClaimPending atomically claims up to limit PENDING items using optimistic locking.
 // For each candidate found, it attempts an UpdateOne WHERE status=PENDING — only items
 // still PENDING at the time of the update are successfully claimed.
@@ -216,20 +205,26 @@ func fencedFilter(id, token string) bson.M {
 	return bson.M{"_id": id, "status": store.StatusInProgress, "lockToken": token}
 }
 
-// MarkDone transitions a single IN_PROGRESS item to DONE, fenced dal token. Idempotente:
-// 0 righe modificate (item già finalizzato o token stale) NON è un errore — è l'esito atteso
-// quando un worker stale prova a finalizzare un item ri-claimato altrove.
-func (d *workItemData) MarkDone(ctx context.Context, id, token string) *core.ApplicationError {
+// MarkDone transitions IN_PROGRESS items to DONE in batch, fenced dal token (gli id devono
+// condividere lo stesso lock_token). Idempotente: gli id non matchati (già finalizzati o token
+// stale) sono ignorati — non è un errore, è l'esito atteso quando un worker stale prova a
+// finalizzare item ri-claimati altrove.
+func (d *workItemData) MarkDone(ctx context.Context, ids []string, token string) *core.ApplicationError {
+	if len(ids) == 0 {
+		return nil
+	}
 	now := time.Now()
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
-	res, err := coll.UpdateOne(ctx, fencedFilter(id, token),
+	res, err := coll.UpdateMany(ctx,
+		bson.M{"_id": bson.M{"$in": ids}, "status": store.StatusInProgress, "lockToken": token},
 		bson.M{"$set": bson.M{"status": store.StatusDone, "updateTime": now, "lockedAt": nil}},
 	)
 	if err != nil {
 		return core.TechnicalErrorWithError(err)
 	}
-	if res.ModifiedCount == 0 {
-		log.Debug().Msgf("MarkDone: item %q non aggiornato (già finalizzato o token stale)", id)
+	if int(res.ModifiedCount) != len(ids) {
+		log.Debug().Msgf("MarkDone: %d/%d item marcati DONE (gli altri già finalizzati o token stale)",
+			res.ModifiedCount, len(ids))
 	}
 	return nil
 }

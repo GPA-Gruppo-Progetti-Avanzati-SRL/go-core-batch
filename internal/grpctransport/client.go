@@ -6,6 +6,7 @@ package grpctransport
 
 import (
 	"context"
+	"fmt"
 
 	batchgrpc "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/grpc"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/grpc/proto"
@@ -20,16 +21,18 @@ type Client struct {
 	client proto.DistributionChannelClient
 }
 
-func NewClient(config *batchgrpc.ClientConfig) *Client {
+// NewClient è un costruttore fx: ritorna errore invece di log.Fatal, così un URL/config non
+// valido fa fallire lo startup in modo pulito invece di terminare il processo dalla libreria.
+func NewClient(config *batchgrpc.ClientConfig) (*Client, error) {
 	conn, err := gogrpc.NewClient(config.Url,
 		gogrpc.WithTransportCredentials(insecure.NewCredentials()),
 		gogrpc.WithDefaultServiceConfig(`{"loadBalancingPolicy":"round_robin"}`),
 		gogrpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 	)
 	if err != nil {
-		log.Fatal().Err(err).Msg("Impossibile creare gRPC client")
+		return nil, fmt.Errorf("creazione gRPC client (url=%q): %w", config.Url, err)
 	}
-	return &Client{client: proto.NewDistributionChannelClient(conn)}
+	return &Client{client: proto.NewDistributionChannelClient(conn)}, nil
 }
 
 func (g *Client) DistribuiteTask(ctx context.Context, jobId, taskId, objectId, taskType string) (string, error) {

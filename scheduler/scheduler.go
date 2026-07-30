@@ -3,7 +3,6 @@ package scheduler
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/lock"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/gocronlock"
@@ -32,7 +31,10 @@ type schedulerParams struct {
 	Jobs   []JobRegistration `group:"batch_jobs"`
 }
 
-func newScheduler(p schedulerParams) *Scheduler {
+// newScheduler è un costruttore fx: ritorna un errore invece di log.Fatal, così una config
+// malformata (scheduler non inizializzabile, job type sconosciuto, build job fallito) fa fallire
+// lo startup dell'app in modo pulito (fail-fast) invece di terminare il processo dalla libreria.
+func newScheduler(p schedulerParams) (*Scheduler, error) {
 	sm := NewSchedulerMetrics()
 	opts := make([]gocron.SchedulerOption, 0)
 	logger := gocron.NewLogger(-1)
@@ -45,7 +47,7 @@ func newScheduler(p schedulerParams) *Scheduler {
 
 	scheduler, err := gocron.NewScheduler(opts...)
 	if err != nil {
-		log.Fatal().Err(err).Msg("Init scheduler")
+		return nil, fmt.Errorf("init scheduler: %w", err)
 	}
 
 	factories := make(map[string]JobFactory, len(p.Jobs))
@@ -60,14 +62,15 @@ func newScheduler(p schedulerParams) *Scheduler {
 		}
 		runjob, ok := factories[jobConfig.Type]
 		if !ok {
-			log.Error().Msgf("Job Type '%s' not found", jobConfig.Type)
-			continue
+			// Fail-fast: una config con un job type sconosciuto non deve far partire l'app con
+			// job silenziosamente mancanti (coerente col build-job-failed sotto).
+			return nil, fmt.Errorf("job %q: type %q non registrato", jobConfig.Name, jobConfig.Type)
 		}
 		log.Info().Msgf("Building job '%s' - type: %s", jobConfig.Name, jobConfig.Type)
 		jobOptions := makeOptions(jobConfig, locker)
 		j, err := scheduler.NewJob(gocron.CronJob(jobConfig.ScheduledCron, true), runjob(jobConfig.Name, &s, jobConfig), jobOptions...)
 		if err != nil {
-			log.Fatal().Err(err).Msgf("Build job '%s' failed", jobConfig.Name)
+			return nil, fmt.Errorf("build job %q: %w", jobConfig.Name, err)
 		}
 		log.Info().Msgf("Istanced job %s", j.Name())
 	}
@@ -86,7 +89,7 @@ func newScheduler(p schedulerParams) *Scheduler {
 		},
 	})
 
-	return &Scheduler{scheduler}
+	return &Scheduler{scheduler}, nil
 }
 
 func makeOptions(jobConfig Config, locker gocron.Locker) []gocron.JobOption {
@@ -99,8 +102,4 @@ func makeOptions(jobConfig Config, locker gocron.Locker) []gocron.JobOption {
 		jobOptions = append(jobOptions, gocron.WithSingletonMode(gocron.LimitModeReschedule))
 	}
 	return jobOptions
-}
-
-func getJobId(jobName string) string {
-	return fmt.Sprintf("%s-%s", jobName, time.Now().Format("20060102150405"))
 }

@@ -11,7 +11,6 @@ import (
 // IWorkItemStore is the persistence interface for the outbox/work-item pattern.
 // Implementations live in store/mongostore and store/sqlstore.
 type IWorkItemStore interface {
-	FindPending(ctx context.Context, workType, destination, objectType string) ([]*WorkItem, *core.ApplicationError)
 	// ClaimPending atomically selects up to limit PENDING items matching the given filters,
 	// marks them IN_PROGRESS (with locked_at = now), and returns them.
 	// destination and objectType are optional — pass "" to skip.
@@ -22,10 +21,12 @@ type IWorkItemStore interface {
 	// immediate processing in the current run — no reset to PENDING, no waiting for
 	// the next tick. destination and objectType are optional — pass "" to skip.
 	RecoverOrphans(ctx context.Context, workType, destination, objectType string, maxAge time.Duration, limit int) ([]*WorkItem, *core.ApplicationError)
-	// MarkDone transitions a single IN_PROGRESS item to DONE. È fenced dal token: la
-	// transizione avviene solo se lock_token coincide con quello passato (il claim corrente).
-	// È idempotente: se nessuna riga matcha (item già finalizzato o token stale) ritorna nil.
-	MarkDone(ctx context.Context, id, token string) *core.ApplicationError
+	// MarkDone transitions IN_PROGRESS items to DONE in batch. È fenced dal token: solo gli
+	// item il cui lock_token coincide con quello passato transitano (gli id passati devono
+	// condividere lo stesso token del claim — vero per il gruppo orfani o il gruppo fresh di un
+	// tick). È idempotente: gli id non matchati (già finalizzati o token stale) sono ignorati
+	// (log Debug), senza errore. Chi finalizza un singolo item passa una slice a 1 elemento.
+	MarkDone(ctx context.Context, ids []string, token string) *core.ApplicationError
 	MarkFailed(ctx context.Context, id, token, reason string) *core.ApplicationError
 	// MarkPending resets an item back to PENDING and increments retry.
 	// Use this when a task returns store.RetryError.

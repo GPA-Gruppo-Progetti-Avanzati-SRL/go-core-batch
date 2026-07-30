@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"time"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/kafka"
@@ -223,17 +222,6 @@ func (ks *ProducerService) initProducer(ctx context.Context) error {
 	if ks.client, errProd = newKafkaClient(ks.producerConfig); errProd != nil {
 		log.Error().Err(errProd).Msg("Failed to create Kafka producer")
 		return core.TechnicalErrorWithError(errProd)
-	}
-	return nil
-}
-
-func (ks *ProducerService) abortTransaction() *core.ApplicationError {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	errAbort := ks.client.EndTransaction(ctx, kgo.TryAbort)
-	if errAbort != nil {
-		log.Error().Err(errAbort).Msg("Failed to abort transaction")
-		return core.TechnicalErrorWithError(errAbort)
 	}
 	return nil
 }

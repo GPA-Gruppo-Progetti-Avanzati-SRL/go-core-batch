@@ -60,17 +60,6 @@ func (d *workItemDataSQL) warnIfActiveIndexMissing(ctx context.Context) {
 	})
 }
 
-func (d *workItemDataSQL) FindPending(ctx context.Context, workType, destination, objectType string) ([]*store.WorkItem, *core.ApplicationError) {
-	filter := workItemFilter{
-		Type:        workType,
-		Status:      store.StatusPending,
-		Destination: destination,
-		ObjectType:  objectType,
-	}
-	sort := page.SortRequest{{Field: "create_time", Dir: page.Asc}}
-	return coresql.GetAllByFilterSorted[store.WorkItem](ctx, d.DB, filter, sort)
-}
-
 // ClaimPending atomically selects up to limit PENDING items of workType,
 // marks them IN_PROGRESS with locked_at = now, and returns the full records.
 // Uses SELECT FOR UPDATE SKIP LOCKED — safe across multiple replicas.
@@ -166,22 +155,26 @@ func (d *workItemDataSQL) RecoverOrphans(ctx context.Context, workType, destinat
 	return items, nil
 }
 
-// MarkDone transitions a single IN_PROGRESS item to DONE, fenced dal token (WHERE lock_token = ?).
-// Idempotente: 0 righe (item già finalizzato o token stale) NON è un errore — è l'esito atteso
-// quando un worker stale prova a finalizzare un item ri-claimato altrove.
-func (d *workItemDataSQL) MarkDone(ctx context.Context, id, token string) *core.ApplicationError {
+// MarkDone transitions IN_PROGRESS items to DONE in batch, fenced dal token (gli id devono
+// condividere lo stesso lock_token). Idempotente: gli id non matchati (già finalizzati o token
+// stale) sono ignorati — è l'esito atteso quando un worker stale prova a finalizzarli.
+func (d *workItemDataSQL) MarkDone(ctx context.Context, ids []string, token string) *core.ApplicationError {
+	if len(ids) == 0 {
+		return nil
+	}
 	now := time.Now()
 	res, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
 		Set("status = ?", store.StatusDone).
 		Set("update_time = ?", now).
 		Set("locked_at = NULL").
-		Where("id = ? AND status = ? AND lock_token = ?", id, store.StatusInProgress, token).
+		Where("id IN (?) AND status = ? AND lock_token = ?", bun.List(ids), store.StatusInProgress, token).
 		Exec(ctx)
 	if err != nil {
 		return core.TechnicalErrorWithError(err)
 	}
-	if affected, _ := res.RowsAffected(); affected == 0 {
-		log.Debug().Msgf("MarkDone: item %q non aggiornato (già finalizzato o token stale)", id)
+	if affected, _ := res.RowsAffected(); int(affected) != len(ids) {
+		log.Debug().Msgf("MarkDone: %d/%d item marcati DONE (gli altri già finalizzati o token stale)",
+			affected, len(ids))
 	}
 	return nil
 }
