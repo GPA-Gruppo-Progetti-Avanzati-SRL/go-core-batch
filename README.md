@@ -45,7 +45,7 @@ Wira ogni componente **esplicitamente** e lo gate **solo** tramite i suoi modes:
 
 > In precedenza lo Scheduler doveva essere registrato **per ultimo** perché `newScheduler` leggeva una mappa globale `scheduler.Jobs` alla costruzione (popolata dai `Register()` dei componenti); registrarlo prima dava `"Job Type ... not found"`. Con il value group `batch_jobs` questo vincolo non esiste più.
 
-**Restano a carico dell'app:** registrare i task runner (`runner.Provide` / `runner.Register[T]` / `grpchandler.Provide`) e fornire il driver DB (`coremongo.NewService` o `coresql.NewService`). Il **simplejob NON è coperto** dall'orchestratore: resta wiring separato (vedi la sezione dedicata).
+**Restano a carico dell'app:** registrare i task runner (`runner.Provide` / `runner.Register[T]` / `grpchandler.Provide`) e fornire il driver DB (`coremongo.Module(&cfg.Mongo)` o `coresql.NewService`). Il **simplejob NON è coperto** dall'orchestratore: resta wiring separato (vedi la sezione dedicata).
 
 ### Esempio — distribuito (gRPC + Mongo)
 
