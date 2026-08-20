@@ -9,16 +9,15 @@ import (
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	mongo "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/tpm-mongo-common/mongolks"
 	"github.com/rs/zerolog/log"
 )
 
 // batchData implements store.IData using MongoDB.
 type batchData struct {
-	Service *mongolks.LinkedService
+	Service *mongo.Service
 }
 
-func newBatchData(ms *mongolks.LinkedService) *batchData {
+func newBatchData(ms *mongo.Service) *batchData {
 	return &batchData{Service: ms}
 }
 
@@ -55,7 +54,7 @@ func (d *batchData) insertTask(ctx context.Context, taskid, jobId, typeTask, obj
 		Objectid: objectid,
 		Error:    errMsg,
 	}
-	if _, err := mongo.InsertOne(ctx, d.Service, obj); err != nil {
+	if _, err := d.Service.InsertOne(ctx, obj); err != nil {
 		log.Error().Err(err).Msgf("Impossibile inserire task log: %s", err.Message)
 	}
 }

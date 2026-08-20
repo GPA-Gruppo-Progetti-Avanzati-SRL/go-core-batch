@@ -9,7 +9,6 @@ import (
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/page"
 	mongo "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/tpm-mongo-common/mongolks"
 	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	mgodriver "go.mongodb.org/mongo-driver/v2/mongo"
@@ -33,11 +32,11 @@ func (f workItemFilter) GetFilterCollectionName(ctx context.Context) string {
 
 // workItemData implements store.IWorkItemStore using MongoDB.
 type workItemData struct {
-	Service     *mongolks.LinkedService
+	Service     *mongo.Service
 	idxWarnOnce sync.Once
 }
 
-func newWorkItemData(ms *mongolks.LinkedService) *workItemData {
+func newWorkItemData(ms *mongo.Service) *workItemData {
 	return &workItemData{Service: ms}
 }
 
@@ -83,7 +82,7 @@ func (d *workItemData) FindPending(ctx context.Context, workType, destination, o
 		ObjectType:  objectType,
 	}
 	sort := page.SortRequest{{Field: "createTime", Dir: page.Asc}}
-	return mongo.GetObjectsByFilterSorted[store.WorkItem](ctx, d.Service, filter, sort)
+	return d.Service.GetObjectsByFilterSorted[store.WorkItem](ctx, filter, sort)
 }
 
 // ClaimPending atomically claims up to limit PENDING items using optimistic locking.
@@ -139,7 +138,7 @@ func (d *workItemData) ClaimPending(ctx context.Context, workType, destination, 
 			"lockToken":  token,
 			"lockedBy":   host,
 		}}
-		if err := mongo.UpdateOne(ctx, d.Service, claimFilter, update); err != nil {
+		if err := d.Service.UpdateOne(ctx, claimFilter, update); err != nil {
 			if err.Code == "MON-AGGINC" {
 				continue // already claimed by another replica — skip
 			}
@@ -281,7 +280,7 @@ func (d *workItemData) Insert(ctx context.Context, items []*store.WorkItem) *cor
 	for i, item := range items {
 		list[i] = item
 	}
-	return mongo.InsertMany(ctx, d.Service, list)
+	return d.Service.InsertMany(ctx, list)
 }
 
 func (d *workItemData) DeleteIfPending(ctx context.Context, id string) (bool, *core.ApplicationError) {
@@ -348,7 +347,7 @@ func (d *workItemData) List(ctx context.Context, workType, status string, paging
 	} else {
 		sortOpt = options.Find().SetSort(bson.D{{Key: "createTime", Value: -1}})
 	}
-	flat, err := mongo.GetPageByFilter[store.WorkItem](ctx, d.Service, filter, paging, sortOpt)
+	flat, err := d.Service.GetPageByFilter[store.WorkItem](ctx, filter, paging, sortOpt)
 	if err != nil {
 		return nil, err
 	}
@@ -362,7 +361,7 @@ func (d *workItemData) List(ctx context.Context, workType, status string, paging
 // EnsureIndexes creates the indexes required by workItemData. Call once at application startup.
 // The partial unique index uk_workitem_active prevents concurrent insertion of duplicate
 // active (PENDING or IN_PROGRESS) items for the same (type, objectId).
-func EnsureIndexes(ctx context.Context, service *mongolks.LinkedService) error {
+func EnsureIndexes(ctx context.Context, service *mongo.Service) error {
 	coll := service.GetCollection(store.CollectionWorkItems, "")
 	_, err := coll.Indexes().CreateOne(ctx, mgodriver.IndexModel{
 		Keys: bson.D{{Key: "type", Value: 1}, {Key: "objectId", Value: 1}},

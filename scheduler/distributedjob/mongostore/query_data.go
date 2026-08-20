@@ -10,7 +10,7 @@ import (
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/tpm-mongo-common/mongolks"
+	coremongo "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
@@ -39,10 +39,10 @@ func convertDates(m bson.M) bson.M {
 
 // queryData implements distributedjob.IQueryStore against a MongoDB collection.
 type queryData struct {
-	Service *mongolks.LinkedService
+	Service *coremongo.Service
 }
 
-func newQueryData(ms *mongolks.LinkedService) *queryData {
+func newQueryData(ms *coremongo.Service) *queryData {
 	return &queryData{Service: ms}
 }
 

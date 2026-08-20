@@ -1,12 +1,11 @@
 module github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch
 
-go 1.26.5
+go 1.27
 
 require (
 	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app v0.0.28
 	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo v0.0.19
 	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-sql v0.0.1
-	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/tpm-mongo-common v1.0.24-0.20260806095729-fb30bfd3074b
 	github.com/aws/aws-sdk-go-v2 v1.42.1
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.26
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.104.2
@@ -28,6 +27,7 @@ require (
 
 require (
 	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/tpm-common v0.1.95 // indirect
+	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/tpm-mongo-common v1.0.24-0.20260806095729-fb30bfd3074b // indirect
 	github.com/KimMachineGun/automemlimit v0.7.5 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.14 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.30 // indirect
