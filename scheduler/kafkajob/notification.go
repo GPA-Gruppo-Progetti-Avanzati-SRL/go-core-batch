@@ -27,7 +27,7 @@ const defaultKafkaLimit = 100
 
 func makeNotificationJobFactory(producer *kafkaproducer.ProducerService, items store.IWorkItemStore) scheduler.JobFactory {
 	return func(name string, s *scheduler.Services, config scheduler.Config) gocron.Task {
-		return gocron.NewTask(func() error {
+		return scheduler.LabeledTask(name, config.Type, func() error {
 			return notificationJobRun(name, producer, items, config)
 		})
 	}
@@ -99,9 +99,8 @@ func notificationJobRun(name string, producer *kafkaproducer.ProducerService, it
 		span.RecordError(errProduce)
 		log.Error().Err(errProduce).Msgf("[%s] Kafka produce failed — resetting %d items to PENDING", jobId, len(valid))
 		// Transient Kafka failure — reset claimed items so they are retried next tick.
-		var retryErr *store.RetryError
 		var after time.Duration
-		if errors.As(errProduce, &retryErr) {
+		if retryErr, ok := errors.AsType[*store.RetryError](errProduce); ok {
 			after = retryErr.After
 		}
 		for _, item := range valid {
@@ -171,34 +170,34 @@ func prepareMessages(items []*store.WorkItem) ([]*store.WorkItem, []*kafka.Messa
 // riletto da Mongo, arriva come bson.D: senza questa conversione json.Marshal(bson.D)
 // produrrebbe un array [{Key,Value},...] invece di un oggetto, e gli header (bson.D) non
 // sarebbero mappabili da toStringMap.
-func bsonToNative(v interface{}) interface{} {
+func bsonToNative(v any) any {
 	switch t := v.(type) {
 	case bson.D:
-		m := make(map[string]interface{}, len(t))
+		m := make(map[string]any, len(t))
 		for _, e := range t {
 			m[e.Key] = bsonToNative(e.Value)
 		}
 		return m
 	case bson.M:
-		m := make(map[string]interface{}, len(t))
+		m := make(map[string]any, len(t))
 		for k, val := range t {
 			m[k] = bsonToNative(val)
 		}
 		return m
-	case map[string]interface{}:
-		m := make(map[string]interface{}, len(t))
+	case map[string]any:
+		m := make(map[string]any, len(t))
 		for k, val := range t {
 			m[k] = bsonToNative(val)
 		}
 		return m
 	case bson.A:
-		a := make([]interface{}, len(t))
+		a := make([]any, len(t))
 		for i, e := range t {
 			a[i] = bsonToNative(e)
 		}
 		return a
-	case []interface{}:
-		a := make([]interface{}, len(t))
+	case []any:
+		a := make([]any, len(t))
 		for i, e := range t {
 			a[i] = bsonToNative(e)
 		}
@@ -208,22 +207,22 @@ func bsonToNative(v interface{}) interface{} {
 	}
 }
 
-// normalizePayload porta il Payload del WI a map[string]interface{} indipendentemente dal
-// backend: Mongo lo rilegge come bson.D, SQL (colonna jsonb) come map[string]interface{} o
+// normalizePayload porta il Payload del WI a map[string]any indipendentemente dal
+// backend: Mongo lo rilegge come bson.D, SQL (colonna jsonb) come map[string]any o
 // []byte; se salvato come stringa JSON viene deserializzato. Ritorna (nil,false) se non gestibile.
-func normalizePayload(p interface{}) (map[string]interface{}, bool) {
+func normalizePayload(p any) (map[string]any, bool) {
 	switch v := p.(type) {
-	case bson.D, bson.M, map[string]interface{}:
-		m, ok := bsonToNative(v).(map[string]interface{})
+	case bson.D, bson.M, map[string]any:
+		m, ok := bsonToNative(v).(map[string]any)
 		return m, ok
 	case []byte:
-		var m map[string]interface{}
+		var m map[string]any
 		if json.Unmarshal(v, &m) != nil {
 			return nil, false
 		}
 		return m, true
 	case string:
-		var m map[string]interface{}
+		var m map[string]any
 		if json.Unmarshal([]byte(v), &m) != nil {
 			return nil, false
 		}
@@ -233,10 +232,10 @@ func normalizePayload(p interface{}) (map[string]interface{}, bool) {
 	}
 }
 
-func toStringMap(input interface{}) (map[string]string, error) {
-	m, ok := input.(map[string]interface{})
+func toStringMap(input any) (map[string]string, error) {
+	m, ok := input.(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("expected map[string]interface{}, got %T", input)
+		return nil, fmt.Errorf("expected map[string]any, got %T", input)
 	}
 	out := make(map[string]string, len(m))
 	for k, v := range m {

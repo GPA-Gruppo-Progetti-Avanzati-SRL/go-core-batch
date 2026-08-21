@@ -64,7 +64,7 @@ func (q *queryDataSQL) GetIdsSorted(ctx context.Context, table, filter, sort str
 		query = query.Where(filter)
 	}
 	if sort != "" {
-		for _, part := range strings.Split(sort, ",") {
+		for part := range strings.SplitSeq(sort, ",") {
 			fields := strings.SplitN(strings.TrimSpace(part), ":", 2)
 			col := strings.TrimSpace(fields[0])
 			if err := validateIdent("sort column", col, false); err != nil {

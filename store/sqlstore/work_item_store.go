@@ -31,12 +31,13 @@ func (f workItemFilter) GetFilterTableName(ctx context.Context) string {
 
 // workItemDataSQL implements store.IWorkItemStore using a SQL database via bun.
 type workItemDataSQL struct {
-	DB          *bun.DB
+	Sql         *coresql.Service
+	DB          *bun.DB // handle bun del Service, per le query native e il DDL
 	idxWarnOnce sync.Once
 }
 
-func newWorkItemDataSQL(db *bun.DB) *workItemDataSQL {
-	return &workItemDataSQL{DB: db}
+func newWorkItemDataSQL(sqlService *coresql.Service) *workItemDataSQL {
+	return &workItemDataSQL{Sql: sqlService, DB: sqlService.DB()}
 }
 
 var _ store.IWorkItemStore = (*workItemDataSQL)(nil)
@@ -68,7 +69,7 @@ func (d *workItemDataSQL) FindPending(ctx context.Context, workType, destination
 		ObjectType:  objectType,
 	}
 	sort := page.SortRequest{{Field: "create_time", Dir: page.Asc}}
-	return coresql.GetAllByFilterSorted[store.WorkItem](ctx, d.DB, filter, sort)
+	return d.Sql.GetAllByFilterSorted[store.WorkItem](ctx, filter, sort)
 }
 
 // ClaimPending atomically selects up to limit PENDING items of workType,
@@ -231,7 +232,7 @@ func (d *workItemDataSQL) MarkPending(ctx context.Context, id, token string, aft
 }
 
 func (d *workItemDataSQL) Insert(ctx context.Context, items []*store.WorkItem) *core.ApplicationError {
-	return coresql.InsertMany[store.WorkItem](ctx, d.DB, items)
+	return d.Sql.InsertMany[store.WorkItem](ctx, items)
 }
 
 func (d *workItemDataSQL) DeleteIfPending(ctx context.Context, id string) (bool, *core.ApplicationError) {
@@ -246,7 +247,7 @@ func (d *workItemDataSQL) DeleteIfPending(ctx context.Context, id string) (bool,
 }
 
 func (d *workItemDataSQL) GetById(ctx context.Context, id string) (*store.WorkItem, *core.ApplicationError) {
-	return coresql.GetById[store.WorkItem](ctx, d.DB, id)
+	return d.Sql.GetById[store.WorkItem](ctx, id)
 }
 
 func (d *workItemDataSQL) HasActive(ctx context.Context, workType, objectId string) (bool, *core.ApplicationError) {

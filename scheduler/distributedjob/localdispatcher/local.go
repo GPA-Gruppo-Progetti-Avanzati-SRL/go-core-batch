@@ -6,6 +6,7 @@ package localdispatcher
 import (
 	"context"
 	"errors"
+	"runtime/pprof"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,6 +19,9 @@ import (
 	"github.com/rs/zerolog/log"
 	"go.uber.org/fx"
 )
+
+// LabelTaskType è l'etichetta pprof applicata alle goroutine delle task in-process.
+const LabelTaskType = "batch_task_type"
 
 const (
 	// defaultMaxConcurrent limita quante task in-process girano contemporaneamente. Senza,
@@ -87,19 +91,21 @@ func (d *LocalDispatcher) DispatchTask(ctx context.Context, jobId, taskId, objec
 	default:
 		return errors.New("localdispatcher: max concurrency reached")
 	}
-	d.wg.Add(1)
 	taskCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), d.taskTimeout)
-	go func() {
-		defer d.wg.Done()
+	// Etichetta la goroutine col tipo di task (bassa cardinalità): da Go 1.27 la label
+	// compare anche nei traceback, oltre che nel profilo goroutineleak.
+	labeled := pprof.WithLabels(taskCtx, pprof.Labels(LabelTaskType, taskType))
+	d.wg.Go(func() {
 		defer cancel()
 		defer func() { <-d.sem }()
+		pprof.SetGoroutineLabels(labeled)
 		d.data.SetTaskStart(taskCtx, taskId, jobId, taskType, objectId)
 		if err := d.mux.Run(taskCtx, objectId, taskType, d.items); err != nil {
 			d.data.SetTaskInError(taskCtx, taskId, jobId, taskType, objectId, err.Error())
 			return
 		}
 		d.data.SetTaskDone(taskCtx, taskId, jobId, taskType, objectId)
-	}()
+	})
 	return nil
 }
 

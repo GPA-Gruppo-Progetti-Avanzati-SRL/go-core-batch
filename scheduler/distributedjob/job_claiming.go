@@ -25,7 +25,7 @@ func jobID(name string) string {
 
 func makeClaimingFactory(dispatcher ITaskDispatcher, items store.IWorkItemStore, feed IFeedSource, data store.IData) scheduler.JobFactory {
 	return func(name string, s *scheduler.Services, config scheduler.Config) gocron.Task {
-		return gocron.NewTask(func() error {
+		return scheduler.LabeledTask(name, config.Type, func() error {
 			return jobRunWithClaiming(name, dispatcher, items, feed, data, config)
 		})
 	}

@@ -20,12 +20,12 @@ import (
 	"fmt"
 	"strconv"
 	"time"
+	"uuid"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	gocron "github.com/go-co-op/gocron/v2"
-	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"go.uber.org/fx"
 )
@@ -120,7 +120,7 @@ func makeFactory(items store.IWorkItemStore, runner ITaskRunner) scheduler.JobFa
 		// Convenzione unica (scheduler.Config.ResolveTimeouts): LockTimeout governa sia il
 		// timeout del context di run sia l'età di orphan usata da RecoverOrphans.
 		timeout, orphanTimeout := config.ResolveTimeouts()
-		return gocron.NewTask(func() error {
+		return scheduler.LabeledTask(name, config.Type, func() error {
 			return run(name, workType, selfFeed, timeout, orphanTimeout, limit, items, runner)
 		})
 	}
@@ -134,7 +134,7 @@ func run(name, workType string, selfFeed bool, timeout, orphanTimeout time.Durat
 	if selfFeed {
 		now := time.Now()
 		wi := []*store.WorkItem{{
-			Id:         uuid.New().String(),
+			Id:         uuid.NewV7().String(),
 			Type:       workType,
 			ObjectId:   workType,
 			Status:     store.StatusPending,

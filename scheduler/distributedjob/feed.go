@@ -3,10 +3,10 @@ package distributedjob
 import (
 	"context"
 	"time"
+	"uuid"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
-	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
 
@@ -46,7 +46,7 @@ func (f *queryStoreFeed) Feed(ctx context.Context, taskType string, props map[st
 	workItems := make([]*store.WorkItem, len(ids))
 	for i, id := range ids {
 		workItems[i] = &store.WorkItem{
-			Id:         uuid.New().String(),
+			Id:         uuid.NewV7().String(),
 			Type:       taskType,
 			ObjectId:   id,
 			ObjectType: props["objectType"],

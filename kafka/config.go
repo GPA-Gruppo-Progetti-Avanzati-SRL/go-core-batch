@@ -81,23 +81,23 @@ type ConsumerConfig struct {
 	MetadataMaxAgeMs      int    `mapstructure:"metadata-max-age-ms,omitempty" json:"metadata-max-age-ms,omitempty" yaml:"metadata-max-age-ms,omitempty"`
 	SocketKeepaliveEnable bool   `mapstructure:"socket-keepalive-enable,omitempty" json:"socket-keepalive-enable,omitempty" yaml:"socket-keepalive-enable,omitempty"`
 	// RequestTimeoutMs      int    `mapstructure:"request-timeout-ms,omitempty" json:"request-timeout-ms,omitempty" yaml:"request-timeout-ms,omitempty"`
-	ConnectionsMaxIdleMs int                    `mapstructure:"connections-max-idle-ms,omitempty" json:"connections-max-idle-ms,omitempty" yaml:"connections-max-idle-ms,omitempty"`
-	HeartBeatIntervalMs  int                    `mapstructure:"heartbeat-interval-ms,omitempty" json:"heartbeat-interval-ms,omitempty" yaml:"heartbeat-interval-ms,omitempty"`
-	ExtraConfig          map[string]interface{} `mapstructure:"extra-config,omitempty" json:"extra-config,omitempty" yaml:"extra-config,omitempty"`
+	ConnectionsMaxIdleMs int            `mapstructure:"connections-max-idle-ms,omitempty" json:"connections-max-idle-ms,omitempty" yaml:"connections-max-idle-ms,omitempty"`
+	HeartBeatIntervalMs  int            `mapstructure:"heartbeat-interval-ms,omitempty" json:"heartbeat-interval-ms,omitempty" yaml:"heartbeat-interval-ms,omitempty"`
+	ExtraConfig          map[string]any `mapstructure:"extra-config,omitempty" json:"extra-config,omitempty" yaml:"extra-config,omitempty"`
 }
 
 type ProducerConfig struct {
 	// Producer related configs
-	Acks                  string                 `mapstructure:"acks" json:"acks" yaml:"acks"`
-	TransactionalID       string                 `mapstructure:"transactional-id" json:"transactional-id" yaml:"transactional-id"`
-	MaxTimeoutMs          int                    `mapstructure:"max-timeout-ms" json:"max-timeout-ms" yaml:"max-timeout-ms"`
-	DeliveryTimeout       time.Duration          `mapstructure:"delivery-timeout"`
-	FlushTimeout          time.Duration          `mapstructure:"flush-timeout"`
-	MessageSendMaxRetries int                    `mapstructure:"max-retries"`
-	MetadataMaxAgeMs      int                    `mapstructure:"metadata-max-age-ms,omitempty" json:"metadata-max-age-ms,omitempty" yaml:"metadata-max-age-ms,omitempty"`
-	SocketKeepaliveEnable bool                   `mapstructure:"socket-keepalive-enable,omitempty" json:"socket-keepalive-enable,omitempty" yaml:"socket-keepalive-enable,omitempty"`
-	RequestTimeoutMs      int                    `mapstructure:"request-timeout-ms,omitempty" json:"request-timeout-ms,omitempty" yaml:"request-timeout-ms,omitempty"`
-	ConnectionsMaxIdleMs  int                    `mapstructure:"connections-max-idle-ms,omitempty" json:"connections-max-idle-ms,omitempty" yaml:"connections-max-idle-ms,omitempty"`
-	MetadataMaxIdleMs     int                    `mapstructure:"metadata-max-idle-ms,omitempty" json:"metadata-max-idle-ms,omitempty" yaml:"metadata-max-idle-ms,omitempty"`
-	ExtraConfig           map[string]interface{} `mapstructure:"extra-config,omitempty" json:"extra-config,omitempty" yaml:"extra-config,omitempty"`
+	Acks                  string         `mapstructure:"acks" json:"acks" yaml:"acks"`
+	TransactionalID       string         `mapstructure:"transactional-id" json:"transactional-id" yaml:"transactional-id"`
+	MaxTimeoutMs          int            `mapstructure:"max-timeout-ms" json:"max-timeout-ms" yaml:"max-timeout-ms"`
+	DeliveryTimeout       time.Duration  `mapstructure:"delivery-timeout"`
+	FlushTimeout          time.Duration  `mapstructure:"flush-timeout"`
+	MessageSendMaxRetries int            `mapstructure:"max-retries"`
+	MetadataMaxAgeMs      int            `mapstructure:"metadata-max-age-ms,omitempty" json:"metadata-max-age-ms,omitempty" yaml:"metadata-max-age-ms,omitempty"`
+	SocketKeepaliveEnable bool           `mapstructure:"socket-keepalive-enable,omitempty" json:"socket-keepalive-enable,omitempty" yaml:"socket-keepalive-enable,omitempty"`
+	RequestTimeoutMs      int            `mapstructure:"request-timeout-ms,omitempty" json:"request-timeout-ms,omitempty" yaml:"request-timeout-ms,omitempty"`
+	ConnectionsMaxIdleMs  int            `mapstructure:"connections-max-idle-ms,omitempty" json:"connections-max-idle-ms,omitempty" yaml:"connections-max-idle-ms,omitempty"`
+	MetadataMaxIdleMs     int            `mapstructure:"metadata-max-idle-ms,omitempty" json:"metadata-max-idle-ms,omitempty" yaml:"metadata-max-idle-ms,omitempty"`
+	ExtraConfig           map[string]any `mapstructure:"extra-config,omitempty" json:"extra-config,omitempty" yaml:"extra-config,omitempty"`
 }

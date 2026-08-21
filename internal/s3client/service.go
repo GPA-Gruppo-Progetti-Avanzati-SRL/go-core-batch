@@ -25,12 +25,10 @@ var ErrObjectNotFound = errors.New("s3client: object not found")
 // isNotFound riconosce l'errore S3 di oggetto mancante, sia come tipo (*types.NoSuchKey)
 // sia come APIError generico con codice NoSuchKey/NotFound (404).
 func isNotFound(err error) bool {
-	var nsk *types.NoSuchKey
-	if errors.As(err, &nsk) {
+	if _, ok := errors.AsType[*types.NoSuchKey](err); ok {
 		return true
 	}
-	var apiErr smithy.APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[smithy.APIError](err); ok {
 		switch apiErr.ErrorCode() {
 		case "NoSuchKey", "NotFound":
 			return true

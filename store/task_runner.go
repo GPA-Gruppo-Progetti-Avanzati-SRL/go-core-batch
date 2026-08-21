@@ -49,8 +49,7 @@ func ApplyResult(ctx context.Context, items IWorkItemStore, id, token string, ru
 	if errors.Is(runErr, ErrHandled) {
 		return OutcomeHandled, nil
 	}
-	var re *RetryError
-	if errors.As(runErr, &re) {
+	if re, ok := errors.AsType[*RetryError](runErr); ok {
 		return OutcomeRetry, items.MarkPending(ctx, id, token, re.After)
 	}
 	return OutcomeFailed, items.MarkFailed(ctx, id, token, runErr.Error())

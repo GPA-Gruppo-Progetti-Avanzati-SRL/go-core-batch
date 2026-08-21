@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"path"
 	"time"
+	"uuid"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/s3client"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
-	"github.com/google/uuid"
 )
 
 // S3Payload is stored in WorkItem.Payload for S3-sourced items.
@@ -69,7 +69,7 @@ func (f *S3Feed) Feed(ctx context.Context, taskType string, props map[string]str
 			}
 		}
 		items = append(items, &store.WorkItem{
-			Id:       uuid.New().String(),
+			Id:       uuid.NewV7().String(),
 			Type:     taskType,
 			ObjectId: obj.Key,
 			Payload: S3Payload{

@@ -33,10 +33,10 @@ func TestPrepareMessagesBsonPayload(t *testing.T) {
 	// Caso SQL: bun rilegge la colonna jsonb come map[string]interface{} (tipi già nativi).
 	sqlItem := &store.WorkItem{
 		Id: "BR-test-sql",
-		Payload: map[string]interface{}{
+		Payload: map[string]any{
 			"messageKey":   "BR-test-sql",
-			"messageValue": map[string]interface{}{"numeroOrdine": "584", "stato": "KO"},
-			"messageHeaders": map[string]interface{}{
+			"messageValue": map[string]any{"numeroOrdine": "584", "stato": "KO"},
+			"messageHeaders": map[string]any{
 				"canale":           "APBP",
 				"stato-operazione": "KO",
 			},

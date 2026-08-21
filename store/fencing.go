@@ -3,14 +3,13 @@ package store
 import (
 	"os"
 	"sync"
-
-	"github.com/google/uuid"
+	"uuid"
 )
 
 // NewLockToken genera un fencing token unico per un claim/recover. Un nuovo token viene
 // stampato su ogni item ad ogni (ri)claim: i Mark* lo richiedono in WHERE, così un worker
 // stale (il cui item è stato ri-claimato da RecoverOrphans) non può più finalizzarlo.
-func NewLockToken() string { return uuid.NewString() }
+func NewLockToken() string { return uuid.New().String() }
 
 var (
 	hostnameOnce sync.Once

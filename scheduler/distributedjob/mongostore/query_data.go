@@ -30,7 +30,7 @@ func convertDates(m bson.M) bson.M {
 			}
 		case bson.M:
 			m[key] = convertDates(v)
-		case map[string]interface{}:
+		case map[string]any:
 			m[key] = convertDates(bson.M(v))
 		}
 	}
@@ -71,7 +71,7 @@ func (q *queryData) GetIdsSorted(ctx context.Context, collection, filter, sort s
 	}
 	if sort != "" {
 		sortDoc := bson.D{}
-		for _, part := range strings.Split(sort, ",") {
+		for part := range strings.SplitSeq(sort, ",") {
 			fields := strings.SplitN(strings.TrimSpace(part), ":", 2)
 			col := fields[0]
 			dir := 1

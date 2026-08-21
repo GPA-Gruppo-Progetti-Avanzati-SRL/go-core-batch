@@ -5,11 +5,19 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime/pprof"
 	"syscall"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"github.com/rs/zerolog/log"
 	"go.uber.org/fx"
+)
+
+// Etichette pprof delle goroutine del pool: a bassa cardinalità (nome del worker e
+// tipo di task), così i profili e i traceback restano raggruppabili.
+const (
+	LabelWorker   = "batch_worker"
+	LabelTaskType = "batch_task_type"
 )
 
 type Workers[T any] struct {
@@ -62,7 +70,11 @@ func NewWorkers[T any](lc fx.Lifecycle, workersConfig []Config, data store.IData
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
 			for k, channel := range w.TaskChannel {
-				go NewWorker[T](k, channel, w.StopChannel, w.OsChannel, services, data, items)
+				// pprof.Do etichetta la goroutine del worker: da Go 1.27 la label
+				// compare anche nei traceback, oltre che nei profili.
+				go pprof.Do(context.Background(), pprof.Labels(LabelWorker, k), func(context.Context) {
+					NewWorker[T](k, channel, w.StopChannel, w.OsChannel, services, data, items)
+				})
 			}
 			return nil
 		},
@@ -104,7 +116,11 @@ func NewWorker[T any](k string, channel chan *Task, stopCh <-chan struct{}, osCh
 			// so it is always released by Run's deferred <-semaphore.
 			semaphore <- struct{}{}
 			log.Trace().Msgf("W - %s - %s - Green Signal Executing task in worker channel", ch.GetJobId(), ch.GetId())
-			go Run(semaphore, ch, services, batchData, items)
+			// Il set di label è esplicito (worker + tipo di task): pprof.Do lo
+			// sostituisce a quello ereditato dalla goroutine del worker.
+			go pprof.Do(context.Background(), pprof.Labels(LabelWorker, k, LabelTaskType, ch.Type), func(context.Context) {
+				Run(semaphore, ch, services, batchData, items)
+			})
 		}
 	}
 }

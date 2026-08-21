@@ -83,7 +83,7 @@ func transactionalID(p kafka.ProducerConfig) (string, bool) {
 
 // buildKafkaOptions traduce la *kafka.Config in opzioni franz-go. È plumbing
 // interno al producer: NON fa parte dell'API pubblica del package kafka.
-func buildKafkaOptions(cfgKafka *kafka.Config, extraConfig map[string]interface{}) []kgo.Opt {
+func buildKafkaOptions(cfgKafka *kafka.Config, extraConfig map[string]any) []kgo.Opt {
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(strings.Split(cfgKafka.BootstrapServer, ",")...),
 		kgo.WithLogger(kgoLogger{}),

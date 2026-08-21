@@ -41,7 +41,7 @@ func wrapFileRunners(reg *s3client.Registry, fileRunners []*runner.FileTaskRunne
 }
 
 // wrappedRunnersProvide restituisce il provider annotato dei file runner (gruppo batch_runners).
-func wrappedRunnersProvide() interface{} {
+func wrappedRunnersProvide() any {
 	return fx.Annotate(
 		wrapFileRunners,
 		fx.ParamTags(``, `group:"`+runner.FileGroup+`"`),

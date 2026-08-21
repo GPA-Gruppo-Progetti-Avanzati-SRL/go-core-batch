@@ -9,18 +9,17 @@ import (
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	coresql "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-sql"
 	"github.com/rs/zerolog/log"
-	"github.com/uptrace/bun"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 )
 
 // batchDataSQL implements store.IData using a SQL database via bun.
 type batchDataSQL struct {
-	DB *bun.DB
+	Sql *coresql.Service
 }
 
-func newBatchDataSQL(db *bun.DB) *batchDataSQL {
-	return &batchDataSQL{DB: db}
+func newBatchDataSQL(sqlService *coresql.Service) *batchDataSQL {
+	return &batchDataSQL{Sql: sqlService}
 }
 
 var _ store.IData = (*batchDataSQL)(nil)
@@ -56,7 +55,7 @@ func (d *batchDataSQL) insertTask(ctx context.Context, taskid, jobId, typeTask, 
 		Objectid: objectid,
 		Error:    errMsg,
 	}
-	if err := coresql.InsertOne(ctx, d.DB, obj); err != nil {
+	if err := d.Sql.InsertOne(ctx, obj); err != nil {
 		log.Error().Err(err).Msgf("Impossibile inserire task log: %s", err.Message)
 	}
 }
