@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/kafkaproducer"
@@ -37,25 +36,20 @@ func notificationJobRun(name string, producer *kafkaproducer.ProducerService, it
 	p := config.Properties
 	jobId := jobID(name)
 
-	destination, ok := p["destination"]
-	if !ok {
+	if !p.Has("destination") {
 		return core.TechnicalErrorWithCodeAndMessage("PROPERTIES", "destination not found in properties")
 	}
-	object, ok := p["object"]
-	if !ok {
+	destination := p.GetString("destination", "")
+	if !p.Has("object") {
 		return core.TechnicalErrorWithCodeAndMessage("PROPERTIES", "object not found in properties")
 	}
-	topic, ok := p["topic"]
-	if !ok {
+	object := p.GetString("object", "")
+	if !p.Has("topic") {
 		return core.TechnicalErrorWithCodeAndMessage("PROPERTIES", "topic not found in properties")
 	}
+	topic := p.GetString("topic", "")
 
-	limit := defaultKafkaLimit
-	if v := p["limit"]; v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			limit = n
-		}
-	}
+	limit := p.GetInt("limit", defaultKafkaLimit)
 
 	// Convenzione unica (scheduler.Config.ResolveTimeouts): LockTimeout governa sia il timeout
 	// del context di run sia l'età di orphan. Prima il run usava il knob ad-hoc properties["timeout"].

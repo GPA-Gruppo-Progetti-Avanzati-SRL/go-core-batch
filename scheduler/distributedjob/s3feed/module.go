@@ -35,7 +35,7 @@ func provideRegistry(cfg s3.Config) (*s3client.Registry, error) {
 func wrapFileRunners(reg *s3client.Registry, fileRunners []*runner.FileTaskRunner) []*runner.TaskRunner {
 	wrapped := make([]*runner.TaskRunner, len(fileRunners))
 	for i, fr := range fileRunners {
-		wrapped[i] = runner.New(fr.TaskType, newFileRunner(reg, fr.Runner))
+		wrapped[i] = runner.New(fr.TaskName, newFileRunner(reg, fr.Runner))
 	}
 	return wrapped
 }

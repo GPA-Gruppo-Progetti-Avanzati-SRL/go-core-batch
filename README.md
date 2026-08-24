@@ -16,14 +16,19 @@ Raccoglie i sotto-config di tutti i pezzi cablati da `Module`. L'app tipicamente
 
 | Campo | Tipo | Tag yaml/mapstructure/json |
 |---|---|---|
-| `RedisConfig` | `redis.Config` | `redis` |
 | `Grpc` | `grpc.Config` (`Client{Url}`, `Server{Hostname,Port}`) | `grpc` |
 | `S3` | `s3.Config` | `s3` |
 | `JobsConfig` | `[]scheduler.Config` | `jobs` |
+| `TasksConfig` | `[]task.Config` (`name`, `type`, `properties`) | `tasks` |
 | `WorkersConfig` | `[]worker.Config` | `workers` |
 | `KafkaConfig` | `kafka.Config` | `kafka` |
 
-### `batch.Module(cfg *batch.Config, opts ...batch.Option)`
+> **`jobs[].properties` e `tasks[].properties` non sono la stessa cosa.** Il primo blocco è
+> **infrastrutturale**: configura il *job type* (`task`, `limit`, `collection`, `filter`, `topic`,
+> `workType`, …) e lo legge il framework. Il secondo è **applicativo**: sono le properties del task,
+> mappate sui campi `prop:` della struct del runner. Vedi "Configurazione dei task — `tasks:`".
+
+### `batch.Module(cfg *batch.Config, register func(), opts ...batch.Option)`
 
 Wira ogni componente **esplicitamente** e lo gate **solo** tramite i suoi modes: è il `core.Mode` a runtime a decidere cosa viene effettivamente costruito, non un `if` sul valore del config. I backend (store, dispatcher, feed, job Kafka, worker pool) **non sono selezionati da enum ma iniettati dall'app come `batch.ModuleFunc` per riferimento diretto** (niente closure). Così il package `batch` non importa nessun package di backend — solo i loro `Config`, struct leggere — e ogni app trascina in `go.mod` **solo** le dipendenze di ciò che passa: un'app mongo-only non si porta dietro `uptrace/bun`, una senza Kafka non si porta dietro `franz-go`.
 
@@ -45,7 +50,11 @@ Wira ogni componente **esplicitamente** e lo gate **solo** tramite i suoi modes:
 
 > In precedenza lo Scheduler doveva essere registrato **per ultimo** perché `newScheduler` leggeva una mappa globale `scheduler.Jobs` alla costruzione (popolata dai `Register()` dei componenti); registrarlo prima dava `"Job Type ... not found"`. Con il value group `batch_jobs` questo vincolo non esiste più.
 
-**Restano a carico dell'app:** registrare i task runner (`runner.Provide` / `runner.Register[T]` / `grpchandler.Provide`) e fornire il driver DB (`coremongo.Module(&cfg.Mongo)` o `coresql.Module(&cfg.Sql, pgdialect.New())`). Il **simplejob NON è coperto** dall'orchestratore: resta wiring separato (vedi la sezione dedicata).
+**La funzione `register`** è il gemello di quella di `corekafka.Module`: `batch.Module` la esegue **sincronamente**, con la config già nota. Le `runner.Register[T]` / `simplejob.RegisterRunner[T]` chiamate al suo interno forniscono a fx **una istanza di runner per ogni task attivo** — cioè per ogni voce di `tasks:` referenziata da un job o da un worker — ciascuna con le proprie properties. Un task che nessuno referenzia non viene istanziato: le sue dipendenze non entrano nel grafo e non vengono mai connesse.
+
+`register` è `nil` solo per un'app che non registra task runner: **registrare in un `init()` non è più supportato** (panic — lì la sezione `tasks:` non è nota). I costruttori scritti a mano con `runner.Provide` restano invece registrabili ovunque.
+
+**Restano a carico dell'app:** fornire il driver DB (`coremongo.Module(&cfg.Mongo)` o `coresql.Module(&cfg.Sql, pgdialect.New())`). Il **simplejob NON è coperto** dall'orchestratore: resta wiring separato (vedi la sezione dedicata).
 
 ### Esempio — distribuito (gRPC + Mongo)
 
@@ -60,7 +69,11 @@ import (
     "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/worker/grpchandler"
 )
 
-batch.Module(&cfg.BatchConfig,
+func Register() {
+    runner.Register[mioTaskRunner]("MIO_TASK")   // un runner per ogni istanza in `tasks:`
+}
+
+batch.Module(&cfg.BatchConfig, Register,
     batch.WithSchedulerModes(engine.Scheduler, engine.Batch),
     batch.WithWorkerModes(engine.Worker, engine.Batch),
     batch.WithStore(storemongo.Module),          // obbligatorio
@@ -77,7 +90,7 @@ batch.Module(&cfg.BatchConfig,
 
 ```go
 // import localdispatcher "...go-core-batch/scheduler/distributedjob/localdispatcher"
-batch.Module(&cfg.BatchConfig,
+batch.Module(&cfg.BatchConfig, Register,
     batch.WithStore(storemongo.Module),          // obbligatorio
     batch.WithModule(
         localdispatcher.Module,                  // dispatch in-process (niente gRPC)
@@ -87,6 +100,65 @@ batch.Module(&cfg.BatchConfig,
 ```
 
 > I singoli `*.Module()` (`localdispatcher`, `grpcdispatcher`, `queryfeed`, `s3feed`, `kafkajob`, `mongostore`/`sqlstore`, `grpchandler`, `scheduler`, …) **restano validi** per il wiring manuale: sono il livello sotto l'orchestratore, documentato nelle sezioni seguenti. Essendo modes-only, lì il config va fornito prima con `core.Supply` (es. `core.Supply(&cfg.Client); grpcdispatcher.Module()`). `batch.Module` non fa che comporli in un'unica chiamata gate-ata per mode.
+
+### Configurazione dei task — sezione `tasks:`
+
+Un task è un'**istanza** di task type: `name` (come lo referenziano job e worker), `type` (il task type registrato dal runner) e `properties` (la sua configurazione applicativa). Due job possono così eseguire lo stesso task type con configurazioni diverse.
+
+```yaml
+batch:
+  tasks:
+    - name: import-in            # il nome referenziato dai job e dai worker pool
+      type: IMPORT               # il task type registrato: runner.Register[importRunner]("IMPORT")
+      properties:                # applicative → campi `prop:` del runner
+        folder: /data/in
+        dry-run: false
+    - name: import-bulk          # stesso type, properties diverse → istanza distinta
+      type: IMPORT
+      properties:
+        folder: /data/bulk
+  jobs:
+    - name: import-a
+      type: DistribuiteTaskByQuery
+      cron: "*/5 * * * * *"
+      properties:                # INFRASTRUTTURALI: configurano il job type
+        task: import-in          # ← referenzia il task per NOME
+        collection: docs
+        limit: 100
+  workers:
+    - name: default
+      size: 10
+      tasks: [import-in, import-bulk]
+```
+
+**La dichiarazione è obbligatoria** (breaking change): ogni task type registrato deve avere almeno una voce in `tasks:`, e ogni task referenziato da `jobs:`/`workers:` deve esistere. Le incoerenze fanno **fallire l'avvio** con l'elenco dei nomi coinvolti — in caso contrario il job girerebbe a vuoto senza trovare un runner. Un task dichiarato ma che nessuno referenzia non viene istanziato (log Info): le sue dipendenze non entrano nel grafo fx.
+
+Il **nome** del task è la chiave di tutto il percorso: è il `WorkItem.Type` creato dal job, quello su cui il claiming filtra e quello con cui il worker instrada al runner. Se ometti `name`, vale il `type` — è l'unica scorciatoia, la voce va comunque dichiarata.
+
+```go
+type importRunner struct {
+    Data   mypkg.IData `inject:""`                            // dipendenza iniettata da fx
+    Folder string      `prop:"folder" validate:"required"`    // property del task
+    DryRun bool        `prop:"dry-run" default:"false"`
+    buf    []byte                                             // campo di lavorazione: dig non lo vede
+}
+
+func (r *importRunner) Run(ctx context.Context, item *store.WorkItem) error { ... }
+```
+
+I tre tag sono quelli di go-core-app (`core.ProvideStruct`), condivisi con go-core-kafka:
+
+| Tag sul campo | Significato |
+|---|---|
+| `inject:""` / `inject:"nome"` | dipendenza iniettata da fx (il nome diventa `name:` per dig) |
+| `from:"gruppo"` | dipendenza da un value group fx |
+| `optional:"true"` | dipendenza opzionale |
+| `prop:"chiave"` (+ `default:`, `validate:`) | property del task, presa da `tasks[].properties` |
+| *nessun tag* | campo di lavorazione: ignorato sia dal grafo fx sia dal binding |
+
+Le properties sono risolte **al boot**: un valore non convertibile o un `validate:"required"` mancante fa fallire l'avvio dell'app, con task, campo e tipo nel messaggio.
+
+> L'istanza del runner è **condivisa** fra tutte le esecuzioni di quel task: i campi di lavorazione non sono per-esecuzione.
 
 ---
 
@@ -257,8 +329,8 @@ Il modo canonico per aggiungere task runner a un'applicazione. Ogni task type è
 
 ```
 app/batch/
-  batch.go           — chiama localdispatcher.Module() in init()
-  miotask.go         — definisce runner + lo registra con runner.Provide()
+  batch.go           — la funzione Register() passata a batch.Module
+  miotask.go         — definisce il runner e lo registra
   altrotask.go       — idem per un secondo task type
 ```
 
@@ -267,10 +339,12 @@ app/batch/
 ```go
 package batch
 
-import "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/localdispatcher"
+import "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/runner"
 
-func init() {
-    localdispatcher.Module()
+// Register è passata a batch.Module, che la esegue con la config già nota: i runner sono
+// istanziati una volta per ogni task attivo, con le properties della loro voce di `tasks:`.
+func Register() {
+    runner.Register[mioTaskRunner]("MIO_TASK")
 }
 ```
 
@@ -285,21 +359,15 @@ import (
     "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 )
 
-func init() {
-    runner.Provide(newMioTaskRunner)
-}
-
-// I parametri del costruttore sono iniettati da Fx — business, data, ecc.
-func newMioTaskRunner(svc mySvc.IService) *runner.TaskRunner {
-    return runner.New("MIO_TASK", &mioTaskRunner{svc: svc})
-}
-
+// Le dipendenze sono taggate `inject:`, le properties del task `prop:`; i campi senza tag sono
+// di lavorazione e restano invisibili al grafo fx.
 type mioTaskRunner struct {
-    svc mySvc.IService
+    Svc     mySvc.IService `inject:""`
+    Soglia  int            `prop:"soglia" default:"10"`
 }
 
 func (r *mioTaskRunner) Run(ctx context.Context, item *store.WorkItem) error {
-    if err := r.svc.DoWork(ctx, item); err != nil {
+    if err := r.Svc.DoWork(ctx, item); err != nil {
         if isTransient(err) {
             return store.RetryWithCause(5*time.Minute, err) // → MarkPending
         }
@@ -313,25 +381,27 @@ func (r *mioTaskRunner) Run(ctx context.Context, item *store.WorkItem) error {
 > (es. `MarkDone` transazionale con l'insert di workitem figli) inietta un `store.IWorkItemStore` via fx nella
 > struct, chiudi tu l'item e ritorna `store.ErrHandled`.
 
-### app-config.go — blank import
-
-```go
-import _ "myapp/app/batch"   // attiva tutti gli init() in app/batch/
-```
+> Un costruttore scritto a mano resta possibile con `runner.Provide(newMioTaskRunner)` (in `init()` o dentro `Register`): in quel caso il runner non riceve le properties del task, che le legge da sé.
 
 ### config.yml
 
 ```yaml
-scheduler:
+tasks:
+  - name: "MIO_TASK"          # name omesso = uguale al type
+    type: "MIO_TASK"
+    properties:
+      soglia: 25              # applicative → campi `prop:` del runner
+
+jobs:
   - name: "mio-job"
     type: "DistribuiteTask"
     cron: "* * * * *"
     singleton: true
     lock-timeout: 15m
     disabled: false
-    properties:
-      task:  "MIO_TASK"
-      limit: "10"
+    properties:               # infrastrutturali → lette dal framework
+      task:  "MIO_TASK"       # il NOME del task da eseguire
+      limit: 10
 ```
 
 ---
@@ -407,8 +477,7 @@ func init() {
 ```go
 // app/batch/s3_import.go
 type myS3Runner struct {
-    core.In
-    Svc mysvc.IService
+    Svc mysvc.IService `inject:""`
 }
 
 func (r *myS3Runner) Run(ctx context.Context, key string, content io.Reader) error {
@@ -418,7 +487,7 @@ func (r *myS3Runner) Run(ctx context.Context, key string, content io.Reader) err
 }
 ```
 
-> Gli esempi usano `core.In`/`core.Out`, alias di `fx.In`/`fx.Out` esportati da go-core-app, così da non importare direttamente `go.uber.org/fx`. Sono equivalenti e mescolabili con `fx.In`/`fx.Out`.
+> Nelle struct dei runner le dipendenze si dichiarano col tag `inject:` (`from:` per un value group, `optional:"true"` per una dipendenza facoltativa): è il costruttore sintetizzato da `core.ProvideStruct` a tradurli nei tag che dig si aspetta, quindi la struct non deve embeddare `core.In`. Negli altri punti del wiring `core.In`/`core.Out` restano gli alias di `fx.In`/`fx.Out` per i costruttori scritti a mano.
 
 ```yaml
 batch:
@@ -451,6 +520,11 @@ scheduler:
 
 ## Configurazione YAML — campi
 
+### `jobs[]` — configurazione INFRASTRUTTURALE del job
+
+Il blocco `properties:` di un job configura il **job type** e lo legge il framework. La configurazione
+**applicativa** del runner sta invece in `tasks[].properties` (vedi "Configurazione dei task").
+
 | Campo | Tipo | Descrizione |
 |---|---|---|
 | `name` | string | Nome univoco del job |
@@ -459,7 +533,7 @@ scheduler:
 | `singleton` | bool | Redis lock — evita run paralleli su repliche diverse |
 | `lock-timeout` | duration | Dopo quanto un IN_PROGRESS è considerato orfano (default: 10m — distributedjob e simplejob). simplejob: anche timeout del context di `Run` (default: 30s) |
 | `disabled` | bool | Disabilita il job senza rimuoverlo dalla config |
-| `properties.task` | string | TaskType passato al dispatcher |
+| `properties.task` | string | **Nome** del task da eseguire (una voce di `tasks:`) |
 | `properties.limit` | int | Max item per run (simplejob: default 100) |
 | `properties.collection` | string | Tabella/collection sorgente (solo DistribuiteTaskByQuery) |
 | `properties.filter` | string | WHERE SQL o JSON query Mongo (solo DistribuiteTaskByQuery) |
@@ -469,8 +543,20 @@ scheduler:
 | `properties.path` | string | Prefisso S3 per il listing (solo DistribuiteTaskByS3File) |
 | `properties.pattern` | string | Glob pattern sul basename del file, es. `"*.csv"` (solo DistribuiteTaskByS3File) |
 | `properties.dest-path` | string | Prefisso S3 dove spostare i file elaborati (solo DistribuiteTaskByS3File) |
-| `properties.workType` | string | `WorkItem.Type` letto da `ClaimPending`/`RecoverOrphans` (solo simplejob) — default = `type` |
-| `properties.selfFeed` | bool-string | `"true"`: il simplejob crea da sé un workitem a ogni tick (solo simplejob) |
+| `properties.workType` | string | **Nome del task** da eseguire (solo simplejob), che è anche il `WorkItem.Type` letto da `ClaimPending`/`RecoverOrphans` — default = `type` del job |
+| `properties.selfFeed` | bool | `true`: il simplejob crea da sé un workitem a ogni tick (solo simplejob) |
+
+> I valori conservano il tipo YAML (`limit: 100` è un intero, `selfFeed: true` un booleano). Le forme
+> virgolettate delle config esistenti (`limit: "100"`) restano valide: la conversione è automatica.
+> Le chiavi sono risolte in modo case-insensitive, perché viper abbassa le chiavi della config.
+
+### `tasks[]` — configurazione APPLICATIVA del task
+
+| Campo | Tipo | Descrizione |
+|---|---|---|
+| `name` | string | Nome dell'istanza, referenziato da `jobs[].properties.task`/`workType` e da `workers[].tasks`; default = `type`. È anche il `WorkItem.Type` |
+| `type` | string | Task type registrato con `runner.Register[T]("...")` / `simplejob.RegisterRunner[T]("...")` |
+| `properties` | map | Configurazione applicativa, mappata sui campi `prop:` della struct del runner |
 
 ---
 
@@ -591,11 +677,17 @@ import "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/simp
 
 func init() {
     simplejob.Module()
-    simplejob.RegisterRunner[myRunner]("MY_JOB")   // T: core.In + store.ITaskRunner
+}
+
+// Register è passata a batch.Module (o chiamata a mano dopo aver caricato la config).
+func Register() {
+    simplejob.RegisterRunner[myRunner]("MY_JOB")   // T: store.ITaskRunner, campi taggati
 }
 ```
 
-In alternativa `simplejob.ProvideRunner(constructor)` (costruttore esplicito che ritorna `*simplejob.SimpleTaskRunner`). `simplejob.Module()` raccoglie i runner dal gruppo `batch_simple_runners` ed emette una `scheduler.JobRegistration` per runner nel gruppo `batch_jobs`.
+In alternativa `simplejob.ProvideRunner(constructor)` (costruttore esplicito che ritorna `*simplejob.SimpleTaskRunner`, senza properties). `simplejob.Module()` raccoglie i runner dal gruppo `batch_simple_runners` ed emette una `scheduler.JobRegistration` per job type nel gruppo `batch_jobs`.
+
+Con più voci in `tasks:` dello stesso type, `RegisterRunner` fornisce **una istanza per voce**: la factory sceglie quella indicata dal `workType` del job, che è il **nome del task** (ed è anche il `WorkItem.Type` su cui filtra il claiming). Omesso, vale il `type` del job — che copre il caso della voce senza `name`.
 
 ### Runner — lifecycle dal valore di ritorno
 
@@ -603,8 +695,8 @@ In alternativa `simplejob.ProvideRunner(constructor)` (costruttore esplicito che
 
 ```go
 type myRunner struct {
-    core.In
-    Svc mysvc.IService
+    Svc    mysvc.IService `inject:""`
+    Soglia int            `prop:"soglia" default:"10"`   // da tasks[].properties
 }
 
 func (r *myRunner) Run(ctx context.Context, item *store.WorkItem) error {
@@ -622,9 +714,8 @@ func (r *myRunner) Run(ctx context.Context, item *store.WorkItem) error {
 
 ```go
 type myRunner struct {
-    core.In
-    Svc   mysvc.IService
-    Items store.IWorkItemStore   // iniettato da fx per il MarkDone transazionale
+    Svc   mysvc.IService       `inject:""`
+    Items store.IWorkItemStore `inject:""`   // iniettato da fx per il MarkDone transazionale
 }
 
 func (r *myRunner) Run(ctx context.Context, item *store.WorkItem) error {
@@ -750,7 +841,11 @@ In gRPC, `limit` e pool size sono dimensioni ortogonali: lo scheduler può claim
 
 - **L'Invoke sullo `*scheduler.Scheduler`** è obbligatorio per forzarne la costruzione da Fx — lo fa già `scheduler.Module()` internamente (non serve aggiungerlo a mano).
 - **`localdispatcher.Module()` / `grpcdispatcher.Module()`** possono essere registrati in qualunque ordine rispetto allo scheduler: la `scheduler.JobRegistration` confluisce nel value group `batch_jobs`, che fx risolve prima di costruire `newScheduler`.
-- **`runner.Provide(constructor)`** deve essere chiamato in `init()` — Fx raccoglie il gruppo `batch_runners` prima di invocare `Module()`.
+- **`runner.Register[T]` / `simplejob.RegisterRunner[T]` vanno chiamate dentro la funzione `register` passata a `batch.Module`**: è lì che la config è nota. In un `init()` panicano. `runner.Provide(constructor)` (costruttore a mano) resta invece registrabile ovunque, ma non riceve le properties del task.
+- **Ogni task va dichiarato in `tasks:`**: un task type registrato senza voce, o referenziato da un job con un nome inesistente, fa fallire l'avvio.
+- **Un campo esportato senza tag NON è una dipendenza**: nelle struct passate a `Register`/`RegisterRunner` è un campo di lavorazione. Le dipendenze vanno taggate `inject:`/`from:`, le properties `prop:`. Le struct che embeddano `core.In` restano sulla semantica storica (ogni campo esportato è una dipendenza), con un Warn di deprecazione.
+- **`jobs[].properties` è infrastrutturale, `tasks[].properties` è applicativo**: mettere la config del runner nel blocco del job non la fa arrivare ai campi `prop:`.
+- **Le chiavi delle properties sono case-insensitive**: viper abbassa le chiavi della config, quindi `workType` nello YAML arriva come `worktype`. I getter di `core.Properties` e il binding `prop:` lo gestiscono; l'indicizzazione diretta della mappa no.
 - **`gocron.NewTask` deve usare una closure zero-arg** che cattura le dipendenze — non passare interface nil come `...any` o gocron va in panic in reflect.
 - **Tabelle**: `work_items` e `task_logs` (costanti `store.TableWorkItems`, `store.TableTaskLogs`).
 - **`singleton: true`** richiede Redis attivo — senza Redis il lock fallisce all'avvio.

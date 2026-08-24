@@ -5,6 +5,7 @@ import (
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/kafka"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/s3"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/worker"
 )
 
@@ -17,9 +18,13 @@ import (
 // Il lock distribuito NON è più qui: il backend (redis/mongo/sql) è iniettato via
 // batch.WithLocker e il suo eventuale config (es. go-core-redis) è gestito dalla sua lib.
 type Config struct {
-	Grpc          grpc.Config        `yaml:"grpc" mapstructure:"grpc" json:"grpc"`
-	S3            s3.Config          `yaml:"s3" mapstructure:"s3" json:"s3"`
-	JobsConfig    []scheduler.Config `yaml:"jobs" mapstructure:"jobs" json:"jobs"`
-	WorkersConfig []worker.Config    `yaml:"workers" mapstructure:"workers" json:"workers"`
-	KafkaConfig   kafka.Config       `yaml:"kafka" mapstructure:"kafka" json:"kafka"`
+	Grpc       grpc.Config        `yaml:"grpc" mapstructure:"grpc" json:"grpc"`
+	S3         s3.Config          `yaml:"s3" mapstructure:"s3" json:"s3"`
+	JobsConfig []scheduler.Config `yaml:"jobs" mapstructure:"jobs" json:"jobs"`
+	// TasksConfig è la configurazione APPLICATIVA dei task (sezione `tasks:`): ogni voce è
+	// un'istanza — name + type + properties — mappata sui campi `prop:` della struct del runner.
+	// Da non confondere col blocco `properties:` di un job, che è infrastrutturale.
+	TasksConfig   []task.Config   `yaml:"tasks" mapstructure:"tasks" json:"tasks"`
+	WorkersConfig []worker.Config `yaml:"workers" mapstructure:"workers" json:"workers"`
+	KafkaConfig   kafka.Config    `yaml:"kafka" mapstructure:"kafka" json:"kafka"`
 }

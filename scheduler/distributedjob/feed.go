@@ -13,7 +13,7 @@ import (
 // IFeedSource produces WorkItems from an external source (DB query, S3 listing, etc.).
 // Implementations must return ready-to-insert WorkItems with at least ObjectId and Type set.
 type IFeedSource interface {
-	Feed(ctx context.Context, taskType string, props map[string]string, limit int) ([]*store.WorkItem, error)
+	Feed(ctx context.Context, taskType string, props core.Properties, limit int) ([]*store.WorkItem, error)
 }
 
 // queryStoreFeed adapts IQueryStore to IFeedSource.
@@ -26,10 +26,10 @@ func NewQueryFeed(qs IQueryStore) IFeedSource {
 	return &queryStoreFeed{qs: qs}
 }
 
-func (f *queryStoreFeed) Feed(ctx context.Context, taskType string, props map[string]string, limit int) ([]*store.WorkItem, error) {
-	collection := props["collection"]
-	filter := props["filter"]
-	sort := props["sort"]
+func (f *queryStoreFeed) Feed(ctx context.Context, taskType string, props core.Properties, limit int) ([]*store.WorkItem, error) {
+	collection := props.GetString("collection", "")
+	filter := props.GetString("filter", "")
+	sort := props.GetString("sort", "")
 
 	var ids []string
 	var feedErr *core.ApplicationError
@@ -49,7 +49,7 @@ func (f *queryStoreFeed) Feed(ctx context.Context, taskType string, props map[st
 			Id:         uuid.NewV7().String(),
 			Type:       taskType,
 			ObjectId:   id,
-			ObjectType: props["objectType"],
+			ObjectType: props.GetString("objectType", ""),
 			Status:     store.StatusPending,
 			CreateTime: now,
 			NextRunAt:  &now,
@@ -60,7 +60,7 @@ func (f *queryStoreFeed) Feed(ctx context.Context, taskType string, props map[st
 
 // runFeedPhase executes the feed phase: generates WorkItems from the feed source
 // and inserts those not already active into the store.
-func runFeedPhase(ctx context.Context, feed IFeedSource, items store.IWorkItemStore, jobId, taskType string, props map[string]string, limit int) {
+func runFeedPhase(ctx context.Context, feed IFeedSource, items store.IWorkItemStore, jobId, taskType string, props core.Properties, limit int) {
 	workItems, err := feed.Feed(ctx, taskType, props, limit)
 	if err != nil {
 		log.Warn().Err(err).Msgf("[%s] feed query failed", jobId)

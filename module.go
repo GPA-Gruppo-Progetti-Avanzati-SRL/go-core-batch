@@ -1,8 +1,11 @@
 package batch
 
 import (
+	"strings"
+
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
 )
 
 // ModuleFunc è la firma comune di TUTTI i Module() componibili di go-core-batch (store,
@@ -89,6 +92,36 @@ func WithWorkerModule(m ...ModuleFunc) Option {
 	return func(o *options) { o.workerModules = append(o.workerModules, m...) }
 }
 
+// ActiveSet costruisce la fotografia della config che il registro dei task usa durante register():
+// le istanze dichiarate in `tasks:` e i task name referenziati dai job (`task` per distributedjob,
+// `workType` — o il job type — per simplejob) e dai worker pool. Un task non referenziato non viene
+// istanziato, quindi le sue dipendenze non entrano nel grafo fx.
+func ActiveSet(cfg *Config) task.ActiveSet {
+	seen := make(map[string]bool)
+	var referenced []string
+	add := func(s string) {
+		if s == "" || seen[strings.ToLower(s)] {
+			return
+		}
+		seen[strings.ToLower(s)] = true
+		referenced = append(referenced, s)
+	}
+	for _, j := range cfg.JobsConfig {
+		if j.Disabled {
+			continue
+		}
+		add(j.Properties.GetString("task", ""))     // distributedjob
+		add(j.Properties.GetString("workType", "")) // simplejob
+		add(j.Type)                                 // simplejob senza workType
+	}
+	for _, w := range cfg.WorkersConfig {
+		for _, t := range w.Tasks {
+			add(t)
+		}
+	}
+	return task.ActiveSet{Tasks: cfg.TasksConfig, Referenced: referenced}
+}
+
 // Module wira il sottosistema batch a partire da una singola Config, sostituendo la sfilza di
 // Module() da chiamare a mano in init(). I backend (store, dispatcher, feed, job Kafka, worker
 // pool) sono INIETTATI dall'app come ModuleFunc per riferimento diretto: così `batch` non importa
@@ -112,9 +145,14 @@ func WithWorkerModule(m ...ModuleFunc) Option {
 // (In precedenza lo Scheduler doveva essere registrato per ultimo perché newScheduler leggeva
 // la mappa globale scheduler.Jobs al momento della costruzione.)
 //
-// Restano a carico dell'app: la registrazione dei task runner (runner.Provide / grpchandler.Provide)
-// e la fornitura del driver DB (coremongo.NewService / coresql.NewService).
-func Module(cfg *Config, opts ...Option) {
+// Registrazione dei runner: si passa la funzione register, come in corekafka.Module — dentro, le
+// runner.Register / simplejob.RegisterRunner vedono la config e istanziano un runner per ogni task
+// attivo, con le sue properties (sezione `tasks:`, obbligatoria). register è nil solo per un'app che
+// non registra task runner; registrare in un init() non è più supportato (panic: lì la config non è
+// nota). I costruttori scritti a mano — runner.Provide — restano invece registrabili ovunque.
+//
+// Resta a carico dell'app la fornitura del driver DB (coremongo.Module / coresql.Module).
+func Module(cfg *Config, register func(), opts ...Option) {
 	var o options
 	for _, opt := range opts {
 		opt(&o)
@@ -127,6 +165,17 @@ func Module(cfg *Config, opts ...Option) {
 	}
 	sched := o.schedulerModes
 	work := o.workerModes
+
+	// Registrazione dei task runner con la config già nota (gemello di corekafka.Module): dentro
+	// register() le Register/RegisterRunner vedono la sezione `tasks:` e forniscono a fx una istanza
+	// per ogni task effettivamente referenziato da jobs:/workers:, con le sue properties. Fatto fuori
+	// dallo scope core.Module("batch") perché i runner sono sempre stati forniti a root e il value
+	// group aggrega comunque root + modulo. register nil solo se l'app non registra task runner:
+	// registrare fuori da questa finestra (es. in un init()) è un errore, perché lì la sezione
+	// `tasks:` non è nota.
+	if register != nil {
+		task.Apply(register, ActiveSet(cfg))
+	}
 
 	// Tutte le registrazioni del sottosistema batch confluiscono in un fx.Module("batch")
 	// per il namespacing del grafo/log fx. I provide NON sono privati: restano visibili

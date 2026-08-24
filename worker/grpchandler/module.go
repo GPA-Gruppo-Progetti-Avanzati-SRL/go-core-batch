@@ -50,7 +50,7 @@ type runnerService struct {
 func newRunnerService(runners []*runner.TaskRunner) *runnerService {
 	routes := make(map[string]runner.ITaskRunner, len(runners))
 	for _, tr := range runners {
-		routes[tr.TaskType] = tr.Runner
+		routes[tr.TaskName] = tr.Runner
 	}
 	return &runnerService{routes: routes}
 }

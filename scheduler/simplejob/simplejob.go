@@ -2,14 +2,20 @@
 // It finds pending WorkItems and executes them locally via a registered ITaskRunner,
 // without the need for Kafka or gRPC infrastructure.
 //
-// Usage — register via generic helper in batch.go init():
+// Wiring: simplejob.Module() in init(), RegisterRunner dentro la funzione di registrazione passata a
+// batch.Module (è lì che la sezione `tasks:` è nota):
 //
 //	simplejob.Module()
-//	simplejob.RegisterRunner[myRunner]("HelloWorld")
+//	func Register() { simplejob.RegisterRunner[myRunner]("HelloWorld") }
 //
-// Config example (workType defaults to the job type, so it can be omitted when they match):
+// Config: il task va SEMPRE dichiarato; `workType` nomina l'istanza da eseguire e vale di default il
+// `type` del job, quindi si omette quando la voce di `tasks:` non ha un `name` proprio.
 //
-//	scheduler:
+//	tasks:
+//	  - type: "HelloWorld"
+//	    properties:
+//	      saluto: "ciao"
+//	jobs:
 //	  - name: "hello-world"
 //	    type: "HelloWorld"
 //	    cron: "*/5 * * * * *"
@@ -18,13 +24,13 @@ package simplejob
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"time"
 	"uuid"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
 	gocron "github.com/go-co-op/gocron/v2"
 	"github.com/rs/zerolog/log"
 	"go.uber.org/fx"
@@ -39,15 +45,25 @@ const Group = "batch_simple_runners"
 // nil→MarkDone, store.Retry→MarkPending, err→MarkFailed, store.ErrHandled→left untouched.
 type ITaskRunner = store.ITaskRunner
 
-// SimpleTaskRunner binds an ITaskRunner to the job type it handles.
+// SimpleTaskRunner lega un ITaskRunner al task che esegue: TaskType è il tipo registrato con
+// RegisterRunner — per simplejob è anche il `type` della voce di `jobs:`, ed è quindi la chiave della
+// JobRegistration — e TaskName è il nome dell'istanza, cioè la voce della sezione `tasks:` da cui
+// arrivano le properties. È lo stesso nome che il job indica con `workType` e che finisce in
+// WorkItem.Type.
 type SimpleTaskRunner struct {
-	JobType string
-	Runner  ITaskRunner
+	TaskType string
+	TaskName string
+	Runner   ITaskRunner
 }
 
-// New returns a SimpleTaskRunner wrapping runner for the given jobType.
-func New(jobType string, r ITaskRunner) *SimpleTaskRunner {
-	return &SimpleTaskRunner{JobType: jobType, Runner: r}
+// New returns a SimpleTaskRunner wrapping runner for the given taskType (istanza col nome = tipo).
+func New(taskType string, r ITaskRunner) *SimpleTaskRunner {
+	return NewNamed(taskType, taskType, r)
+}
+
+// NewNamed è New per una istanza nominata (più voci in `tasks:` con lo stesso type).
+func NewNamed(taskType, taskName string, r ITaskRunner) *SimpleTaskRunner {
+	return &SimpleTaskRunner{TaskType: taskType, TaskName: taskName, Runner: r}
 }
 
 // ProvideRunner registers a SimpleTaskRunner constructor into the batch_simple_runners fx group.
@@ -56,16 +72,26 @@ func ProvideRunner(constructor any) {
 	core.Provide(fx.Annotate(constructor, fx.ResultTags(`group:"`+Group+`"`)))
 }
 
-// RegisterRunner registers a struct type T as a simple job runner for the given jobType.
-// T must embed fx.In (for dependency injection) and implement ITaskRunner (via pointer receiver).
+// RegisterRunner registra il tipo struct T come runner del task type indicato — che per simplejob è
+// anche il `type` della voce di `jobs:`, non essendoci dispatch. T deve implementare
+// ITaskRunner (via receiver a puntatore) e dichiarare i suoi campi con i tag di go-core-app:
+//
+//	`inject:""` / `inject:"nome"` / `from:"gruppo"`  → dipendenza iniettata da fx
+//	`prop:"chiave"`                                   → property applicativa del task (sezione `tasks:`)
+//	nessun tag                                        → campo di lavorazione, ignorato dal grafo
+//
+// Viene fornito un runner per ogni ISTANZA attiva: ogni voce della sezione `tasks:` con quel type e
+// referenziata da un job, che la indica con la property infrastrutturale `workType` (di default il
+// `type` del job). La dichiarazione in `tasks:` è obbligatoria. L'istanza è condivisa fra i tick,
+// quindi i campi di lavorazione NON sono per-esecuzione.
 func RegisterRunner[T any, PT interface {
 	*T
 	ITaskRunner
-}](jobType string) {
-	ProvideRunner(func(p T) *SimpleTaskRunner {
-		pp := PT(&p)
-		return New(jobType, pp)
-	})
+}](taskType string) {
+	for _, tc := range task.Instances(taskType) {
+		core.ProvideStruct(func(p *T) *SimpleTaskRunner { return NewNamed(taskType, tc.TaskName(), PT(p)) },
+			fmt.Sprintf("batch: simplejob task %q (type %q)", tc.TaskName(), taskType), tc.Properties, Group)
+	}
 }
 
 // newJobRegistrations trasforma i SimpleTaskRunner raccolti dal gruppo batch_simple_runners
@@ -76,9 +102,22 @@ func RegisterRunner[T any, PT interface {
 // di aver già finalizzato l'item (es. MarkDone insieme a insert figli in transazione), così il
 // framework non applica alcun Mark* di default.
 func newJobRegistrations(items store.IWorkItemStore, runners []*SimpleTaskRunner) []scheduler.JobRegistration {
-	regs := make([]scheduler.JobRegistration, len(runners))
-	for i, r := range runners {
-		regs[i] = scheduler.JobRegistration{Type: r.JobType, Factory: makeFactory(items, r.Runner)}
+	// Un task type può avere più istanze (più voci in `tasks:`): la JobRegistration resta una per
+	// task type — che per simplejob è il `type` del job — e la factory sceglie l'istanza col
+	// `workType` della singola voce di `jobs:`.
+	byType := make(map[string]map[string]ITaskRunner)
+	var order []string
+	for _, r := range runners {
+		if _, seen := byType[r.TaskType]; !seen {
+			byType[r.TaskType] = make(map[string]ITaskRunner)
+			order = append(order, r.TaskType)
+		}
+		byType[r.TaskType][r.TaskName] = r.Runner
+	}
+
+	regs := make([]scheduler.JobRegistration, 0, len(order))
+	for _, taskType := range order {
+		regs = append(regs, scheduler.JobRegistration{Type: taskType, Factory: makeFactory(items, byType[taskType])})
 	}
 	return regs
 }
@@ -98,35 +137,37 @@ func Module(modes ...string) {
 // defaultBatchLimit caps how many items a single tick claims when no "limit" property is set.
 const defaultBatchLimit = 100
 
-func makeFactory(items store.IWorkItemStore, runner ITaskRunner) scheduler.JobFactory {
+func makeFactory(items store.IWorkItemStore, instances map[string]ITaskRunner) scheduler.JobFactory {
 	return func(name string, _ *scheduler.Services, config scheduler.Config) gocron.Task {
-		// workType is the WorkItem.Type queried by ClaimPending. It defaults to the
-		// job type (the registry key), so it only needs to be set explicitly when the
-		// WorkItem.Type differs from the configured type.
-		workType := config.Properties["workType"]
-		if workType == "" {
-			workType = config.Type
-		}
-		selfFeed := config.Properties["selfFeed"] == "true"
+		// workType nomina il TASK da eseguire: è il nome della voce di `tasks:` ed è anche il
+		// WorkItem.Type su cui filtra ClaimPending. Di default è il `type` del job, che copre il
+		// caso comune (voce di `tasks:` senza `name`, quindi nome uguale al type).
+		taskName := config.Properties.GetString("workType", config.Type)
+		runner := instances[taskName]
+		selfFeed := config.Properties.GetBool("selfFeed", false)
 		// limit caps how many items are claimed (and processed) per tick.
-		limit := defaultBatchLimit
-		if v := config.Properties["limit"]; v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				limit = n
-			} else {
-				log.Warn().Msgf("[%s] invalid 'limit' property %q, using default %d", name, v, defaultBatchLimit)
-			}
+		limit := config.Properties.GetInt("limit", defaultBatchLimit)
+		if limit <= 0 {
+			log.Warn().Msgf("[%s] invalid 'limit' property, using default %d", name, defaultBatchLimit)
+			limit = defaultBatchLimit
 		}
 		// Convenzione unica (scheduler.Config.ResolveTimeouts): LockTimeout governa sia il
 		// timeout del context di run sia l'età di orphan usata da RecoverOrphans.
 		timeout, orphanTimeout := config.ResolveTimeouts()
+		if runner == nil {
+			log.Error().Msgf("[%s] nessun task %q fra le istanze registrate per il type %q: il job fallirà a ogni tick",
+				name, taskName, config.Type)
+		}
 		return scheduler.LabeledTask(name, config.Type, func() error {
-			return run(name, workType, selfFeed, timeout, orphanTimeout, limit, items, runner)
+			if runner == nil {
+				return fmt.Errorf("simplejob: job %q: nessun task %q registrato per il type %q", name, taskName, config.Type)
+			}
+			return run(name, taskName, selfFeed, timeout, orphanTimeout, limit, items, runner)
 		})
 	}
 }
 
-func run(name, workType string, selfFeed bool, timeout, orphanTimeout time.Duration, limit int, items store.IWorkItemStore, runner ITaskRunner) error {
+func run(name, taskName string, selfFeed bool, timeout, orphanTimeout time.Duration, limit int, items store.IWorkItemStore, runner ITaskRunner) error {
 	jobID := fmt.Sprintf("%s-%s", name, time.Now().Format("20060102150405"))
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -135,8 +176,8 @@ func run(name, workType string, selfFeed bool, timeout, orphanTimeout time.Durat
 		now := time.Now()
 		wi := []*store.WorkItem{{
 			Id:         uuid.NewV7().String(),
-			Type:       workType,
-			ObjectId:   workType,
+			Type:       taskName,
+			ObjectId:   taskName,
 			Status:     store.StatusPending,
 			CreateTime: now,
 			NextRunAt:  &now,
@@ -150,7 +191,7 @@ func run(name, workType string, selfFeed bool, timeout, orphanTimeout time.Durat
 
 	// 1+2. Recupero orfani + claim dei PENDING freschi — loop comune (store.ClaimBatch).
 	// ClaimPending marca gli item IN_PROGRESS atomicamente (precondizione per MarkDone/Failed/Pending).
-	pending, _, _, claimErr := store.ClaimBatch(ctx, items, jobID, workType, "", "", orphanTimeout, limit)
+	pending, _, _, claimErr := store.ClaimBatch(ctx, items, jobID, taskName, "", "", orphanTimeout, limit)
 	if claimErr != nil {
 		log.Error().Err(claimErr).Msgf("[%s] ClaimPending failed", jobID)
 		if len(pending) == 0 {

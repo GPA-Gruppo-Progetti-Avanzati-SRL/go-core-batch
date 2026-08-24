@@ -25,7 +25,7 @@
 //	    cron: "0 * * * *"
 //	    lock-timeout: 15m   # how long before an IN_PROGRESS item is considered orphaned
 //	    properties:
-//	      task:  "myTaskType"
+//	      task:  "myTask"   # nome del task (voce di `tasks:`); senza `tasks:` è il task type
 //	      limit: "100"
 package distributedjob
 

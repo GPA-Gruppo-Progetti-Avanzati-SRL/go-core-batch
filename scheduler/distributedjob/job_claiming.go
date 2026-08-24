@@ -3,7 +3,6 @@ package distributedjob
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
@@ -33,17 +32,16 @@ func makeClaimingFactory(dispatcher ITaskDispatcher, items store.IWorkItemStore,
 
 func jobRunWithClaiming(name string, dispatcher ITaskDispatcher, items store.IWorkItemStore, feed IFeedSource, data store.IData, config scheduler.Config) error {
 	p := config.Properties
-	taskType, ok := p["task"]
-	if !ok {
+	if !p.Has("task") {
 		return fmt.Errorf("missing required property 'task'")
 	}
-	limit, ok := p["limit"]
-	if !ok {
+	taskType := p.GetString("task", "")
+	if !p.Has("limit") {
 		return fmt.Errorf("missing required property 'limit'")
 	}
-	ilimit, err := strconv.Atoi(limit)
-	if err != nil {
-		return fmt.Errorf("property 'limit' is not an integer: %s", limit)
+	ilimit := p.GetInt("limit", 0)
+	if ilimit <= 0 {
+		return fmt.Errorf("property 'limit' is not a positive integer: %v", p["limit"])
 	}
 
 	// Convenzione unica (scheduler.Config.ResolveTimeouts): LockTimeout governa sia il timeout

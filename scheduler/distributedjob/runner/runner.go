@@ -10,6 +10,7 @@ import (
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
 	"go.uber.org/fx"
 )
 
@@ -29,18 +30,20 @@ const Group = "batch_runners"
 //	                                               using an fx-injected IWorkItemStore)
 type ITaskRunner = store.ITaskRunner
 
-// TaskRunner binds an ITaskRunner to the task type it handles.
+// TaskRunner binds an ITaskRunner to the task NAME it handles — cioè al nome dell'istanza
+// dichiarata nella sezione `tasks:` (senza quella sezione il nome coincide col task type).
+// È il nome che viaggia in WorkItem.Type e che governa claiming e instradamento.
 type TaskRunner struct {
-	TaskType string
+	TaskName string
 	Runner   ITaskRunner
 }
 
-// New returns a TaskRunner wrapping runner for the given taskType.
-func New(taskType string, r ITaskRunner) *TaskRunner {
-	return &TaskRunner{TaskType: taskType, Runner: r}
+// New returns a TaskRunner wrapping runner for the given task name.
+func New(taskName string, r ITaskRunner) *TaskRunner {
+	return &TaskRunner{TaskName: taskName, Runner: r}
 }
 
-// MuxRunner routes task execution to the registered ITaskRunner by taskType.
+// MuxRunner routes task execution to the registered ITaskRunner by task name.
 type MuxRunner struct {
 	routes map[string]ITaskRunner
 }
@@ -49,7 +52,7 @@ type MuxRunner struct {
 func NewMux(runners []*TaskRunner) *MuxRunner {
 	routes := make(map[string]ITaskRunner, len(runners))
 	for _, tr := range runners {
-		routes[tr.TaskType] = tr.Runner
+		routes[tr.TaskName] = tr.Runner
 	}
 	return &MuxRunner{routes: routes}
 }
@@ -89,26 +92,45 @@ func Provide(constructor any) {
 	core.Provide(fx.Annotate(constructor, fx.ResultTags(`group:"`+Group+`"`)))
 }
 
-// Register registers a struct type T as a task runner for the given taskType.
-// T must embed fx.In (for dependency injection) and implement ITaskRunner (via pointer receiver).
+// Register registra il tipo struct T come task runner per il task type indicato. T deve implementare
+// ITaskRunner (via receiver a puntatore) e dichiarare i suoi campi con i tag di go-core-app:
 //
-// Example:
+//	`inject:""` / `inject:"nome"` / `from:"gruppo"`  → dipendenza iniettata da fx
+//	`prop:"chiave"`                                   → property applicativa del task (sezione `tasks:`)
+//	nessun tag                                        → campo di lavorazione, ignorato dal grafo
 //
-//	func init() { runner.Register[myRunner]("MY_TASK") }
+// Viene fornito a fx un runner per ogni ISTANZA attiva del task type, cioè per ogni voce della
+// sezione `tasks:` con quel type che un job o un worker referenzia. Ogni istanza riceve le proprie
+// properties: due job possono quindi eseguire lo stesso task type con configurazioni diverse.
+//
+// La dichiarazione in `tasks:` è OBBLIGATORIA: un task type registrato e non dichiarato fa fallire
+// l'avvio. Un task dichiarato che nessuno referenzia non viene istanziato: le sue dipendenze non
+// entrano nel grafo. L'istanza è condivisa fra le esecuzioni, quindi i campi di lavorazione NON sono
+// per-esecuzione.
+//
+// Va chiamata dentro la funzione di registrazione passata a batch.Module: è lì che la config è nota.
+//
+//	func Register() { runner.Register[myRunner]("IMPORT") }
 //
 //	type myRunner struct {
-//	    fx.In
-//	    Svc myPkg.IService
+//	    Svc    myPkg.IService `inject:""`
+//	    Folder string         `prop:"folder" validate:"required"`
 //	}
 //	func (r *myRunner) Run(ctx context.Context, item *store.WorkItem) error { ... }
 func Register[T any, PT interface {
 	*T
 	ITaskRunner
 }](taskType string) {
-	Provide(func(p T) *TaskRunner {
-		pp := PT(&p)
-		return New(taskType, pp)
-	})
+	for _, tc := range task.Instances(taskType) {
+		core.ProvideStruct(func(p *T) *TaskRunner { return New(tc.TaskName(), PT(p)) },
+			owner(tc.TaskName(), taskType), tc.Properties, Group)
+	}
+}
+
+// owner è l'etichetta con cui core.ProvideStruct contestualizza i suoi errori (dipendenza mancante,
+// property non valida): senza, fx riporterebbe solo `reflect.makeFuncStub`.
+func owner(taskName, taskType string) string {
+	return fmt.Sprintf("batch: task %q (type %q)", taskName, taskType)
 }
 
 // IFileRunner is the interface for file-based task runners (e.g. S3).
@@ -117,15 +139,15 @@ type IFileRunner interface {
 	Run(ctx context.Context, key string, content io.Reader) error
 }
 
-// FileTaskRunner binds an IFileRunner to the task type it handles.
+// FileTaskRunner binds an IFileRunner to the task name it handles.
 type FileTaskRunner struct {
-	TaskType string
+	TaskName string
 	Runner   IFileRunner
 }
 
-// NewFile returns a FileTaskRunner wrapping runner for the given taskType.
-func NewFile(taskType string, r IFileRunner) *FileTaskRunner {
-	return &FileTaskRunner{TaskType: taskType, Runner: r}
+// NewFile returns a FileTaskRunner wrapping runner for the given task name.
+func NewFile(taskName string, r IFileRunner) *FileTaskRunner {
+	return &FileTaskRunner{TaskName: taskName, Runner: r}
 }
 
 // FileGroup is the fx group tag used to collect all registered FileTaskRunners.
@@ -137,24 +159,22 @@ func ProvideFile(constructor any) {
 	core.Provide(fx.Annotate(constructor, fx.ResultTags(`group:"`+FileGroup+`"`)))
 }
 
-// RegisterFile registers a struct type T as a file-based task runner for the given taskType.
-// T must embed fx.In (for dependency injection) and implement IFileRunner (via pointer receiver).
+// RegisterFile è l'analogo di Register per i runner su file (es. S3): T deve implementare IFileRunner.
+// Vale lo stesso contratto sui tag e la stessa istanziazione per voce della sezione `tasks:` (che va
+// dichiarata anche qui).
 //
-// Example:
-//
-//	func init() { runner.RegisterFile[myS3Runner]("S3_IMPORT") }
+//	func Register() { runner.RegisterFile[myS3Runner]("S3_IMPORT") }
 //
 //	type myS3Runner struct {
-//	    fx.In
-//	    Svc mysvc.IService
+//	    Svc mysvc.IService `inject:""`
 //	}
 //	func (r *myS3Runner) Run(ctx context.Context, key string, content io.Reader) error { ... }
 func RegisterFile[T any, PT interface {
 	*T
 	IFileRunner
 }](taskType string) {
-	ProvideFile(func(p T) *FileTaskRunner {
-		pp := PT(&p)
-		return NewFile(taskType, pp)
-	})
+	for _, tc := range task.Instances(taskType) {
+		core.ProvideStruct(func(p *T) *FileTaskRunner { return NewFile(tc.TaskName(), PT(p)) },
+			owner(tc.TaskName(), taskType), tc.Properties, FileGroup)
+	}
 }
