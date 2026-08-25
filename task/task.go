@@ -54,9 +54,20 @@ func (c Config) TaskName() string {
 type ActiveSet struct {
 	// Tasks è la sezione `tasks:`.
 	Tasks []Config
-	// Referenced sono i task name citati da jobs:/workers:. Vuoto = nessun filtro (tutti attivi).
+	// Referenced sono i task name citati ESPLICITAMENTE da jobs:/workers: — la property `task`
+	// di un distributedjob, il `workType` di un simplejob, le `tasks` di un worker pool. Sono
+	// riferimenti che l'autore della config ha scritto per nome: se non esistono è un typo.
 	Referenced []string
+	// Implied sono i nomi DEDOTTI dal job type quando nessuna property nomina il task (un
+	// simplejob senza `workType` gira il task omonimo). Attivano il task omonimo se dichiarato,
+	// ma non pretendono che esista: lo stesso posto è occupato dai job type del framework
+	// (NotificationKafka, DistribuiteTask, …), che non nominano alcun task.
+	Implied []string
 }
+
+// references indica se l'ActiveSet permette di dedurre quali task sono in uso. Se non nomina
+// nulla — né esplicitamente né per deduzione — non c'è filtro da applicare: tutto attivo.
+func (a ActiveSet) references() bool { return len(a.Referenced) > 0 || len(a.Implied) > 0 }
 
 // active è valido SOLO durante l'esecuzione sincrona di Apply; nil altrimenti. La registrazione
 // avviene single-thread, quindi lo stato globale è sicuro.
@@ -125,13 +136,19 @@ func Instances(taskType string) []Config {
 	return out
 }
 
-// isReferenced indica se il task name è citato da un job o da un worker. Referenced vuota significa
-// "config che non permette di dedurlo": nessun filtro, tutto attivo.
+// isReferenced indica se il task name è citato da un job o da un worker, per nome o per deduzione
+// dal job type. Un ActiveSet che non nomina nulla è "config che non permette di dedurlo": nessun
+// filtro, tutto attivo.
 func isReferenced(name string) bool {
-	if len(active.Referenced) == 0 {
+	if !active.references() {
 		return true
 	}
 	for _, r := range active.Referenced {
+		if strings.EqualFold(r, name) {
+			return true
+		}
+	}
+	for _, r := range active.Implied {
 		if strings.EqualFold(r, name) {
 			return true
 		}
@@ -143,6 +160,10 @@ func isReferenced(name string) bool {
 // I task vanno SEMPRE dichiarati, quindi un type registrato senza voce e un riferimento a un nome
 // inesistente sono errori di configurazione: panic al wiring, l'app non parte (in caso contrario il
 // job girerebbe a vuoto, senza mai trovare un runner).
+//
+// Solo i riferimenti ESPLICITI sono validati: quelli in Implied sono dedotti dal job type, e un job
+// type del framework (NotificationKafka, DistribuiteTask, …) non nomina alcun task — pretenderne la
+// dichiarazione sarebbe un falso positivo.
 //
 // Resta un Warn il caso opposto — una voce di `tasks:` il cui type nessuno ha registrato — perché lo
 // stesso YAML è condiviso fra i MODE e fra binari diversi: uno scheduler che dispatcha via gRPC non

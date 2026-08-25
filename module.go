@@ -93,33 +93,48 @@ func WithWorkerModule(m ...ModuleFunc) Option {
 }
 
 // ActiveSet costruisce la fotografia della config che il registro dei task usa durante register():
-// le istanze dichiarate in `tasks:` e i task name referenziati dai job (`task` per distributedjob,
-// `workType` — o il job type — per simplejob) e dai worker pool. Un task non referenziato non viene
-// istanziato, quindi le sue dipendenze non entrano nel grafo fx.
+// le istanze dichiarate in `tasks:` e i task name referenziati dai job e dai worker pool. Un task
+// non referenziato non viene istanziato, quindi le sue dipendenze non entrano nel grafo fx.
+//
+// I riferimenti sono di due specie, perché solo una delle due è un typo se non trova nulla:
+//
+//   - ESPLICITI — la property `task` di un distributedjob, il `workType` di un simplejob, le
+//     `tasks` di un worker pool: nomi scritti a mano, che devono esistere in `tasks:`.
+//   - DEDOTTI — il job type, usato quando nessuna property nomina il task (un simplejob senza
+//     `workType` gira il task omonimo). Qui non si può pretendere l'esistenza: nello stesso campo
+//     stanno i job type del framework (NotificationKafka, DistribuiteTask, DistribuiteTaskByQuery,
+//     …), che non nominano alcun task. E batch non può nemmeno elencarli per escluderli, visto che
+//     non importa i package dei job (è il vincolo di modularità compile-time di ModuleFunc).
 func ActiveSet(cfg *Config) task.ActiveSet {
 	seen := make(map[string]bool)
-	var referenced []string
-	add := func(s string) {
+	var referenced, implied []string
+	add := func(dst *[]string, s string) {
 		if s == "" || seen[strings.ToLower(s)] {
 			return
 		}
 		seen[strings.ToLower(s)] = true
-		referenced = append(referenced, s)
+		*dst = append(*dst, s)
 	}
 	for _, j := range cfg.JobsConfig {
 		if j.Disabled {
 			continue
 		}
-		add(j.Properties.GetString("task", ""))     // distributedjob
-		add(j.Properties.GetString("workType", "")) // simplejob
-		add(j.Type)                                 // simplejob senza workType
+		named := j.Properties.GetString("task", "") // distributedjob
+		if named == "" {
+			named = j.Properties.GetString("workType", "") // simplejob
+		}
+		if named != "" {
+			add(&referenced, named)
+			continue
+		}
+		add(&implied, j.Type) // simplejob senza workType, oppure un job type del framework
 	}
 	for _, w := range cfg.WorkersConfig {
 		for _, t := range w.Tasks {
-			add(t)
+			add(&referenced, t)
 		}
 	}
-	return task.ActiveSet{Tasks: cfg.TasksConfig, Referenced: referenced}
+	return task.ActiveSet{Tasks: cfg.TasksConfig, Referenced: referenced, Implied: implied}
 }
 
 // Module wira il sottosistema batch a partire da una singola Config, sostituendo la sfilza di
@@ -173,7 +188,13 @@ func Module(cfg *Config, register func(), opts ...Option) {
 	// group aggrega comunque root + modulo. register nil solo se l'app non registra task runner:
 	// registrare fuori da questa finestra (es. in un init()) è un errore, perché lì la sezione
 	// `tasks:` non è nota.
-	if register != nil {
+	//
+	// Gate-ata come tutto il resto: in un mode che non è né scheduler né worker (es. API) nessun
+	// runner verrebbe costruito, quindi non si registra e — soprattutto — non si valida la
+	// coerenza di `tasks:`/`jobs:`/`workers:`. Il fail-fast sulla config batch deve far cadere i
+	// mode che il batch lo eseguono davvero, non un processo API che del sottosistema usa al più
+	// lo store (che resta wirato sempre, vedi sotto).
+	if register != nil && batchActive(sched, work) {
 		task.Apply(register, ActiveSet(cfg))
 	}
 
@@ -223,4 +244,12 @@ func Module(cfg *Config, register func(), opts ...Option) {
 		// registrazione è indifferente (vedi nota sull'ordine sopra).
 		scheduler.Module(cfg.JobsConfig, sched...)
 	})
+}
+
+// batchActive indica se in questo processo il sottosistema batch ha qualcosa da costruire: il mode
+// corrente è tra gli scheduler modes o tra i worker modes. Una famiglia con modes vuoti è "sempre
+// attiva" (semantica di core.IsMode), quindi rende attivo il batch in ogni mode — così un'app che
+// non gate-a nulla si comporta come prima.
+func batchActive(sched, work []string) bool {
+	return core.IsMode(sched...) || core.IsMode(work...)
 }
