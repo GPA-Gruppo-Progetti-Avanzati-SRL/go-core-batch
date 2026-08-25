@@ -20,7 +20,7 @@ import (
 type workItemFilter struct {
 	Id          string   `field:"_id"         operator:"$eq"  omitempty:"true"`
 	IdIn        []string `field:"_id"         operator:"$in"  omitempty:"true"`
-	Type        string   `field:"type"        operator:"$eq"  omitempty:"true"`
+	TaskName    string   `field:"taskName"    operator:"$eq"  omitempty:"true"`
 	Status      string   `field:"status"      operator:"$eq"  omitempty:"true"`
 	Destination string   `field:"destination" operator:"$eq"  omitempty:"true"`
 	ObjectType  string   `field:"objectType"  operator:"$eq"  omitempty:"true"`
@@ -74,9 +74,9 @@ func (d *workItemData) warnIfActiveIndexMissing(ctx context.Context) {
 
 var _ store.IWorkItemStore = (*workItemData)(nil)
 
-func (d *workItemData) FindPending(ctx context.Context, workType, destination, objectType string) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemData) FindPending(ctx context.Context, taskName, destination, objectType string) ([]*store.WorkItem, *core.ApplicationError) {
 	filter := workItemFilter{
-		Type:        workType,
+		TaskName:    taskName,
 		Status:      store.StatusPending,
 		Destination: destination,
 		ObjectType:  objectType,
@@ -91,13 +91,13 @@ func (d *workItemData) FindPending(ctx context.Context, workType, destination, o
 // The candidate query matches items whose next_run_at is due, treating a missing/null
 // next_run_at as "due now" (mirrors the SQL store's `next_run_at IS NULL OR <= NOW()`),
 // and is bounded by limit so the whole PENDING backlog is never loaded into memory.
-func (d *workItemData) ClaimPending(ctx context.Context, workType, destination, objectType string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemData) ClaimPending(ctx context.Context, taskName, destination, objectType string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
 	now := time.Now()
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 
 	query := bson.M{
-		"type":   workType,
-		"status": store.StatusPending,
+		"taskName": taskName,
+		"status":   store.StatusPending,
 		// {nextRunAt: null} matches both missing and null fields in MongoDB.
 		"$or": []bson.M{
 			{"nextRunAt": nil},
@@ -157,12 +157,12 @@ func (d *workItemData) ClaimPending(ctx context.Context, workType, destination, 
 // refreshing lockedAt to now and incrementing retry. Returns the items for
 // immediate processing — no reset to PENDING, no waiting for the next tick.
 // Uses optimistic per-item UpdateOne so concurrent replicas don't double-claim.
-func (d *workItemData) RecoverOrphans(ctx context.Context, workType, destination, objectType string, maxAge time.Duration, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemData) RecoverOrphans(ctx context.Context, taskName, destination, objectType string, maxAge time.Duration, limit int) ([]*store.WorkItem, *core.ApplicationError) {
 	cutoff := time.Now().Add(-maxAge)
 	now := time.Now()
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 
-	query := bson.M{"type": workType, "status": store.StatusInProgress, "lockedAt": bson.M{"$lt": cutoff}}
+	query := bson.M{"taskName": taskName, "status": store.StatusInProgress, "lockedAt": bson.M{"$lt": cutoff}}
 	if destination != "" {
 		query["destination"] = destination
 	}
@@ -304,10 +304,10 @@ func (d *workItemData) GetById(ctx context.Context, id string) (*store.WorkItem,
 	return &item, nil
 }
 
-func (d *workItemData) HasActive(ctx context.Context, workType, objectId string) (bool, *core.ApplicationError) {
+func (d *workItemData) HasActive(ctx context.Context, taskName, objectId string) (bool, *core.ApplicationError) {
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	count, err := coll.CountDocuments(ctx, bson.M{
-		"type":     workType,
+		"taskName": taskName,
 		"objectId": objectId,
 		"status":   bson.M{"$in": []string{store.StatusPending, store.StatusInProgress}},
 	})
@@ -318,7 +318,7 @@ func (d *workItemData) HasActive(ctx context.Context, workType, objectId string)
 }
 
 // InsertIfNotActive inserts each item only if no active (PENDING or IN_PROGRESS) entry
-// exists for the same (type, objectId). Relies on the partial unique index
+// exists for the same (taskName, objectId). Relies on the partial unique index
 // uk_workitem_active — call EnsureIndexes at startup to create it.
 func (d *workItemData) InsertIfNotActive(ctx context.Context, items []*store.WorkItem) (int, *core.ApplicationError) {
 	if len(items) == 0 {
@@ -339,8 +339,8 @@ func (d *workItemData) InsertIfNotActive(ctx context.Context, items []*store.Wor
 	return inserted, nil
 }
 
-func (d *workItemData) List(ctx context.Context, workType, status string, paging *page.Paging, sort page.SortRequest) ([]*store.WorkItem, *core.ApplicationError) {
-	filter := workItemFilter{Type: workType, Status: status}
+func (d *workItemData) List(ctx context.Context, taskName, status string, paging *page.Paging, sort page.SortRequest) ([]*store.WorkItem, *core.ApplicationError) {
+	filter := workItemFilter{TaskName: taskName, Status: status}
 	var sortOpt options.Lister[options.FindOptions]
 	if len(sort) > 0 {
 		sortOpt = mongo.FindSortOption(sort)
@@ -360,11 +360,11 @@ func (d *workItemData) List(ctx context.Context, workType, status string, paging
 
 // EnsureIndexes creates the indexes required by workItemData. Call once at application startup.
 // The partial unique index uk_workitem_active prevents concurrent insertion of duplicate
-// active (PENDING or IN_PROGRESS) items for the same (type, objectId).
+// active (PENDING or IN_PROGRESS) items for the same (taskName, objectId).
 func EnsureIndexes(ctx context.Context, service *mongo.Service) error {
 	coll := service.GetCollection(store.CollectionWorkItems, "")
 	_, err := coll.Indexes().CreateOne(ctx, mgodriver.IndexModel{
-		Keys: bson.D{{Key: "type", Value: 1}, {Key: "objectId", Value: 1}},
+		Keys: bson.D{{Key: "taskName", Value: 1}, {Key: "objectId", Value: 1}},
 		Options: options.Index().
 			SetUnique(true).
 			SetPartialFilterExpression(bson.M{

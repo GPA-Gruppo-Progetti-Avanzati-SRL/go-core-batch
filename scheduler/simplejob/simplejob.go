@@ -8,7 +8,7 @@
 //	simplejob.Module()
 //	func Register() { simplejob.RegisterRunner[myRunner]("HelloWorld") }
 //
-// Config: il task va SEMPRE dichiarato; `workType` nomina l'istanza da eseguire e vale di default il
+// Config: il task va SEMPRE dichiarato; `taskName` nomina l'istanza da eseguire e vale di default il
 // `type` del job, quindi si omette quando la voce di `tasks:` non ha un `name` proprio.
 //
 //	tasks:
@@ -48,7 +48,7 @@ type ITaskRunner = store.ITaskRunner
 // SimpleTaskRunner lega un ITaskRunner al task che esegue: TaskType è il tipo registrato con
 // RegisterRunner — per simplejob è anche il `type` della voce di `jobs:`, ed è quindi la chiave della
 // JobRegistration — e TaskName è il nome dell'istanza, cioè la voce della sezione `tasks:` da cui
-// arrivano le properties. È lo stesso nome che il job indica con `workType` e che finisce in
+// arrivano le properties. È lo stesso nome che il job indica con `taskName` e che finisce in
 // WorkItem.Type.
 type SimpleTaskRunner struct {
 	TaskType string
@@ -81,7 +81,7 @@ func ProvideRunner(constructor any) {
 //	nessun tag                                        → campo di lavorazione, ignorato dal grafo
 //
 // Viene fornito un runner per ogni ISTANZA attiva: ogni voce della sezione `tasks:` con quel type e
-// referenziata da un job, che la indica con la property infrastrutturale `workType` (di default il
+// referenziata da un job, che la indica con la property infrastrutturale `taskName` (di default il
 // `type` del job). La dichiarazione in `tasks:` è obbligatoria. L'istanza è condivisa fra i tick,
 // quindi i campi di lavorazione NON sono per-esecuzione.
 func RegisterRunner[T any, PT interface {
@@ -89,8 +89,8 @@ func RegisterRunner[T any, PT interface {
 	ITaskRunner
 }](taskType string) {
 	for _, tc := range task.Instances(taskType) {
-		core.ProvideStruct(func(p *T) *SimpleTaskRunner { return NewNamed(taskType, tc.TaskName(), PT(p)) },
-			fmt.Sprintf("batch: simplejob task %q (type %q)", tc.TaskName(), taskType), tc.Properties, Group)
+		core.ProvideStruct(func(p *T) *SimpleTaskRunner { return NewNamed(taskType, tc.Name, PT(p)) },
+			fmt.Sprintf("batch: simplejob task %q (type %q)", tc.Name, taskType), tc.Properties, Group)
 	}
 }
 
@@ -104,7 +104,7 @@ func RegisterRunner[T any, PT interface {
 func newJobRegistrations(items store.IWorkItemStore, runners []*SimpleTaskRunner) []scheduler.JobRegistration {
 	// Un task type può avere più istanze (più voci in `tasks:`): la JobRegistration resta una per
 	// task type — che per simplejob è il `type` del job — e la factory sceglie l'istanza col
-	// `workType` della singola voce di `jobs:`.
+	// `taskName` della singola voce di `jobs:`.
 	byType := make(map[string]map[string]ITaskRunner)
 	var order []string
 	for _, r := range runners {
@@ -139,10 +139,10 @@ const defaultBatchLimit = 100
 
 func makeFactory(items store.IWorkItemStore, instances map[string]ITaskRunner) scheduler.JobFactory {
 	return func(name string, _ *scheduler.Services, config scheduler.Config) gocron.Task {
-		// workType nomina il TASK da eseguire: è il nome della voce di `tasks:` ed è anche il
+		// taskName nomina il TASK da eseguire: è il nome della voce di `tasks:` ed è anche il
 		// WorkItem.Type su cui filtra ClaimPending. Di default è il `type` del job, che copre il
 		// caso comune (voce di `tasks:` senza `name`, quindi nome uguale al type).
-		taskName := config.Properties.GetString("workType", config.Type)
+		taskName := config.Properties.GetString("task", config.Type)
 		runner := instances[taskName]
 		selfFeed := config.Properties.GetBool("selfFeed", false)
 		// limit caps how many items are claimed (and processed) per tick.
@@ -176,7 +176,7 @@ func run(name, taskName string, selfFeed bool, timeout, orphanTimeout time.Durat
 		now := time.Now()
 		wi := []*store.WorkItem{{
 			Id:         uuid.NewV7().String(),
-			Type:       taskName,
+			TaskName:   taskName,
 			ObjectId:   taskName,
 			Status:     store.StatusPending,
 			CreateTime: now,

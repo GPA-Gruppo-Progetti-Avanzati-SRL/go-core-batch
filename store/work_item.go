@@ -18,8 +18,12 @@ const (
 // Implements both mongo.ICollection and coresql.IRecord so either backend can persist it.
 // Job-specific data goes in Payload; Destination is a routing hint (e.g. Kafka topic, worker type).
 type WorkItem struct {
-	Id          string     `bson:"_id"                       bun:"id,pk"`
-	Type        string     `bson:"type"                      bun:"type"`
+	Id string `bson:"_id"                       bun:"id,pk"`
+	// TaskName è il NOME dell'istanza di task che deve eseguire l'item — la voce di `tasks:`
+	// referenziata dal job (`properties.task`) o elencata da un worker pool (`workers[].tasks`).
+	// Non è un "tipo": ci filtra il claiming (ClaimPending/RecoverOrphans) e ci instrada il
+	// MuxRunner via TaskRunner.TaskName.
+	TaskName    string     `bson:"taskName"                  bun:"task_name"`
 	ObjectId    string     `bson:"objectId"                  bun:"object_id"`
 	ObjectType  string     `bson:"objectType"                bun:"object_type"`
 	Destination string     `bson:"destination"               bun:"destination"`

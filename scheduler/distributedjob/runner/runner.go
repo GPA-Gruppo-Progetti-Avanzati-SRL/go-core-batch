@@ -57,10 +57,10 @@ func NewMux(runners []*TaskRunner) *MuxRunner {
 	return &MuxRunner{routes: routes}
 }
 
-func (r *MuxRunner) Run(ctx context.Context, objectId, taskType string, items store.IWorkItemStore) error {
-	runner, ok := r.routes[taskType]
+func (r *MuxRunner) Run(ctx context.Context, objectId, taskName string, items store.IWorkItemStore) error {
+	runner, ok := r.routes[taskName]
 	if !ok {
-		return fmt.Errorf("no runner registered for taskType %q", taskType)
+		return fmt.Errorf("no runner registered for task name %q", taskName)
 	}
 	item, appErr := items.GetById(ctx, objectId)
 	if appErr != nil {
@@ -122,8 +122,8 @@ func Register[T any, PT interface {
 	ITaskRunner
 }](taskType string) {
 	for _, tc := range task.Instances(taskType) {
-		core.ProvideStruct(func(p *T) *TaskRunner { return New(tc.TaskName(), PT(p)) },
-			owner(tc.TaskName(), taskType), tc.Properties, Group)
+		core.ProvideStruct(func(p *T) *TaskRunner { return New(tc.Name, PT(p)) },
+			owner(tc.Name, taskType), tc.Properties, Group)
 	}
 }
 
@@ -174,7 +174,7 @@ func RegisterFile[T any, PT interface {
 	IFileRunner
 }](taskType string) {
 	for _, tc := range task.Instances(taskType) {
-		core.ProvideStruct(func(p *T) *FileTaskRunner { return NewFile(tc.TaskName(), PT(p)) },
-			owner(tc.TaskName(), taskType), tc.Properties, FileGroup)
+		core.ProvideStruct(func(p *T) *FileTaskRunner { return NewFile(tc.Name, PT(p)) },
+			owner(tc.Name, taskType), tc.Properties, FileGroup)
 	}
 }

@@ -57,8 +57,8 @@ func newRunnerService(runners []*runner.TaskRunner) *runnerService {
 
 func (s *runnerService) GetServices() *runnerService { return s }
 
-func (s *runnerService) GetTaskExecutions(taskType string) (worker.RunTask[*runnerService], bool) {
-	r, ok := s.routes[taskType]
+func (s *runnerService) GetTaskExecutions(taskName string) (worker.RunTask[*runnerService], bool) {
+	r, ok := s.routes[taskName]
 	if !ok {
 		return nil, false
 	}

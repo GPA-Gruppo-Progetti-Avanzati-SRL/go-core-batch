@@ -23,8 +23,8 @@ func NewGrpcDispatcher(client *grpctransport.Client) *GrpcDispatcher {
 
 var _ distributedjob.ITaskDispatcher = (*GrpcDispatcher)(nil)
 
-func (d *GrpcDispatcher) DispatchTask(ctx context.Context, jobId, taskId, objectId, taskType string) error {
-	_, err := d.client.DistribuiteTask(ctx, jobId, taskId, objectId, taskType)
+func (d *GrpcDispatcher) DispatchTask(ctx context.Context, jobId, taskId, objectId, taskName string) error {
+	_, err := d.client.DistribuiteTask(ctx, jobId, taskId, objectId, taskName)
 	return err
 }
 

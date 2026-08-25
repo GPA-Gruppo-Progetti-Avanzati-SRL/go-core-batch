@@ -20,7 +20,8 @@
 // type: `task`, `limit`, `collection`, `topic`, …) e resta letto dal framework.
 //
 // La dichiarazione è OBBLIGATORIA: ogni task type registrato deve avere almeno una voce in `tasks:`,
-// e ogni task referenziato da jobs:/workers: deve esistere. Le incoerenze fanno fallire l'avvio.
+// ogni voce deve portare il suo `name` (nessuna fallback sul `type`) e ogni task referenziato da
+// jobs:/workers: deve esistere. Le incoerenze fanno fallire l'avvio.
 package task
 
 import (
@@ -35,19 +36,11 @@ import (
 // applicativa. Le Properties sono mappate sui campi `prop:` della struct del runner (core.BindProps).
 type Config struct {
 	// Name identifica l'istanza ed è ciò che job e worker referenziano; è anche il WorkItem.Type
-	// usato da claiming e instradamento. Vuoto = uguale a Type (unica scorciatoia ammessa: la voce
-	// va comunque dichiarata).
+	// usato da claiming e instradamento. È OBBLIGATORIO e va scritto anche quando coincide col
+	// Type: è la chiave di routing, e due istanze dello stesso Type si distinguono solo per Name.
 	Name       string          `yaml:"name" mapstructure:"name" json:"name"`
 	Type       string          `yaml:"type" mapstructure:"type" json:"type" validate:"required"`
 	Properties core.Properties `yaml:"properties" mapstructure:"properties" json:"properties"`
-}
-
-// TaskName ritorna il nome effettivo dell'istanza (Name, o Type se non valorizzato).
-func (c Config) TaskName() string {
-	if c.Name != "" {
-		return c.Name
-	}
-	return c.Type
 }
 
 // ActiveSet è la fotografia della config che Apply mette a disposizione dei registratori.
@@ -55,11 +48,11 @@ type ActiveSet struct {
 	// Tasks è la sezione `tasks:`.
 	Tasks []Config
 	// Referenced sono i task name citati ESPLICITAMENTE da jobs:/workers: — la property `task`
-	// di un distributedjob, il `workType` di un simplejob, le `tasks` di un worker pool. Sono
+	// di un distributedjob, la stessa `task` di un simplejob, le `tasks` di un worker pool. Sono
 	// riferimenti che l'autore della config ha scritto per nome: se non esistono è un typo.
 	Referenced []string
 	// Implied sono i nomi DEDOTTI dal job type quando nessuna property nomina il task (un
-	// simplejob senza `workType` gira il task omonimo). Attivano il task omonimo se dichiarato,
+	// simplejob senza `task` gira il task omonimo). Attivano il task omonimo se dichiarato,
 	// ma non pretendono che esista: lo stesso posto è occupato dai job type del framework
 	// (NotificationKafka, DistribuiteTask, …), che non nominano alcun task.
 	Implied []string
@@ -85,6 +78,7 @@ var (
 // interno forniscono a fx solo le istanze dei task effettivamente usati, con le loro properties.
 // Chiamata una sola volta da batch.Module.
 func Apply(register func(), a ActiveSet) {
+	checkNames(a)
 	active = &a
 	declaredTypes = make(map[string]bool, len(a.Tasks))
 	knownNames = make(map[string]bool, len(a.Tasks))
@@ -92,7 +86,7 @@ func Apply(register func(), a ActiveSet) {
 	undeclared = nil
 	for _, c := range a.Tasks {
 		declaredTypes[strings.ToLower(c.Type)] = true
-		knownNames[strings.ToLower(c.TaskName())] = true
+		knownNames[strings.ToLower(c.Name)] = true
 	}
 	defer func() { active, declaredTypes, knownNames, registered, undeclared = nil, nil, nil, nil, nil }()
 
@@ -125,7 +119,7 @@ func Instances(taskType string) []Config {
 		if !strings.EqualFold(c.Type, taskType) {
 			continue
 		}
-		name := c.TaskName()
+		name := c.Name
 		if !isReferenced(name) {
 			log.Info().Str("task", name).Str("type", taskType).
 				Msg("batch: task dichiarato ma non referenziato da alcun job/worker: costruzione saltata (dipendenze non istanziate)")
@@ -154,6 +148,25 @@ func isReferenced(name string) bool {
 		}
 	}
 	return false
+}
+
+// checkNames pretende un `name` su ogni voce di `tasks:`. Il name è la chiave di instradamento —
+// lo referenziano i job (`properties.task`) e i worker pool (`workers[].tasks`), viaggia in
+// WorkItem.Type, ci filtra il claiming e ci instrada il MuxRunner — quindi una voce senza name non
+// è raggiungibile da nessuno. Non c'è fallback sul type: prima c'era, e nascondeva la chiave di
+// routing rendendo invisibile il caso di due istanze dello stesso type. Girando prima di register()
+// l'errore arriva sulla config, non su un runner costruito a metà.
+func checkNames(a ActiveSet) {
+	var anonymous []string
+	for i, c := range a.Tasks {
+		if strings.TrimSpace(c.Name) == "" {
+			anonymous = append(anonymous, fmt.Sprintf("voce #%d (type %q)", i+1, c.Type))
+		}
+	}
+	if len(anonymous) > 0 {
+		panic("batch: la sezione `tasks:` richiede un `name` su ogni voce (è la chiave referenziata da jobs:/workers: e usata come WorkItem.Type; scrivilo anche quando coincide col `type`). Voci senza name: " +
+			strings.Join(anonymous, ", "))
+	}
 }
 
 // check verifica la coerenza fra `tasks:`, i task type registrati e i riferimenti di jobs:/workers:.
@@ -190,7 +203,7 @@ func check(a ActiveSet) {
 
 	for _, c := range a.Tasks {
 		if !registered[strings.ToLower(c.Type)] {
-			log.Warn().Str("task", c.TaskName()).Str("type", c.Type).
+			log.Warn().Str("task", c.Name).Str("type", c.Type).
 				Msg("batch: la sezione `tasks:` dichiara un type che nessun runner ha registrato in questo processo (typo, o runner in un altro binario)")
 		}
 	}

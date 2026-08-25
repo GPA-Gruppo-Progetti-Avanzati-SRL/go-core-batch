@@ -47,7 +47,7 @@ func (d *batchData) insertTask(ctx context.Context, taskid, jobId, typeTask, obj
 	obj := &store.TaskLog{
 		TaskID:   taskid,
 		JobID:    jobId,
-		Type:     typeTask,
+		TaskName: typeTask,
 		Stato:    status,
 		Hostname: core.GetHostname(),
 		Logdate:  time.Now(),

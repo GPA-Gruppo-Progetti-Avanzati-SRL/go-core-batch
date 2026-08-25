@@ -49,13 +49,13 @@ func TestS3Feed_Feed_FiltersAndLimits(t *testing.T) {
 	t.Run("WorkItem construction", func(t *testing.T) {
 		// Verify that a WorkItem built from an S3 object has the correct fields
 		key := "inbox/report.csv"
-		taskType := "S3_IMPORT"
+		taskName := "S3_IMPORT"
 		destPath := "processed"
 		serviceName := "main"
 
-		wi := buildWorkItem(taskType, key, serviceName, destPath)
-		if wi.Type != taskType {
-			t.Errorf("Type = %q, want %q", wi.Type, taskType)
+		wi := buildWorkItem(taskName, key, serviceName, destPath)
+		if wi.TaskName != taskName {
+			t.Errorf("Type = %q, want %q", wi.TaskName, taskName)
 		}
 		if wi.ObjectId != key {
 			t.Errorf("ObjectId = %q, want %q", wi.ObjectId, key)
@@ -142,10 +142,10 @@ func matchPattern(pattern, base string) (bool, error) {
 	return pathMatch(pattern, base)
 }
 
-func buildWorkItem(taskType, key, service, destPath string) *store.WorkItem {
+func buildWorkItem(taskName, key, service, destPath string) *store.WorkItem {
 	return &store.WorkItem{
 		Id:       "test-id",
-		Type:     taskType,
+		TaskName: taskName,
 		ObjectId: key,
 		Payload: S3Payload{
 			Service:  service,

@@ -19,8 +19,8 @@ import (
 //
 // Restano al chiamante: la fase di feed (che precede), lo span/tracing, e la fase di process
 // (dispatch gRPC / esecuzione in-process / publish Kafka) che segue.
-func ClaimBatch(ctx context.Context, items IWorkItemStore, jobID, workType, destination, objectType string, orphanTimeout time.Duration, limit int) (batch []*WorkItem, orphans, fresh int, claimErr *core.ApplicationError) {
-	orph, appErr := items.RecoverOrphans(ctx, workType, destination, objectType, orphanTimeout, limit)
+func ClaimBatch(ctx context.Context, items IWorkItemStore, jobID, taskName, destination, objectType string, orphanTimeout time.Duration, limit int) (batch []*WorkItem, orphans, fresh int, claimErr *core.ApplicationError) {
+	orph, appErr := items.RecoverOrphans(ctx, taskName, destination, objectType, orphanTimeout, limit)
 	if appErr != nil {
 		log.Warn().Err(appErr).Msgf("[%s] orphan recovery failed", jobID)
 		orph = nil
@@ -32,7 +32,7 @@ func ClaimBatch(ctx context.Context, items IWorkItemStore, jobID, workType, dest
 	orphans = len(orph)
 
 	if remaining := limit - orphans; remaining > 0 {
-		fr, err := items.ClaimPending(ctx, workType, destination, objectType, remaining)
+		fr, err := items.ClaimPending(ctx, taskName, destination, objectType, remaining)
 		if err != nil {
 			return batch, orphans, 0, err
 		}

@@ -21,7 +21,7 @@ func TestActiveSet_ExplicitReferences(t *testing.T) {
 	a := ActiveSet(&Config{
 		JobsConfig: []scheduler.Config{
 			job("DistribuiteTaskByQuery", core.Properties{"task": "BonifyInit"}),
-			job("HelloWorld", core.Properties{"workType": "hello-nightly"}),
+			job("HelloWorld", core.Properties{"task": "hello-nightly"}),
 		},
 		WorkersConfig: []worker.Config{{Name: "Default", Tasks: []string{"BonifyInit", "AggiornaLimiti"}}},
 	})
@@ -51,12 +51,12 @@ func TestActiveSet_FrameworkJobTypeIsNotAnExplicitReference(t *testing.T) {
 	task.Apply(func() {}, a)
 }
 
-// Il caso opposto resta servito: un simplejob senza `workType` gira il task omonimo, che va
+// Il caso opposto resta servito: un simplejob senza `task` gira il task omonimo, che va
 // istanziato anche se nessun altro lo nomina.
 func TestActiveSet_ImpliedActivatesSameNamedTask(t *testing.T) {
 	a := ActiveSet(&Config{
 		JobsConfig:  []scheduler.Config{job("HelloWorld", nil)},
-		TasksConfig: []task.Config{{Type: "HelloWorld"}, {Name: "altro", Type: "HelloWorld"}},
+		TasksConfig: []task.Config{{Name: "HelloWorld", Type: "HelloWorld"}, {Name: "altro", Type: "HelloWorld"}},
 	})
 	var got []task.Config
 	task.Apply(func() { got = task.Instances("HelloWorld") }, a)

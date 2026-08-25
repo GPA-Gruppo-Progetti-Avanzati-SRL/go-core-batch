@@ -31,28 +31,28 @@ func NewRouter[T any](w *worker.Workers[T], gs *grpctransport.Server, service wo
 }
 
 func (r *Router[T]) DistribuiteTask(ctx context.Context, s *proto.TaskMessage) (*proto.TaskStatus, error) {
-	log.Info().Msgf("G - %s - %s - Distribuisco Task su Worker %s", s.JobId, s.TaskId, s.TaskType)
+	log.Info().Msgf("G - %s - %s - Distribuisco Task su Worker %s", s.JobId, s.TaskId, s.TaskName)
 
-	_, ok := r.taskServices.GetTaskExecutions(s.TaskType)
+	_, ok := r.taskServices.GetTaskExecutions(s.TaskName)
 	if !ok {
-		return nil, errors.New("invalid task type: " + s.TaskType)
+		return nil, errors.New("invalid task type: " + s.TaskName)
 	}
 
 	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	t := worker.GenerateTask(s.TaskId, s.JobId, s.TaskType, s.ObjectId, ctx, cancel)
+	t := worker.GenerateTask(s.TaskId, s.JobId, s.TaskName, s.ObjectId, ctx, cancel)
 
-	ch := r.workers.GetChannel(s.TaskType)
+	ch := r.workers.GetChannel(s.TaskName)
 	if ch == nil {
 		cancel()
-		log.Error().Msgf("G - no worker channel for task type: %s", s.TaskType)
-		return nil, errors.New("no worker channel for task type: " + s.TaskType)
+		log.Error().Msgf("G - no worker channel for task type: %s", s.TaskName)
+		return nil, errors.New("no worker channel for task type: " + s.TaskName)
 	}
 	select {
 	case ch <- &t:
 	default:
 		cancel()
-		log.Error().Msgf("G - %s - %s - Worker channel pieno, task rifiutato: %s", s.JobId, s.TaskId, s.TaskType)
-		return nil, errors.New("worker channel full: " + s.TaskType)
+		log.Error().Msgf("G - %s - %s - Worker channel pieno, task rifiutato: %s", s.JobId, s.TaskId, s.TaskName)
+		return nil, errors.New("worker channel full: " + s.TaskName)
 	}
 	return okStatus()
 }

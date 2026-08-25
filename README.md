@@ -25,7 +25,7 @@ Raccoglie i sotto-config di tutti i pezzi cablati da `Module`. L'app tipicamente
 
 > **`jobs[].properties` e `tasks[].properties` non sono la stessa cosa.** Il primo blocco è
 > **infrastrutturale**: configura il *job type* (`task`, `limit`, `collection`, `filter`, `topic`,
-> `workType`, …) e lo legge il framework. Il secondo è **applicativo**: sono le properties del task,
+> `task`, …) e lo legge il framework. Il secondo è **applicativo**: sono le properties del task,
 > mappate sui campi `prop:` della struct del runner. Vedi "Configurazione dei task — `tasks:`".
 
 ### `batch.Module(cfg *batch.Config, register func(), opts ...batch.Option)`
@@ -133,11 +133,51 @@ batch:
 
 **La dichiarazione è obbligatoria** (breaking change): ogni task type registrato deve avere almeno una voce in `tasks:`, e ogni task referenziato da `jobs:`/`workers:` deve esistere. Le incoerenze fanno **fallire l'avvio** con l'elenco dei nomi coinvolti — in caso contrario il job girerebbe a vuoto senza trovare un runner. Un task dichiarato ma che nessuno referenzia non viene istanziato (log Info): le sue dipendenze non entrano nel grafo fx.
 
-La validazione riguarda i riferimenti **espliciti**: la property `task` di un distributedjob, il `workType` di un simplejob, le `tasks` di un worker pool — nomi scritti a mano, quindi un nome inesistente è un typo. Quando nessuna property nomina il task, il nome è **dedotto** dal job type (è il caso del simplejob senza `workType`): lì il task omonimo viene attivato se dichiarato, ma non se ne pretende l'esistenza, perché nello stesso campo stanno i job type del framework (`NotificationKafka`, `DistribuiteTask`, `DistribuiteTaskByQuery`, …) che non nominano alcun task.
+Il **`name` è obbligatorio su ogni voce e non ha fallback sul `type`**: va scritto anche quando i due coincidono, perché è la chiave di instradamento (i job lo referenziano con `properties.task`, i worker pool lo elencano in `tasks`, e finisce in `WorkItem.TaskName` — ci filtra `ClaimPending` e ci instrada il `MuxRunner`). Due istanze dello stesso `type` si distinguono solo per `name`. Una voce senza `name` fa fallire l'avvio prima che `register()` giri.
+
+La validazione riguarda i riferimenti **espliciti**: la property `task` di un distributedjob, il `task` di un simplejob, le `tasks` di un worker pool — nomi scritti a mano, quindi un nome inesistente è un typo. Quando nessuna property nomina il task, il nome è **dedotto** dal job type (è il caso del simplejob senza `task`): lì il task omonimo viene attivato se dichiarato, ma non se ne pretende l'esistenza, perché nello stesso campo stanno i job type del framework (`NotificationKafka`, `DistribuiteTask`, `DistribuiteTaskByQuery`, …) che non nominano alcun task.
 
 **Il fail-fast è gate-ato sui modes.** `register` — e con esso la validazione di `tasks:` — gira solo se `core.Mode` è tra gli scheduler modes (`WithSchedulerModes`) o tra i worker modes (`WithWorkerModes`). In un processo `MODE=API`, dove nessun runner verrebbe costruito, il sottosistema batch non registra e non valida nulla: una misconfig della sezione `tasks:` deve far cadere i mode che il batch lo eseguono davvero, non l'API. Lo store resta l'eccezione di sempre (wirato in ogni mode), così l'API può iniettare `store.IWorkItemStore`. Una famiglia con modes vuoti è "sempre attiva", quindi un'app che non gate-a nulla si comporta come prima.
 
-Il **nome** del task è la chiave di tutto il percorso: è il `WorkItem.Type` creato dal job, quello su cui il claiming filtra e quello con cui il worker instrada al runner. Se ometti `name`, vale il `type` — è l'unica scorciatoia, la voce va comunque dichiarata.
+### Nomenclatura: name, non type
+
+Il vocabolario è stato ripulito perché diceva "type" dove intendeva "name". La chiave che instrada un
+work item al suo runner **è un nome di istanza**, non un tipo:
+
+| Prima | Ora | Cos'è |
+|---|---|---|
+| `WorkItem.Type` (`bson:"type"`, `bun:"type"`) | `WorkItem.TaskName` (`bson:"taskName"`, `bun:"task_name"`) | il nome del task che deve eseguire l'item |
+| `TaskLog.Type` (`bson:"type"`) | `TaskLog.TaskName` (`bson:"taskName"`, `bun:"task_name"`) | idem, sul log di esecuzione |
+| `worker.Task.Type` | `worker.Task.TaskName` | idem, nel pool |
+| parametri `workType` / `taskType` | `taskName` | in `IWorkItemStore`, `IData`, `ITaskDispatcher`, `IFeed`, `MuxRunner.Run` |
+| property di job `workType` (simplejob) | `task` | chiave unica: la stessa che usa distributedjob |
+| label pprof `batch_task_type` | `batch_task_name` | goroutine del worker pool e del localdispatcher |
+| proto `TaskMessage.TaskType` | `TaskMessage.TaskName` | field number 4 invariato → **compatibile a livello binario** |
+| `task.Config.TaskName()` | `.Name` | il metodo era diventato un getter banale dopo la rimozione della fallback |
+
+Restano `taskType` e `SimpleTaskRunner.TaskType` dove il tipo è davvero un tipo: il parametro di
+`runner.Register[T]`/`simplejob.RegisterRunner[T]`, cioè il task type registrato dal codice.
+
+**Il rename dei campi persistiti richiede una migrazione dei dati.** Mongo:
+
+```js
+db.<collezione_work_items>.updateMany({}, { $rename: { "type": "taskName" } })
+db.<collezione_work_items>.dropIndex("<vecchio indice su {type, objectId}>")   // EnsureIndexes ricrea quello nuovo
+db.<collezione_task_log>.updateMany({}, { $rename: { "type": "taskName" } })
+```
+
+SQL:
+
+```sql
+ALTER TABLE work_items RENAME COLUMN type TO task_name;
+DROP INDEX IF EXISTS <vecchio indice parziale su (type, object_id)>;  -- EnsureIndexes ricrea quello nuovo
+ALTER TABLE task_log   RENAME COLUMN type TO task_name;
+```
+
+Senza la migrazione il claiming filtra su un campo che non esiste: nessun errore, semplicemente
+nessun item trovato.
+
+Il **nome** del task è la chiave di tutto il percorso: è il `WorkItem.TaskName` creato dal job, quello su cui il claiming filtra e quello con cui il worker instrada al runner. Va sempre scritto: non c'è fallback sul `type`.
 
 ```go
 type importRunner struct {
@@ -547,7 +587,7 @@ Il blocco `properties:` di un job configura il **job type** e lo legge il framew
 | `properties.path` | string | Prefisso S3 per il listing (solo DistribuiteTaskByS3File) |
 | `properties.pattern` | string | Glob pattern sul basename del file, es. `"*.csv"` (solo DistribuiteTaskByS3File) |
 | `properties.dest-path` | string | Prefisso S3 dove spostare i file elaborati (solo DistribuiteTaskByS3File) |
-| `properties.workType` | string | **Nome del task** da eseguire (solo simplejob), che è anche il `WorkItem.Type` letto da `ClaimPending`/`RecoverOrphans` — default = `type` del job |
+| `properties.task` | string | **Nome del task** da eseguire (solo simplejob), che è anche il `WorkItem.TaskName` letto da `ClaimPending`/`RecoverOrphans` — default = `type` del job |
 | `properties.selfFeed` | bool | `true`: il simplejob crea da sé un workitem a ogni tick (solo simplejob) |
 
 > I valori conservano il tipo YAML (`limit: 100` è un intero, `selfFeed: true` un booleano). Le forme
@@ -558,7 +598,7 @@ Il blocco `properties:` di un job configura il **job type** e lo legge il framew
 
 | Campo | Tipo | Descrizione |
 |---|---|---|
-| `name` | string | Nome dell'istanza, referenziato da `jobs[].properties.task`/`workType` e da `workers[].tasks`; default = `type`. È anche il `WorkItem.Type` |
+| `name` | string | Nome dell'istanza, referenziato da `jobs[].properties.task`/`task` e da `workers[].tasks`; default = `type`. È anche il `WorkItem.TaskName` |
 | `type` | string | Task type registrato con `runner.Register[T]("...")` / `simplejob.RegisterRunner[T]("...")` |
 | `properties` | map | Configurazione applicativa, mappata sui campi `prop:` della struct del runner |
 
@@ -657,10 +697,10 @@ flowchart TD
     CRON([Cron tick]) --> LOCK["Distributed job lock\nsingleton → una sola replica"]
     LOCK --> SELF
     subgraph SELF["selfFeed — opzionale"]
-        SF["InsertIfNotActive\nObjectId = workType"]
+        SF["InsertIfNotActive\nObjectId = taskName"]
     end
     SELF --> RO["IWorkItemStore.RecoverOrphans\nIN_PROGRESS più vecchi di lock-timeout (default 10m)\nretry++"]
-    RO --> CP["IWorkItemStore.ClaimPending(workType, limit)\nPENDING → IN_PROGRESS (atomico, max limit)"]
+    RO --> CP["IWorkItemStore.ClaimPending(taskName, limit)\nPENDING → IN_PROGRESS (atomico, max limit)"]
     CP -- "nessun item" --> END([fine run])
     CP -- "per ogni item (loop sequenziale)" --> RUN["ITaskRunner.Run(ctx, item)\n→ store.ApplyResult(return)\nctx timeout = lock-timeout (default 30s)"]
     RUN -- "return nil" --> DONE["MarkDone → DONE"]
@@ -691,7 +731,7 @@ func Register() {
 
 In alternativa `simplejob.ProvideRunner(constructor)` (costruttore esplicito che ritorna `*simplejob.SimpleTaskRunner`, senza properties). `simplejob.Module()` raccoglie i runner dal gruppo `batch_simple_runners` ed emette una `scheduler.JobRegistration` per job type nel gruppo `batch_jobs`.
 
-Con più voci in `tasks:` dello stesso type, `RegisterRunner` fornisce **una istanza per voce**: la factory sceglie quella indicata dal `workType` del job, che è il **nome del task** (ed è anche il `WorkItem.Type` su cui filtra il claiming). Omesso, vale il `type` del job — che copre il caso della voce senza `name`.
+Con più voci in `tasks:` dello stesso type, `RegisterRunner` fornisce **una istanza per voce**: la factory sceglie quella indicata dal `task` del job, che è il **nome del task** (ed è anche il `WorkItem.TaskName` su cui filtra il claiming). Omesso, vale il `type` del job — che copre il caso della voce senza `name`.
 
 ### Runner — lifecycle dal valore di ritorno
 
@@ -747,12 +787,12 @@ scheduler:
     singleton: true         # esclusività cross-replica
     lock-timeout: 15m       # timeout del context di Run (default 30s)
     properties:
-      workType: "MY_JOB"    # opzionale — default = type
+      task: "MY_JOB"    # opzionale — default = type
 ```
 
 ### selfFeed — job auto-alimentato
 
-Con la property `selfFeed: "true"`, il simplejob crea automaticamente un work item a ogni tick via `InsertIfNotActive` con `ObjectId = workType`. Finché l'item è PENDING o IN_PROGRESS non ne viene creato un altro; una volta DONE, al tick successivo ne crea uno nuovo.
+Con la property `selfFeed: "true"`, il simplejob crea automaticamente un work item a ogni tick via `InsertIfNotActive` con `ObjectId = taskName`. Finché l'item è PENDING o IN_PROGRESS non ne viene creato un altro; una volta DONE, al tick successivo ne crea uno nuovo.
 
 ```yaml
 scheduler:
@@ -761,7 +801,7 @@ scheduler:
     cron: "0 */5 * * * *"
     properties:
       selfFeed: "true"
-      workType: "Cleanup"   # opzionale — default = type
+      task: "Cleanup"   # opzionale — default = type
 ```
 
 ### Differenze da distributedjob
@@ -799,8 +839,8 @@ type ITaskDispatcher interface {
 
 // store.IWorkItemStore — claiming + lifecycle
 type IWorkItemStore interface {
-    ClaimPending(ctx context.Context, workType, destination, objectType string, limit int) ([]*WorkItem, *core.ApplicationError)
-    RecoverOrphans(ctx context.Context, workType, destination, objectType string, maxAge time.Duration, limit int) ([]*WorkItem, *core.ApplicationError)
+    ClaimPending(ctx context.Context, taskName, destination, objectType string, limit int) ([]*WorkItem, *core.ApplicationError)
+    RecoverOrphans(ctx context.Context, taskName, destination, objectType string, maxAge time.Duration, limit int) ([]*WorkItem, *core.ApplicationError)
     InsertIfNotActive(ctx context.Context, items []*WorkItem) (int, *core.ApplicationError)
     MarkDone(ctx context.Context, ids []string) *core.ApplicationError
     MarkFailed(ctx context.Context, id, reason string) *core.ApplicationError
@@ -808,10 +848,10 @@ type IWorkItemStore interface {
     MarkPending(ctx context.Context, id string, retryDelay time.Duration) *core.ApplicationError
     Insert(ctx context.Context, items []*WorkItem) *core.ApplicationError
     GetById(ctx context.Context, id string) (*WorkItem, *core.ApplicationError)
-    HasActive(ctx context.Context, workType, objectId string) (bool, *core.ApplicationError)
+    HasActive(ctx context.Context, taskName, objectId string) (bool, *core.ApplicationError)
     DeleteIfPending(ctx context.Context, id string) (bool, *core.ApplicationError)
-    List(ctx context.Context, workType, status string, paging *page.Paging, sort page.SortRequest) ([]*WorkItem, *core.ApplicationError)
-    FindPending(ctx context.Context, workType, destination, objectType string) ([]*WorkItem, *core.ApplicationError) // legacy, nessun caller
+    List(ctx context.Context, taskName, status string, paging *page.Paging, sort page.SortRequest) ([]*WorkItem, *core.ApplicationError)
+    FindPending(ctx context.Context, taskName, destination, objectType string) ([]*WorkItem, *core.ApplicationError) // legacy, nessun caller
 }
 
 // store.IData — ciclo di vita task su task_logs
@@ -850,7 +890,7 @@ In gRPC, `limit` e pool size sono dimensioni ortogonali: lo scheduler può claim
 - **Un campo esportato senza tag NON è una dipendenza**: nelle struct passate a `Register`/`RegisterRunner` è un campo di lavorazione. Le dipendenze vanno taggate `inject:`/`from:`, le properties `prop:`.
 - **`core.In` non va usato nelle struct dei runner**: è un errore al wiring. Il marker lo porta il param object sintetizzato dalla libreria; accettarlo lascerebbe passare struct scritte per la vecchia semantica, con le dipendenze silenziosamente a nil. Resta valido nei param object dei costruttori scritti a mano passati a `core.Provide`/`runner.Provide`.
 - **`jobs[].properties` è infrastrutturale, `tasks[].properties` è applicativo**: mettere la config del runner nel blocco del job non la fa arrivare ai campi `prop:`.
-- **Le chiavi delle properties sono case-insensitive**: viper abbassa le chiavi della config, quindi `workType` nello YAML arriva come `worktype`. I getter di `core.Properties` e il binding `prop:` lo gestiscono; l'indicizzazione diretta della mappa no.
+- **Le chiavi delle properties sono case-insensitive**: viper abbassa le chiavi della config, quindi `task` nello YAML arriva come `worktype`. I getter di `core.Properties` e il binding `prop:` lo gestiscono; l'indicizzazione diretta della mappa no.
 - **`gocron.NewTask` deve usare una closure zero-arg** che cattura le dipendenze — non passare interface nil come `...any` o gocron va in panic in reflect.
 - **Tabelle**: `work_items` e `task_logs` (costanti `store.TableWorkItems`, `store.TableTaskLogs`).
 - **`singleton: true`** richiede Redis attivo — senza Redis il lock fallisce all'avvio.

@@ -62,15 +62,33 @@ func TestInstances_OnePerDeclaredTask(t *testing.T) {
 	}
 }
 
-// `name` omesso = uguale al `type`: unica scorciatoia ammessa, la voce va comunque dichiarata.
-func TestInstances_NameDefaultsToType(t *testing.T) {
-	var got []Config
-	Apply(func() { got = Instances("IMPORT") }, ActiveSet{
-		Tasks:      []Config{{Type: "IMPORT"}},
-		Referenced: []string{"IMPORT"},
+// Il `name` è obbligatorio e non ha fallback sul `type`: è la chiave referenziata da jobs:/workers:
+// e usata come WorkItem.Type, quindi una voce senza name non è raggiungibile da nessuno. Prima la
+// fallback c'era, e nascondeva la chiave di routing.
+func TestApply_PanicsOnTaskWithoutName(t *testing.T) {
+	msg := mustPanic(t, func() {
+		Apply(func() {}, ActiveSet{
+			Tasks:      []Config{{Name: "import-in", Type: "IMPORT"}, {Type: "NOTIFY"}},
+			Referenced: []string{"import-in"},
+		})
 	})
-	if len(got) != 1 || got[0].Name != "IMPORT" {
-		t.Fatalf("atteso Name = Type, ottenuto %+v", got)
+	if !strings.Contains(msg, "name") || !strings.Contains(msg, "notify") {
+		t.Fatalf("il panic deve chiedere il name e nominare la voce colpevole: %q", msg)
+	}
+	if strings.Contains(msg, "import-in") {
+		t.Fatalf("la voce con name non va segnalata: %q", msg)
+	}
+}
+
+// checkNames gira PRIMA di register(): l'errore arriva sulla config, non su un runner costruito
+// a metà.
+func TestApply_NameCheckRunsBeforeRegister(t *testing.T) {
+	registered := false
+	mustPanic(t, func() {
+		Apply(func() { registered = true }, ActiveSet{Tasks: []Config{{Type: "IMPORT"}}})
+	})
+	if registered {
+		t.Fatal("register() non deve girare se la sezione `tasks:` è incoerente")
 	}
 }
 
@@ -117,7 +135,7 @@ func TestInstances_SkipsUnreferenced(t *testing.T) {
 // Referenced vuota (config che non permette di dedurre i riferimenti) = nessun filtro.
 func TestInstances_NoFilterWhenNoReferences(t *testing.T) {
 	var got []Config
-	Apply(func() { got = Instances("IMPORT") }, ActiveSet{Tasks: []Config{{Type: "IMPORT"}}})
+	Apply(func() { got = Instances("IMPORT") }, ActiveSet{Tasks: []Config{{Name: "IMPORT", Type: "IMPORT"}}})
 	if len(got) != 1 {
 		t.Fatalf("senza riferimenti tutto è attivo: %v", names(got))
 	}

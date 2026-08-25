@@ -19,7 +19,7 @@ import (
 type workItemFilter struct {
 	Id          string   `col:"id"          op:"="  omitempty:"true"`
 	IdIn        []string `col:"id"          op:"IN" omitempty:"true"`
-	Type        string   `col:"type"        op:"="  omitempty:"true"`
+	TaskName    string   `col:"task_name"   op:"="  omitempty:"true"`
 	Status      string   `col:"status"      op:"="  omitempty:"true"`
 	Destination string   `col:"destination" op:"="  omitempty:"true"`
 	ObjectType  string   `col:"object_type" op:"="  omitempty:"true"`
@@ -61,9 +61,9 @@ func (d *workItemDataSQL) warnIfActiveIndexMissing(ctx context.Context) {
 	})
 }
 
-func (d *workItemDataSQL) FindPending(ctx context.Context, workType, destination, objectType string) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemDataSQL) FindPending(ctx context.Context, taskName, destination, objectType string) ([]*store.WorkItem, *core.ApplicationError) {
 	filter := workItemFilter{
-		Type:        workType,
+		TaskName:    taskName,
 		Status:      store.StatusPending,
 		Destination: destination,
 		ObjectType:  objectType,
@@ -72,18 +72,18 @@ func (d *workItemDataSQL) FindPending(ctx context.Context, workType, destination
 	return d.Sql.GetAllByFilterSorted[store.WorkItem](ctx, filter, sort)
 }
 
-// ClaimPending atomically selects up to limit PENDING items of workType,
+// ClaimPending atomically selects up to limit PENDING items of taskName,
 // marks them IN_PROGRESS with locked_at = now, and returns the full records.
 // Uses SELECT FOR UPDATE SKIP LOCKED — safe across multiple replicas.
-func (d *workItemDataSQL) ClaimPending(ctx context.Context, workType, destination, objectType string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemDataSQL) ClaimPending(ctx context.Context, taskName, destination, objectType string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
 	now := time.Now()
 	token := store.NewLockToken()
 	host := store.Hostname()
 	var items []*store.WorkItem
 	err := d.DB.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		q := `SELECT * FROM work_items WHERE type = ? AND status = ?
+		q := `SELECT * FROM work_items WHERE task_name = ? AND status = ?
 			  AND (next_run_at IS NULL OR next_run_at <= NOW())`
-		args := []any{workType, store.StatusPending}
+		args := []any{taskName, store.StatusPending}
 		if destination != "" {
 			q += ` AND destination = ?`
 			args = append(args, destination)
@@ -128,15 +128,15 @@ func (d *workItemDataSQL) ClaimPending(ctx context.Context, workType, destinatio
 // refreshing locked_at to now and incrementing retry. Returns the items for
 // immediate processing — no reset to PENDING, no waiting for the next tick.
 // Uses a CTE with FOR UPDATE SKIP LOCKED so it is safe across replicas.
-func (d *workItemDataSQL) RecoverOrphans(ctx context.Context, workType, destination, objectType string, maxAge time.Duration, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemDataSQL) RecoverOrphans(ctx context.Context, taskName, destination, objectType string, maxAge time.Duration, limit int) ([]*store.WorkItem, *core.ApplicationError) {
 	cutoff := time.Now().Add(-maxAge)
 	now := time.Now()
 
 	token := store.NewLockToken()
 	host := store.Hostname()
 
-	where := `type = ? AND status = ? AND locked_at < ?`
-	args := []any{workType, store.StatusInProgress, cutoff}
+	where := `task_name = ? AND status = ? AND locked_at < ?`
+	args := []any{taskName, store.StatusInProgress, cutoff}
 	if destination != "" {
 		where += ` AND destination = ?`
 		args = append(args, destination)
@@ -250,12 +250,12 @@ func (d *workItemDataSQL) GetById(ctx context.Context, id string) (*store.WorkIt
 	return d.Sql.GetById[store.WorkItem](ctx, id)
 }
 
-func (d *workItemDataSQL) HasActive(ctx context.Context, workType, objectId string) (bool, *core.ApplicationError) {
+func (d *workItemDataSQL) HasActive(ctx context.Context, taskName, objectId string) (bool, *core.ApplicationError) {
 	var count int
 	if err := d.DB.NewSelect().TableExpr(store.TableWorkItems).
 		ColumnExpr("COUNT(*)").
-		Where("type = ? AND object_id = ? AND status IN (?, ?)",
-			workType, objectId, store.StatusPending, store.StatusInProgress).
+		Where("task_name = ? AND object_id = ? AND status IN (?, ?)",
+			taskName, objectId, store.StatusPending, store.StatusInProgress).
 		Scan(ctx, &count); err != nil {
 		return false, core.TechnicalErrorWithError(err)
 	}
@@ -263,7 +263,7 @@ func (d *workItemDataSQL) HasActive(ctx context.Context, workType, objectId stri
 }
 
 // InsertIfNotActive inserts each item only if no active (PENDING or IN_PROGRESS) entry
-// exists for the same (type, object_id). Relies on the partial unique index
+// exists for the same (task_name, object_id). Relies on the partial unique index
 // uk_workitem_active — call EnsureIndexes at startup to create it.
 func (d *workItemDataSQL) InsertIfNotActive(ctx context.Context, items []*store.WorkItem) (int, *core.ApplicationError) {
 	if len(items) == 0 {
@@ -281,8 +281,8 @@ func (d *workItemDataSQL) InsertIfNotActive(ctx context.Context, items []*store.
 	return int(affected), nil
 }
 
-func (d *workItemDataSQL) List(ctx context.Context, workType, status string, paging *page.Paging, sort page.SortRequest) ([]*store.WorkItem, *core.ApplicationError) {
-	q := d.DB.NewSelect().TableExpr(store.TableWorkItems).Where("type = ?", workType)
+func (d *workItemDataSQL) List(ctx context.Context, taskName, status string, paging *page.Paging, sort page.SortRequest) ([]*store.WorkItem, *core.ApplicationError) {
+	q := d.DB.NewSelect().TableExpr(store.TableWorkItems).Where("task_name = ?", taskName)
 	if status != "" {
 		q = q.Where("status = ?", status)
 	}
@@ -303,7 +303,7 @@ func (d *workItemDataSQL) List(ctx context.Context, workType, status string, pag
 		orderExpr = expr
 	}
 
-	q = d.DB.NewSelect().TableExpr(store.TableWorkItems).Where("type = ?", workType).
+	q = d.DB.NewSelect().TableExpr(store.TableWorkItems).Where("task_name = ?", taskName).
 		OrderExpr(orderExpr)
 	if status != "" {
 		q = q.Where("status = ?", status)
@@ -324,7 +324,7 @@ func (d *workItemDataSQL) List(ctx context.Context, workType, status string, pag
 //   - le colonne di fencing lock_token/locked_by (ADD COLUMN IF NOT EXISTS) usate da ClaimPending/
 //     RecoverOrphans/Mark* per impedire che un worker stale finalizzi un item ri-claimato;
 //   - l'indice partiale unico uk_workitem_active, che impedisce l'inserimento concorrente di
-//     item attivi (PENDING o IN_PROGRESS) duplicati per lo stesso (type, object_id).
+//     item attivi (PENDING o IN_PROGRESS) duplicati per lo stesso (task_name, object_id).
 //
 // È Postgres-specifico (come il resto delle utility DDL del modulo). Su MySQL/SQLite le colonne
 // e l'indice vanno creati manualmente via migration.
@@ -337,7 +337,7 @@ func EnsureIndexes(ctx context.Context, db *bun.DB) error {
 	}
 	_, err := db.ExecContext(ctx, `
 		CREATE UNIQUE INDEX IF NOT EXISTS uk_workitem_active
-		ON work_items (type, object_id)
+		ON work_items (task_name, object_id)
 		WHERE status IN ('PENDING', 'IN_PROGRESS')
 	`)
 	return err

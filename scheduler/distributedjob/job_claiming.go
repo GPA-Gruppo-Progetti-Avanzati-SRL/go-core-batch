@@ -35,7 +35,7 @@ func jobRunWithClaiming(name string, dispatcher ITaskDispatcher, items store.IWo
 	if !p.Has("task") {
 		return fmt.Errorf("missing required property 'task'")
 	}
-	taskType := p.GetString("task", "")
+	taskName := p.GetString("task", "")
 	if !p.Has("limit") {
 		return fmt.Errorf("missing required property 'limit'")
 	}
@@ -56,17 +56,17 @@ func jobRunWithClaiming(name string, dispatcher ITaskDispatcher, items store.IWo
 	span.SetAttributes(
 		attribute.String("jobName", name),
 		attribute.String("jobId", jobId),
-		attribute.String("taskType", taskType),
+		attribute.String("taskName", taskName),
 	)
 	defer span.End()
 
 	// 0. Feed phase: populate workitems from external source (only when a feed is set)
 	if feed != nil {
-		runFeedPhase(spanCtx, feed, items, jobId, taskType, p, ilimit)
+		runFeedPhase(spanCtx, feed, items, jobId, taskName, p, ilimit)
 	}
 
 	// 1+2. Recupero orfani (IN_PROGRESS scaduti) + claim dei PENDING freschi — loop comune (store.ClaimBatch).
-	all, norph, nfresh, appErr := store.ClaimBatch(spanCtx, items, jobId, taskType, "", "", orphanTimeout, ilimit)
+	all, norph, nfresh, appErr := store.ClaimBatch(spanCtx, items, jobId, taskName, "", "", orphanTimeout, ilimit)
 	if appErr != nil {
 		span.RecordError(appErr)
 		span.SetStatus(codes.Error, "claim failed")
@@ -83,16 +83,16 @@ func jobRunWithClaiming(name string, dispatcher ITaskDispatcher, items store.IWo
 	// 3. Dispatch each item
 	for i, item := range all {
 		taskId := fmt.Sprintf("%s-task-%d", jobId, i+1)
-		if err := dispatcher.DispatchTask(spanCtx, jobId, taskId, item.Id, taskType); err != nil {
-			data.SetTaskAssignationKO(spanCtx, taskId, jobId, taskType, item.Id, err.Error())
-			scheduler.TaskAssignedKO.With(prometheus.Labels{"type": taskType}).Inc()
+		if err := dispatcher.DispatchTask(spanCtx, jobId, taskId, item.Id, taskName); err != nil {
+			data.SetTaskAssignationKO(spanCtx, taskId, jobId, taskName, item.Id, err.Error())
+			scheduler.TaskAssignedKO.With(prometheus.Labels{"type": taskName}).Inc()
 			errMsg := fmt.Sprintf("[%s] dispatch failed for item %s", jobId, item.Id)
 			log.Error().Msg(errMsg)
 			span.RecordError(err)
 			span.SetStatus(codes.Error, errMsg)
 		} else {
-			scheduler.TaskAssigned.With(prometheus.Labels{"type": taskType}).Inc()
-			data.SetTaskAssigned(spanCtx, taskId, jobId, taskType, item.Id)
+			scheduler.TaskAssigned.With(prometheus.Labels{"type": taskName}).Inc()
+			data.SetTaskAssigned(spanCtx, taskId, jobId, taskName, item.Id)
 			log.Info().Msgf("[%s] dispatched item %s", jobId, item.Id)
 		}
 	}

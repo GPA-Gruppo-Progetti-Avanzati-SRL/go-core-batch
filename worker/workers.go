@@ -17,7 +17,7 @@ import (
 // tipo di task), così i profili e i traceback restano raggruppabili.
 const (
 	LabelWorker   = "batch_worker"
-	LabelTaskType = "batch_task_type"
+	LabelTaskName = "batch_task_name"
 )
 
 type Workers[T any] struct {
@@ -118,7 +118,7 @@ func NewWorker[T any](k string, channel chan *Task, stopCh <-chan struct{}, osCh
 			log.Trace().Msgf("W - %s - %s - Green Signal Executing task in worker channel", ch.GetJobId(), ch.GetId())
 			// Il set di label è esplicito (worker + tipo di task): pprof.Do lo
 			// sostituisce a quello ereditato dalla goroutine del worker.
-			go pprof.Do(context.Background(), pprof.Labels(LabelWorker, k, LabelTaskType, ch.Type), func(context.Context) {
+			go pprof.Do(context.Background(), pprof.Labels(LabelWorker, k, LabelTaskName, ch.TaskName), func(context.Context) {
 				Run(semaphore, ch, services, batchData, items)
 			})
 		}
@@ -136,12 +136,12 @@ func Run[T any](semaphore chan struct{}, t *Task, services ITaskService[T], data
 	// Esegue il task. Il tipo sconosciuto è trattato come un errore normale: confluisce nello
 	// stesso punto di finalizzazione sotto (ApplyResult → MarkFailed), niente ramo separato.
 	var runErr error
-	if run, ok := services.GetTaskExecutions(t.Type); ok {
+	if run, ok := services.GetTaskExecutions(t.TaskName); ok {
 		// La RunTask (es. bridge grpchandler) carica il WorkItem e popola t.LockToken.
 		runErr = run(t, services.GetServices(), items)
 	} else {
-		log.Error().Msgf("W - %s - %s - Esecuzione non trovata per tipo: %s", t.GetJobId(), t.GetId(), t.Type)
-		runErr = fmt.Errorf("execution type not found: %s", t.Type)
+		log.Error().Msgf("W - %s - %s - Esecuzione non trovata per tipo: %s", t.GetJobId(), t.GetId(), t.TaskName)
+		runErr = fmt.Errorf("execution type not found: %s", t.TaskName)
 		// Nessun RunTask ha caricato l'item: recupero il fencing token per poterlo comunque
 		// finalizzare (MarkFailed) in modo fenced, evitando un orphan-loop sul tipo sconosciuto.
 		if items != nil {

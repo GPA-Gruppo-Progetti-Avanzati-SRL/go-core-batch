@@ -12,7 +12,7 @@ const TableTaskLogs = "task_logs"
 type TaskLog struct {
 	TaskID   string    `json:"taskId"            bson:"taskId"            bun:"task_id"`
 	JobID    string    `json:"jobId"             bson:"jobId"             bun:"job_id"`
-	Type     string    `json:"type"              bson:"type"              bun:"type"`
+	TaskName string    `json:"taskName"          bson:"taskName"          bun:"task_name"`
 	Stato    string    `json:"stato"             bson:"stato"             bun:"stato"`
 	Hostname string    `json:"hostname"          bson:"hostname"          bun:"hostname"`
 	Logdate  time.Time `json:"logdate"           bson:"logdate"           bun:"logdate"`

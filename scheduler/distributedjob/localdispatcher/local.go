@@ -20,8 +20,8 @@ import (
 	"go.uber.org/fx"
 )
 
-// LabelTaskType è l'etichetta pprof applicata alle goroutine delle task in-process.
-const LabelTaskType = "batch_task_type"
+// LabelTaskName è l'etichetta pprof applicata alle goroutine delle task in-process.
+const LabelTaskName = "batch_task_name"
 
 const (
 	// defaultMaxConcurrent limita quante task in-process girano contemporaneamente. Senza,
@@ -82,7 +82,7 @@ func New(lc fx.Lifecycle, mux *runner.MuxRunner, items store.IWorkItemStore, dat
 // SetTaskAssignationKO, l'item resta IN_PROGRESS e sarà recuperato), come il worker gRPC su
 // canale pieno. context.WithoutCancel + WithTimeout scollega la task dal context del tick
 // (cancellato appena il tick ritorna) dandole un proprio deadline.
-func (d *LocalDispatcher) DispatchTask(ctx context.Context, jobId, taskId, objectId, taskType string) error {
+func (d *LocalDispatcher) DispatchTask(ctx context.Context, jobId, taskId, objectId, taskName string) error {
 	if d.stopping.Load() {
 		return errors.New("localdispatcher: shutting down, dispatch rejected")
 	}
@@ -94,17 +94,17 @@ func (d *LocalDispatcher) DispatchTask(ctx context.Context, jobId, taskId, objec
 	taskCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), d.taskTimeout)
 	// Etichetta la goroutine col tipo di task (bassa cardinalità): da Go 1.27 la label
 	// compare anche nei traceback, oltre che nel profilo goroutineleak.
-	labeled := pprof.WithLabels(taskCtx, pprof.Labels(LabelTaskType, taskType))
+	labeled := pprof.WithLabels(taskCtx, pprof.Labels(LabelTaskName, taskName))
 	d.wg.Go(func() {
 		defer cancel()
 		defer func() { <-d.sem }()
 		pprof.SetGoroutineLabels(labeled)
-		d.data.SetTaskStart(taskCtx, taskId, jobId, taskType, objectId)
-		if err := d.mux.Run(taskCtx, objectId, taskType, d.items); err != nil {
-			d.data.SetTaskInError(taskCtx, taskId, jobId, taskType, objectId, err.Error())
+		d.data.SetTaskStart(taskCtx, taskId, jobId, taskName, objectId)
+		if err := d.mux.Run(taskCtx, objectId, taskName, d.items); err != nil {
+			d.data.SetTaskInError(taskCtx, taskId, jobId, taskName, objectId, err.Error())
 			return
 		}
-		d.data.SetTaskDone(taskCtx, taskId, jobId, taskType, objectId)
+		d.data.SetTaskDone(taskCtx, taskId, jobId, taskName, objectId)
 	})
 	return nil
 }

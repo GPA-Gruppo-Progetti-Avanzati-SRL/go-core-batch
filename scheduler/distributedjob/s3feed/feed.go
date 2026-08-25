@@ -37,7 +37,7 @@ func New(reg *s3client.Registry) *S3Feed {
 //   - path:      prefix for S3 listing
 //   - pattern:   glob pattern matched against the object key basename (e.g. "*.csv")
 //   - dest-path: destination prefix where files are moved after successful processing
-func (f *S3Feed) Feed(ctx context.Context, taskType string, props core.Properties, limit int) ([]*store.WorkItem, error) {
+func (f *S3Feed) Feed(ctx context.Context, taskName string, props core.Properties, limit int) ([]*store.WorkItem, error) {
 	serviceName := props.GetString("service", "")
 	prefix := props.GetString("path", "")
 	pattern := props.GetString("pattern", "")
@@ -71,7 +71,7 @@ func (f *S3Feed) Feed(ctx context.Context, taskType string, props core.Propertie
 		}
 		items = append(items, &store.WorkItem{
 			Id:       uuid.NewV7().String(),
-			Type:     taskType,
+			TaskName: taskName,
 			ObjectId: obj.Key,
 			Payload: S3Payload{
 				Service:  serviceName,

@@ -98,10 +98,10 @@ func WithWorkerModule(m ...ModuleFunc) Option {
 //
 // I riferimenti sono di due specie, perché solo una delle due è un typo se non trova nulla:
 //
-//   - ESPLICITI — la property `task` di un distributedjob, il `workType` di un simplejob, le
+//   - ESPLICITI — la property `task` di un distributedjob, il `taskName` di un simplejob, le
 //     `tasks` di un worker pool: nomi scritti a mano, che devono esistere in `tasks:`.
 //   - DEDOTTI — il job type, usato quando nessuna property nomina il task (un simplejob senza
-//     `workType` gira il task omonimo). Qui non si può pretendere l'esistenza: nello stesso campo
+//     `taskName` gira il task omonimo). Qui non si può pretendere l'esistenza: nello stesso campo
 //     stanno i job type del framework (NotificationKafka, DistribuiteTask, DistribuiteTaskByQuery,
 //     …), che non nominano alcun task. E batch non può nemmeno elencarli per escluderli, visto che
 //     non importa i package dei job (è il vincolo di modularità compile-time di ModuleFunc).
@@ -119,15 +119,12 @@ func ActiveSet(cfg *Config) task.ActiveSet {
 		if j.Disabled {
 			continue
 		}
-		named := j.Properties.GetString("task", "") // distributedjob
-		if named == "" {
-			named = j.Properties.GetString("workType", "") // simplejob
-		}
+		named := j.Properties.GetString("task", "") // distributedjob e simplejob
 		if named != "" {
 			add(&referenced, named)
 			continue
 		}
-		add(&implied, j.Type) // simplejob senza workType, oppure un job type del framework
+		add(&implied, j.Type) // simplejob senza taskName, oppure un job type del framework
 	}
 	for _, w := range cfg.WorkersConfig {
 		for _, t := range w.Tasks {
