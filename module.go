@@ -195,15 +195,20 @@ func Module(cfg *Config, register func(), opts ...Option) {
 		task.Apply(register, ActiveSet(cfg))
 	}
 
-	// Tutte le registrazioni del sottosistema batch confluiscono in un fx.Module("batch")
-	// per il namespacing del grafo/log fx. I provide NON sono privati: restano visibili
-	// all'app e i value group (batch_runners forniti dall'app a root, batch_jobs) aggregano
-	// come prima. Il mode-gating resta per-registrazione dentro ogni core.Provide/Supply.
-	core.Module("batch", func() {
-		// store.IData + store.IWorkItemStore: consumati sia lato scheduler che lato worker, quindi
-		// sempre attivi (nessun mode gate → chiamata senza modes).
-		o.store()
+	// store.IData + store.IWorkItemStore: consumati sia lato scheduler che lato worker, quindi
+	// sempre attivi (nessun mode gate → chiamata senza modes). Registrato a ROOT, fuori dal
+	// ModuleClosed: è il SEAM PUBBLICO di batch, l'unico simbolo del sottosistema che l'app
+	// consuma davvero (il data layer accoda WorkItem dal lato API). A root resta esportato per
+	// l'app e comunque visibile dall'interno del modulo, che ne è discendente.
+	o.store()
 
+	// Tutte le altre registrazioni del sottosistema confluiscono in un core.ModuleClosed("batch"):
+	// batch consuma i seam dell'app (gli ITaskRunner) e non le espone nulla in cambio, quindi
+	// config dei backend, locker, dispatcher, feed, query store, worker pool, producer Kafka
+	// interno e *Scheduler sono privati al modulo. I runner restano forniti a root: il value group
+	// batch_runners li porta dentro (root → discendenti), e batch_jobs aggrega come prima. Il
+	// mode-gating resta per-registrazione dentro ogni core.Provide/Supply.
+	core.ModuleClosed("batch", func() {
 		// Lock distribuito: backend iniettato (redis/mongo/sql), gate-ato sui scheduler modes.
 		// Il suo eventuale config è fornito dalla sua lib (es. redis.Module dell'app), non da batch.
 		o.locker(sched...)
