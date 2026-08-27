@@ -119,7 +119,7 @@ func (d *workItemDataSQL) ClaimPending(ctx context.Context, taskName, destinatio
 		return err
 	})
 	if err != nil {
-		return nil, core.TechnicalErrorWithError(err)
+		return nil, core.TechnicalError().WithCause(err)
 	}
 	return items, nil
 }
@@ -162,7 +162,7 @@ func (d *workItemDataSQL) RecoverOrphans(ctx context.Context, taskName, destinat
 		RETURNING *
 	`, args...).Scan(ctx, &items)
 	if err != nil {
-		return nil, core.TechnicalErrorWithError(err)
+		return nil, core.TechnicalError().WithCause(err)
 	}
 	return items, nil
 }
@@ -182,7 +182,7 @@ func (d *workItemDataSQL) MarkDone(ctx context.Context, ids []string, token stri
 		Where("id IN (?) AND status = ? AND lock_token = ?", bun.List(ids), store.StatusInProgress, token).
 		Exec(ctx)
 	if err != nil {
-		return core.TechnicalErrorWithError(err)
+		return core.TechnicalError().WithCause(err)
 	}
 	if affected, _ := res.RowsAffected(); int(affected) != len(ids) {
 		log.Debug().Msgf("MarkDone: %d/%d item marcati DONE (gli altri già finalizzati o token stale)",
@@ -202,7 +202,7 @@ func (d *workItemDataSQL) MarkFailed(ctx context.Context, id, token, reason stri
 		Where("id = ? AND status = ? AND lock_token = ?", id, store.StatusInProgress, token).
 		Exec(ctx)
 	if err != nil {
-		return core.TechnicalErrorWithError(err)
+		return core.TechnicalError().WithCause(err)
 	}
 	if affected, _ := res.RowsAffected(); affected == 0 {
 		log.Debug().Msgf("MarkFailed: item %q non aggiornato (già finalizzato o token stale)", id)
@@ -223,7 +223,7 @@ func (d *workItemDataSQL) MarkPending(ctx context.Context, id, token string, aft
 		Where("id = ? AND status = ? AND lock_token = ?", id, store.StatusInProgress, token).
 		Exec(ctx)
 	if err != nil {
-		return core.TechnicalErrorWithError(err)
+		return core.TechnicalError().WithCause(err)
 	}
 	if affected, _ := res.RowsAffected(); affected == 0 {
 		log.Debug().Msgf("MarkPending: item %q non aggiornato (già finalizzato o token stale)", id)
@@ -240,7 +240,7 @@ func (d *workItemDataSQL) DeleteIfPending(ctx context.Context, id string) (bool,
 		Where("id = ? AND status = ?", id, store.StatusPending).
 		Exec(ctx)
 	if err != nil {
-		return false, core.TechnicalErrorWithError(err)
+		return false, core.TechnicalError().WithCause(err)
 	}
 	affected, _ := res.RowsAffected()
 	return affected == 1, nil
@@ -257,7 +257,7 @@ func (d *workItemDataSQL) HasActive(ctx context.Context, taskName, objectId stri
 		Where("task_name = ? AND object_id = ? AND status IN (?, ?)",
 			taskName, objectId, store.StatusPending, store.StatusInProgress).
 		Scan(ctx, &count); err != nil {
-		return false, core.TechnicalErrorWithError(err)
+		return false, core.TechnicalError().WithCause(err)
 	}
 	return count > 0, nil
 }
@@ -275,7 +275,7 @@ func (d *workItemDataSQL) InsertIfNotActive(ctx context.Context, items []*store.
 		On("CONFLICT DO NOTHING").
 		Exec(ctx)
 	if err != nil {
-		return 0, core.TechnicalErrorWithError(err)
+		return 0, core.TechnicalError().WithCause(err)
 	}
 	affected, _ := res.RowsAffected()
 	return int(affected), nil
@@ -289,7 +289,7 @@ func (d *workItemDataSQL) List(ctx context.Context, taskName, status string, pag
 
 	var total int64
 	if err := q.ColumnExpr("COUNT(*)").Scan(ctx, &total); err != nil {
-		return nil, core.TechnicalErrorWithError(err)
+		return nil, core.TechnicalError().WithCause(err)
 	}
 	paging.SetTotalItems(total)
 
@@ -314,7 +314,7 @@ func (d *workItemDataSQL) List(ctx context.Context, taskName, status string, pag
 
 	var items []*store.WorkItem
 	if err := q.Scan(ctx, &items); err != nil {
-		return nil, core.TechnicalErrorWithError(err)
+		return nil, core.TechnicalError().WithCause(err)
 	}
 	return items, nil
 }

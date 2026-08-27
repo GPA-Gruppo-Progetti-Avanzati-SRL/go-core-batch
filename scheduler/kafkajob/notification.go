@@ -37,15 +37,15 @@ func notificationJobRun(name string, producer *kafkaproducer.ProducerService, it
 	jobId := jobID(name)
 
 	if !p.Has("destination") {
-		return core.TechnicalErrorWithCodeAndMessage("PROPERTIES", "destination not found in properties")
+		return core.TechnicalError().WithCode("PROPERTIES").WithMessage("destination not found in properties")
 	}
 	destination := p.GetString("destination", "")
 	if !p.Has("object") {
-		return core.TechnicalErrorWithCodeAndMessage("PROPERTIES", "object not found in properties")
+		return core.TechnicalError().WithCode("PROPERTIES").WithMessage("object not found in properties")
 	}
 	object := p.GetString("object", "")
 	if !p.Has("topic") {
-		return core.TechnicalErrorWithCodeAndMessage("PROPERTIES", "topic not found in properties")
+		return core.TechnicalError().WithCode("PROPERTIES").WithMessage("topic not found in properties")
 	}
 	topic := p.GetString("topic", "")
 

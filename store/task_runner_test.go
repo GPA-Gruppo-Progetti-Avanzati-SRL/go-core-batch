@@ -80,17 +80,17 @@ func TestApplyResult(t *testing.T) {
 		// sull'ApplicationError e né errors.Is né errors.AsType la attraversavano.
 		{
 			name:    "ApplicationError che avvolge RetryError → pending",
-			runErr:  core.TechnicalErrorWithError(RetryWithCause(90*time.Second, transient)),
+			runErr:  core.TechnicalError().WithCause(RetryWithCause(90*time.Second, transient)),
 			outcome: OutcomeRetry, op: "pending", after: 90 * time.Second,
 		},
 		{
 			name:    "ApplicationError che avvolge ErrHandled → nessun Mark*",
-			runErr:  core.TechnicalErrorWithError(ErrHandled),
+			runErr:  core.TechnicalError().WithCause(ErrHandled),
 			outcome: OutcomeHandled, op: "",
 		},
 		{
 			name:    "ApplicationError con WithCause(RetryError) → pending",
-			runErr:  core.TechnicalErrorWithCodeAndMessage("SINK-KO", "sink non raggiungibile").WithCause(Retry(0)),
+			runErr:  core.TechnicalError().WithCode("SINK-KO").WithMessage("sink non raggiungibile").WithCause(Retry(0)),
 			outcome: OutcomeRetry, op: "pending", after: 0,
 		},
 
@@ -99,12 +99,12 @@ func TestApplyResult(t *testing.T) {
 		// la classificazione.
 		{
 			name:    "ApplicationError con sola causa sintetica → failed",
-			runErr:  core.TechnicalErrorWithCodeAndMessage("TECH500", "boom"),
+			runErr:  core.TechnicalError().WithCode("TECH500").WithMessage("boom"),
 			outcome: OutcomeFailed, op: "failed",
 		},
 		{
 			name:    "ApplicationError che avvolge un errore estraneo → failed",
-			runErr:  core.TechnicalErrorWithError(transient),
+			runErr:  core.TechnicalError().WithCause(transient),
 			outcome: OutcomeFailed, op: "failed",
 		},
 	}

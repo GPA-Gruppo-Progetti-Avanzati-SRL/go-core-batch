@@ -25,13 +25,12 @@ func validateIdent(kind, s string, allowDot bool) *core.ApplicationError {
 	if allowDot {
 		parts = strings.Split(s, ".")
 		if len(parts) > 2 {
-			return core.TechnicalErrorWithCodeAndMessage("QRY-IDENT", fmt.Sprintf("%s %q non valido", kind, s))
+			return core.TechnicalError().WithCode("QRY-IDENT").WithMessage(fmt.Sprintf("%s %q non valido", kind, s))
 		}
 	}
 	for _, p := range parts {
 		if !identRe.MatchString(p) {
-			return core.TechnicalErrorWithCodeAndMessage("QRY-IDENT",
-				fmt.Sprintf("%s %q non valido: atteso un identificatore SQL", kind, s))
+			return core.TechnicalError().WithCode("QRY-IDENT").WithMessage(fmt.Sprintf("%s %q non valido: atteso un identificatore SQL", kind, s))
 		}
 	}
 	return nil
@@ -82,7 +81,7 @@ func (q *queryDataSQL) GetIdsSorted(ctx context.Context, table, filter, sort str
 	}
 	var ids []string
 	if err := query.Scan(ctx, &ids); err != nil {
-		return nil, core.TechnicalErrorWithError(err)
+		return nil, core.TechnicalError().WithCause(err)
 	}
 	return ids, nil
 }

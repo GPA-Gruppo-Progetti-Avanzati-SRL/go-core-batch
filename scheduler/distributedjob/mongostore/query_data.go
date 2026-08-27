@@ -58,7 +58,7 @@ func (q *queryData) GetIdsSorted(ctx context.Context, collection, filter, sort s
 	var query bson.M
 	if filter != "" {
 		if err := json.Unmarshal([]byte(filter), &query); err != nil {
-			return nil, core.TechnicalErrorWithError(err)
+			return nil, core.TechnicalError().WithCause(err)
 		}
 		query = convertDates(query)
 	} else {
@@ -85,7 +85,7 @@ func (q *queryData) GetIdsSorted(ctx context.Context, collection, filter, sort s
 
 	cursor, err := coll.Find(ctx, query, opts)
 	if err != nil {
-		return nil, core.TechnicalErrorWithError(err)
+		return nil, core.TechnicalError().WithCause(err)
 	}
 	defer cursor.Close(ctx)
 
