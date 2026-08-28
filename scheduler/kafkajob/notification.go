@@ -95,13 +95,13 @@ func notificationJobRun(name string, prod producer.IProducer, items store.IWorkI
 	if errProduce := prod.ProduceTo(spanCtx, topic, recs); errProduce != nil {
 		span.RecordError(errProduce)
 		log.Error().Err(errProduce).Msgf("[%s] Kafka produce failed — resetting %d items to PENDING", jobId, len(valid))
-		// Transient Kafka failure — reset claimed items so they are retried next tick.
-		var after time.Duration
-		if retryErr, ok := errors.AsType[*store.RetryError](errProduce); ok {
-			after = retryErr.After
-		}
+		// Errore transiente: gli item claimati tornano PENDING e il tick successivo li riprende.
+		// Il delay è 0 — quando riprovare lo decide il cron del job, non il producer: l'errore che
+		// arriva qui è un *core.ApplicationError di go-core-kafka, che non conosce (né potrebbe
+		// conoscere) store.RetryError. Prima c'era un ramo che ne estraeva il delay: era morto già
+		// col producer interno, ed è impossibile per costruzione con un producer di un'altra libreria.
 		for _, item := range valid {
-			items.MarkPending(spanCtx, item.Id, item.LockToken, after)
+			items.MarkPending(spanCtx, item.Id, item.LockToken, 0)
 		}
 		return errProduce
 	}
