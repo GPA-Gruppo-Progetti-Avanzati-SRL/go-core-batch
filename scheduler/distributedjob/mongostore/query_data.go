@@ -5,6 +5,7 @@ package mongostore
 import (
 	"context"
 	"encoding/json"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
 	"strings"
 	"time"
 
@@ -58,7 +59,7 @@ func (q *queryData) GetIdsSorted(ctx context.Context, collection, filter, sort s
 	var query bson.M
 	if filter != "" {
 		if err := json.Unmarshal([]byte(filter), &query); err != nil {
-			return nil, core.TechnicalError().WithCause(err)
+			return nil, errs.Tech(errs.CodeQuery).WithCause(err)
 		}
 		query = convertDates(query)
 	} else {
@@ -85,7 +86,7 @@ func (q *queryData) GetIdsSorted(ctx context.Context, collection, filter, sort s
 
 	cursor, err := coll.Find(ctx, query, opts)
 	if err != nil {
-		return nil, core.TechnicalError().WithCause(err)
+		return nil, errs.Tech(errs.CodeQueryCur).WithCause(err)
 	}
 	defer cursor.Close(ctx)
 

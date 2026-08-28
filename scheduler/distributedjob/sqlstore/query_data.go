@@ -5,6 +5,7 @@ package sqlstore
 import (
 	"context"
 	"fmt"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
 	"regexp"
 	"strings"
 
@@ -25,12 +26,12 @@ func validateIdent(kind, s string, allowDot bool) *core.ApplicationError {
 	if allowDot {
 		parts = strings.Split(s, ".")
 		if len(parts) > 2 {
-			return core.TechnicalError().WithCode("QRY-IDENT").WithMessage(fmt.Sprintf("%s %q non valido", kind, s))
+			return errs.Tech(errs.CodeQueryIdent).WithMessage(fmt.Sprintf("%s %q non valido", kind, s))
 		}
 	}
 	for _, p := range parts {
 		if !identRe.MatchString(p) {
-			return core.TechnicalError().WithCode("QRY-IDENT").WithMessage(fmt.Sprintf("%s %q non valido: atteso un identificatore SQL", kind, s))
+			return errs.Tech(errs.CodeQueryIdent).WithMessage(fmt.Sprintf("%s %q non valido: atteso un identificatore SQL", kind, s))
 		}
 	}
 	return nil
@@ -81,7 +82,7 @@ func (q *queryDataSQL) GetIdsSorted(ctx context.Context, table, filter, sort str
 	}
 	var ids []string
 	if err := query.Scan(ctx, &ids); err != nil {
-		return nil, core.TechnicalError().WithCause(err)
+		return nil, errs.Tech(errs.CodeQuery).WithCause(err)
 	}
 	return ids, nil
 }

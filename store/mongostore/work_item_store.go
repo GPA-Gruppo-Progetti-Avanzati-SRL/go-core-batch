@@ -3,6 +3,7 @@ package mongostore
 import (
 	"context"
 	"errors"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
 	"sync"
 	"time"
 
@@ -117,13 +118,13 @@ func (d *workItemData) ClaimPending(ctx context.Context, taskName, destination, 
 			SetLimit(int64(limit)),
 	)
 	if err != nil {
-		return nil, core.TechnicalError().WithCause(err)
+		return nil, errs.Tech(errs.CodeClaim).WithCause(err)
 	}
 	defer cursor.Close(ctx)
 
 	var candidates []*store.WorkItem
 	if err := cursor.All(ctx, &candidates); err != nil {
-		return nil, core.TechnicalError().WithCause(err)
+		return nil, errs.Tech(errs.CodeClaim).WithCause(err)
 	}
 
 	token := store.NewLockToken()
@@ -174,13 +175,13 @@ func (d *workItemData) RecoverOrphans(ctx context.Context, taskName, destination
 		options.Find().SetSort(bson.D{{Key: "lockedAt", Value: 1}}).SetLimit(int64(limit)),
 	)
 	if err != nil {
-		return nil, core.TechnicalError().WithCause(err)
+		return nil, errs.Tech(errs.CodeRecover).WithCause(err)
 	}
 	defer cursor.Close(ctx)
 
 	var candidates []*store.WorkItem
 	if err := cursor.All(ctx, &candidates); err != nil {
-		return nil, core.TechnicalError().WithCause(err)
+		return nil, errs.Tech(errs.CodeRecover).WithCause(err)
 	}
 
 	token := store.NewLockToken()
@@ -195,7 +196,7 @@ func (d *workItemData) RecoverOrphans(ctx context.Context, taskName, destination
 			},
 		)
 		if err != nil {
-			return claimed, core.TechnicalError().WithCause(err)
+			return claimed, errs.Tech(errs.CodeRecover).WithCause(err)
 		}
 		if res.ModifiedCount == 1 {
 			item.LockedAt = &now
@@ -230,7 +231,7 @@ func (d *workItemData) MarkDone(ctx context.Context, ids []string, token string)
 		bson.M{"$set": bson.M{"status": store.StatusDone, "updateTime": now, "lockedAt": nil}},
 	)
 	if err != nil {
-		return core.TechnicalError().WithCause(err)
+		return errs.Tech(errs.CodeMarkDone).WithCause(err)
 	}
 	if int(res.ModifiedCount) != len(ids) {
 		log.Debug().Msgf("MarkDone: %d/%d item marcati DONE (gli altri già finalizzati o token stale)",
@@ -247,7 +248,7 @@ func (d *workItemData) MarkFailed(ctx context.Context, id, token, reason string)
 		bson.M{"$set": bson.M{"status": store.StatusFailed, "error": reason, "updateTime": now, "lockedAt": nil}},
 	)
 	if err != nil {
-		return core.TechnicalError().WithCause(err)
+		return errs.Tech(errs.CodeMarkFailed).WithCause(err)
 	}
 	if res.ModifiedCount == 0 {
 		log.Debug().Msgf("MarkFailed: item %q non aggiornato (già finalizzato o token stale)", id)
@@ -267,7 +268,7 @@ func (d *workItemData) MarkPending(ctx context.Context, id, token string, after 
 		},
 	)
 	if err != nil {
-		return core.TechnicalError().WithCause(err)
+		return errs.Tech(errs.CodeMarkPending).WithCause(err)
 	}
 	if res.ModifiedCount == 0 {
 		log.Debug().Msgf("MarkPending: item %q non aggiornato (già finalizzato o token stale)", id)
@@ -287,7 +288,7 @@ func (d *workItemData) DeleteIfPending(ctx context.Context, id string) (bool, *c
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	res, err := coll.DeleteOne(ctx, bson.M{"_id": id, "status": store.StatusPending})
 	if err != nil {
-		return false, core.TechnicalError().WithCause(err)
+		return false, errs.Tech(errs.CodeDelete).WithCause(err)
 	}
 	return res.DeletedCount == 1, nil
 }
@@ -297,9 +298,9 @@ func (d *workItemData) GetById(ctx context.Context, id string) (*store.WorkItem,
 	var item store.WorkItem
 	if err := coll.FindOne(ctx, bson.M{"_id": id}).Decode(&item); err != nil {
 		if errors.Is(err, mgodriver.ErrNoDocuments) {
-			return nil, core.NotFoundError().WithCause(err)
+			return nil, errs.NotFound().WithCause(err)
 		}
-		return nil, core.TechnicalError().WithCause(err)
+		return nil, errs.Tech(errs.CodeGet).WithCause(err)
 	}
 	return &item, nil
 }
@@ -312,7 +313,7 @@ func (d *workItemData) HasActive(ctx context.Context, taskName, objectId string)
 		"status":   bson.M{"$in": []string{store.StatusPending, store.StatusInProgress}},
 	})
 	if err != nil {
-		return false, core.TechnicalError().WithCause(err)
+		return false, errs.Tech(errs.CodeHasActive).WithCause(err)
 	}
 	return count > 0, nil
 }
@@ -332,7 +333,7 @@ func (d *workItemData) InsertIfNotActive(ctx context.Context, items []*store.Wor
 			if mgodriver.IsDuplicateKeyError(err) {
 				continue
 			}
-			return inserted, core.TechnicalError().WithCause(err)
+			return inserted, errs.Tech(errs.CodeInsert).WithCause(err)
 		}
 		inserted++
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
 	"time"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/kafkaproducer"
@@ -12,7 +13,6 @@ import (
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	gocron "github.com/go-co-op/gocron/v2"
 	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -37,15 +37,15 @@ func notificationJobRun(name string, producer *kafkaproducer.ProducerService, it
 	jobId := jobID(name)
 
 	if !p.Has("destination") {
-		return core.TechnicalError().WithCode("PROPERTIES").WithMessage("destination not found in properties")
+		return errs.Tech(errs.CodeJobProperties).WithMessage("destination not found in properties")
 	}
 	destination := p.GetString("destination", "")
 	if !p.Has("object") {
-		return core.TechnicalError().WithCode("PROPERTIES").WithMessage("object not found in properties")
+		return errs.Tech(errs.CodeJobProperties).WithMessage("object not found in properties")
 	}
 	object := p.GetString("object", "")
 	if !p.Has("topic") {
-		return core.TechnicalError().WithCode("PROPERTIES").WithMessage("topic not found in properties")
+		return errs.Tech(errs.CodeJobProperties).WithMessage("topic not found in properties")
 	}
 	topic := p.GetString("topic", "")
 

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
 	"sync"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
@@ -109,7 +110,7 @@ func (ks *ProducerService) ProduceMessages(ctx context.Context, messages []*kafk
 	defer ks.mu.Unlock()
 	if ks.client == nil {
 		if errProd := ks.initProducer(ctx); errProd != nil {
-			return core.TechnicalError().WithCause(errProd)
+			return errs.Tech(errs.CodeKafkaProducer).WithCause(errProd)
 		}
 	}
 
@@ -118,7 +119,7 @@ func (ks *ProducerService) ProduceMessages(ctx context.Context, messages []*kafk
 		log.Error().Err(errBegin).Msg("Failed to begin transaction ... Destroying Producer")
 		ks.client.Close()
 		ks.client = nil
-		return core.TechnicalError().WithCause(errBegin)
+		return errs.Tech(errs.CodeKafkaTx).WithCause(errBegin)
 	}
 
 	transactionInProgress := true
@@ -142,14 +143,14 @@ func (ks *ProducerService) ProduceMessages(ctx context.Context, messages []*kafk
 		if errSerKey != nil {
 			log.Error().Err(errSerKey).Msgf("Impossibile serializzare la chiave : %s", errSerKey.Error())
 			ks.abort(ctx)
-			return core.TechnicalError().WithCause(errSerKey)
+			return errs.Tech(errs.CodeKafkaSerialize).WithCause(errSerKey)
 		}
 
 		value, errSerMessage := json.Marshal(message.MessageValue)
 		if errSerMessage != nil {
 			log.Error().Err(errSerMessage).Msgf("Impossibile serializzare il messaggio : %s", errSerMessage.Error())
 			ks.abort(ctx)
-			return core.TechnicalError().WithCause(errSerMessage)
+			return errs.Tech(errs.CodeKafkaSerialize).WithCause(errSerMessage)
 		}
 
 		var kafkaHeaders []kgo.RecordHeader
@@ -187,7 +188,7 @@ func (ks *ProducerService) ProduceMessages(ctx context.Context, messages []*kafk
 	if produceErr != nil {
 		log.Error().Err(produceErr).Msg("Error during produce")
 		ks.abort(ctx)
-		return core.TechnicalError().WithCause(produceErr)
+		return errs.Tech(errs.CodeKafkaProduce).WithCause(produceErr)
 	}
 
 	// In franz-go non serve il Flush esplicito se usiamo le transazioni,
@@ -200,7 +201,7 @@ func (ks *ProducerService) ProduceMessages(ctx context.Context, messages []*kafk
 		if errors.Is(errCommit, kgo.ErrClientClosed) {
 			ks.client = nil
 		}
-		return core.TechnicalError().WithCause(errCommit)
+		return errs.Tech(errs.CodeKafkaTx).WithCause(errCommit)
 	}
 
 	transactionInProgress = false
@@ -221,7 +222,7 @@ func (ks *ProducerService) initProducer(ctx context.Context) error {
 	var errProd error
 	if ks.client, errProd = newKafkaClient(ks.producerConfig); errProd != nil {
 		log.Error().Err(errProd).Msg("Failed to create Kafka producer")
-		return core.TechnicalError().WithCause(errProd)
+		return errs.Tech(errs.CodeKafkaProducer).WithCause(errProd)
 	}
 	return nil
 }
