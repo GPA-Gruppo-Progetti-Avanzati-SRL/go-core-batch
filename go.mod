@@ -3,9 +3,9 @@ module github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch
 go 1.27
 
 require (
-	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app v0.0.29-0.20260824144515-bd6d6adf6c6d
-	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo v0.0.20-0.20260821090308-d0dbbc8fd605
-	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-sql v0.0.2-0.20260821090310-1471aa429e8a
+	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app v0.0.29-0.20260827154351-3ac7b7879800
+	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo v0.0.20-0.20260827145741-420ffa448640
+	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-sql v0.0.2-0.20260827105248-f21e814bdeb7
 	github.com/aws/aws-sdk-go-v2 v1.42.1
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.26
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.104.2
@@ -28,7 +28,7 @@ require (
 require (
 	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/tpm-common v0.1.95 // indirect
 	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/tpm-mongo-common v1.0.24-0.20260806095729-fb30bfd3074b // indirect
-	github.com/KimMachineGun/automemlimit v0.7.5 // indirect
+	github.com/KimMachineGun/automemlimit v1.0.0 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.14 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.30 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.30 // indirect
@@ -48,7 +48,7 @@ require (
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.30.3 // indirect
-	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
+	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/ipfans/fxlogger v0.2.0 // indirect
