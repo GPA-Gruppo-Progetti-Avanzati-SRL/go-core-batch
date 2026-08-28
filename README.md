@@ -21,7 +21,6 @@ Raccoglie i sotto-config di tutti i pezzi cablati da `Module`. L'app tipicamente
 | `JobsConfig` | `[]scheduler.Config` | `jobs` |
 | `TasksConfig` | `[]task.Config` (`name`, `type`, `properties`) | `tasks` |
 | `WorkersConfig` | `[]worker.Config` | `workers` |
-| `KafkaConfig` | `kafka.Config` | `kafka` |
 
 > **Il lock distribuito non è più qui.** Il backend è iniettato con `batch.WithLocker` e il suo
 > eventuale config (es. `redis.Config` di go-core-redis) è gestito dalla sua libreria: `batch` non
@@ -34,9 +33,9 @@ Raccoglie i sotto-config di tutti i pezzi cablati da `Module`. L'app tipicamente
 
 ### `batch.Module(cfg *batch.Config, register func(), opts ...batch.Option)`
 
-Wira ogni componente **esplicitamente** e lo gate **solo** tramite i suoi modes: è il `core.Mode` a runtime a decidere cosa viene effettivamente costruito, non un `if` sul valore del config. I backend (store, dispatcher, feed, job Kafka, worker pool) **non sono selezionati da enum ma iniettati dall'app come `batch.ModuleFunc` per riferimento diretto** (niente closure). Così il package `batch` non importa nessun package di backend — solo i loro `Config`, struct leggere — e ogni app trascina in `go.mod` **solo** le dipendenze di ciò che passa: un'app mongo-only non si porta dietro `uptrace/bun`, una senza Kafka non si porta dietro `franz-go`.
+Wira ogni componente **esplicitamente** e lo gate **solo** tramite i suoi modes: è il `core.Mode` a runtime a decidere cosa viene effettivamente costruito, non un `if` sul valore del config. I backend (store, dispatcher, feed, job Kafka, worker pool) **non sono selezionati da enum ma iniettati dall'app come `batch.ModuleFunc` per riferimento diretto** (niente closure). Così il package `batch` non importa nessun package di backend — solo i loro `Config`, struct leggere — e ogni app trascina in `go.mod` **solo** le dipendenze di ciò che passa: un'app mongo-only non si porta dietro `uptrace/bun`; una senza Kafka non si porta dietro **nessun client Kafka** — `kafkajob` nomina il solo seam `producer.IProducer` di go-core-kafka, e quale client giri lo decide l'import dell'app (`driver/franz` o `driver/confluent`).
 
-`ModuleFunc` è la firma comune di tutti i `Module()` componibili — `func(modes ...string)`, ormai **modes-only**: il config non è più un parametro ma viene iniettato da fx, ed è `batch.Module` a fornirlo con `core.Supply` della Config unificata. I config dei backend (grpc client/server, kafka, s3, worker) sono suppliti **solo se valorizzati**: se un componente attivo richiede un config non impostato, fx fallisce subito con un chiaro "missing dependency" invece di far girare il backend con valori vuoti. Anche il **lock distribuito** è ormai un backend iniettato (`WithLocker`) e non più un'eccezione hard-dep: lo Scheduler dipende dal `lock.Locker` neutro di go-core-app, quindi `batch` non importa Redis e un'app mongo-only o sql-only non lo deploya affatto.
+`ModuleFunc` è la firma comune di tutti i `Module()` componibili — `func(modes ...string)`, ormai **modes-only**: il config non è più un parametro ma viene iniettato da fx, ed è `batch.Module` a fornirlo con `core.Supply` della Config unificata. I config dei backend (grpc client/server, s3, worker) sono suppliti **solo se valorizzati**: se un componente attivo richiede un config non impostato, fx fallisce subito con un chiaro "missing dependency" invece di far girare il backend con valori vuoti. Anche il **lock distribuito** è ormai un backend iniettato (`WithLocker`) e non più un'eccezione hard-dep: lo Scheduler dipende dal `lock.Locker` neutro di go-core-app, quindi `batch` non importa Redis e un'app mongo-only o sql-only non lo deploya affatto.
 
 **Opzioni:**
 
@@ -87,7 +86,7 @@ batch.Module(&cfg.BatchConfig, Register,
     batch.WithModule(                            // gate scheduler modes, riferimento diretto
         grpcdispatcher.Module,                   // dispatch via gRPC
         djmongo.Module, queryfeed.Module,        // feed by-query (query store + feed)
-        kafkajob.Module,                         // job NotificationKafka
+        kafkajob.Module,                         // job NotificationKafka (il producer lo wira l'app)
     ),
     batch.WithWorkerModule(grpchandler.Module),  // gate worker modes
 )
@@ -106,6 +105,36 @@ batch.Module(&cfg.BatchConfig, Register,
     ),
 )
 ```
+
+### Notifiche Kafka — il producer lo wira l'app
+
+Il job `NotificationKafka` (`kafkajob.Module`) produce col producer di **go-core-kafka**, che l'app
+wira dalla composition root insieme al driver che ha scelto:
+
+```go
+corekafka.ProducerModule(&svc.Kafka,
+    corekafka.WithDriver(franzdriver.Driver),      // puro Go; o driver/confluent per librdkafka
+    corekafka.WithModes(engine.Scheduler))
+
+batch.Module(&cfg.BatchConfig, Register,
+    batch.WithStore(storemongo.Module),
+    batch.WithLocker(mongolocker.Module),
+    batch.WithModule(kafkajob.Module),
+)
+```
+
+La configurazione Kafka è quella di go-core-kafka — sezione `server`, con `producer` dentro — e non
+una seconda dentro il batch: `batch.Config` **non ha più il campo `kafka`**. Se il producer non è
+wirato, fx fallisce all'avvio con un `missing type`: fail-fast, non un nil silenzioso.
+
+La **transazionalità** è una scelta di quella config: con `server.producer.transactional-id`
+valorizzato (univoco per replica, es. `notifiche-${HOSTNAME}`) i messaggi di un tick diventano
+visibili ai consumer `read_committed` tutti o nessuno; senza, il producer è idempotente e compare un
+Warn al boot. In entrambi i casi il contratto del framework resta **at-least-once**: `MarkDone` non
+è nella transazione, quindi un suo fallimento dopo il commit fa ripubblicare al tick successivo.
+
+Il producer **non è iniettabile in un task runner**: per mandare una notifica si crea un WorkItem
+`NotificationKafka` (outbox), che il job drena — non si pubblica inline.
 
 > I singoli `*.Module()` (`localdispatcher`, `grpcdispatcher`, `queryfeed`, `s3feed`, `kafkajob`, `mongostore`/`sqlstore`, `grpchandler`, `scheduler`, …) **restano validi** per il wiring manuale: sono il livello sotto l'orchestratore, documentato nelle sezioni seguenti. Essendo modes-only, lì il config va fornito prima con `core.Supply` (es. `core.Supply(&cfg.Client); grpcdispatcher.Module()`). `batch.Module` non fa che comporli in un'unica chiamata gate-ata per mode.
 
@@ -222,14 +251,14 @@ Tre famiglie di job, ciascuna un modulo Fx self-contained che registra la propri
 |---|---|---|
 | **distributedjob** | `DistribuiteTask` · `DistribuiteTaskByQuery` · `DistribuiteTaskByS3File` — `localdispatcher`/`grpcdispatcher.Module()` + `runner.Register[T]` | **Molti** workitem da distribuire: claiming atomico anti-doppione, recovery orfani, `task_logs`, scaling orizzontale gRPC |
 | **simplejob** | tipo libero — `simplejob.Module()` + `simplejob.RegisterRunner[T]` | **Lavorazioni singole/poche** in-process (es. `singleton:true`): `RecoverOrphans`→`ClaimPending`→loop→`Run(item)`. Niente gRPC/task_logs |
-| **kafkajob** | tipo libero — invia i WorkItem su un topic Kafka | Notifiche/outbox verso Kafka |
+| **kafkajob** | tipo libero — invia i WorkItem su un topic Kafka col producer di go-core-kafka | Notifiche/outbox verso Kafka |
 
 ```mermaid
 flowchart LR
     Q{Natura della\nlavorazione?}
     Q -- "molti workitem,\nworker pool / gRPC" --> DJ["distributedjob\nClaimPending + RecoverOrphans\n+ task_logs"]
     Q -- "singola / poche,\nin-process" --> SJ["simplejob\nClaimPending + RecoverOrphans\nin-process, retry + timeout"]
-    Q -- "outbox verso\nKafka" --> KJ["kafkajob\nProducerService"]
+    Q -- "outbox verso\nKafka" --> KJ["kafkajob\ncorekafka.IProducer"]
 ```
 
 ---
@@ -345,7 +374,7 @@ go-core-batch/
 │   │   └── mongostore/           # IQueryStore su MongoDB
 │   │
 │   ├── simplejob/                # Job in-process con claiming (no gRPC/task_logs) — retry differito + timeout configurabile
-│   └── kafkajob/                 # Job che invia WorkItem su Kafka
+│   └── kafkajob/                 # Job che invia WorkItem su Kafka (producer di go-core-kafka)
 │
 ├── s3/                           # Client S3 multi-service (aws-sdk-go-v2)
 │   ├── config.go                 # ServiceConfig, Config
@@ -364,7 +393,7 @@ go-core-batch/
 ├── worker/                       # Worker pool per task distribuiti via gRPC
 │   └── grpchandler/              # Router gRPC → worker pool + Module() + Provide()
 ├── grpc/                         # Client/Server gRPC
-└── kafka/                        # ProducerService (franz-go)
+└── kafka/                        # kafka.Message: la forma del payload di un WorkItem NotificationKafka
 ```
 
 ---

@@ -31,11 +31,6 @@ const (
 	CodeQueryCur   = "BATCH-QUERY-CUR"   // lettura del cursore del feed fallita
 	CodeQueryIdent = "BATCH-QUERY-IDENT" // identificatore SQL non valido nella query di feed
 
-	CodeKafkaProducer  = "BATCH-KAFKA-PRODUCER"  // creazione del producer fallita
-	CodeKafkaTx        = "BATCH-KAFKA-TX"        // begin/commit della transazione fallita
-	CodeKafkaSerialize = "BATCH-KAFKA-SERIALIZE" // serializzazione di chiave o messaggio fallita
-	CodeKafkaProduce   = "BATCH-KAFKA-PRODUCE"   // produce fallita
-
 	CodeJobProperties = "BATCH-JOB-PROPS" // property infrastrutturale mancante in jobs[].properties
 )
 

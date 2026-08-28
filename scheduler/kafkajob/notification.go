@@ -8,10 +8,10 @@ import (
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
 	"time"
 
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/kafkaproducer"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/kafka"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-kafka/message"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-kafka/producer"
 
 	gocron "github.com/go-co-op/gocron/v2"
 	"github.com/rs/zerolog/log"
@@ -24,15 +24,15 @@ var tracer = otel.Tracer("NotificationKafkaJob")
 
 const defaultKafkaLimit = 100
 
-func makeNotificationJobFactory(producer *kafkaproducer.ProducerService, items store.IWorkItemStore) scheduler.JobFactory {
+func makeNotificationJobFactory(prod producer.IProducer, items store.IWorkItemStore) scheduler.JobFactory {
 	return func(name string, s *scheduler.Services, config scheduler.Config) gocron.Task {
 		return scheduler.LabeledTask(name, config.Type, func() error {
-			return notificationJobRun(name, producer, items, config)
+			return notificationJobRun(name, prod, items, config)
 		})
 	}
 }
 
-func notificationJobRun(name string, producer *kafkaproducer.ProducerService, items store.IWorkItemStore, config scheduler.Config) error {
+func notificationJobRun(name string, prod producer.IProducer, items store.IWorkItemStore, config scheduler.Config) error {
 	p := config.Properties
 	jobId := jobID(name)
 
@@ -80,16 +80,19 @@ func notificationJobRun(name string, producer *kafkaproducer.ProducerService, it
 	}
 	log.Info().Msgf("[%s] processing %d item(s) (%d orphaned, %d fresh)", jobId, len(all), norph, nfresh)
 
-	valid, kafkaMsgs := prepareMessages(all)
-	if len(kafkaMsgs) == 0 {
-		// all items had invalid payload — mark them failed individually (fenced dal token)
-		for _, item := range all {
-			items.MarkFailed(spanCtx, item.Id, item.LockToken, "invalid payload")
-		}
+	valid, recs, invalid := prepareRecords(all)
+	// Gli item con payload inutilizzabile sono marcati falliti UNO PER UNO (fenced dal token) e non
+	// fanno cadere il tick: un payload malformato è un errore deterministico di quel singolo item, e
+	// ritornare un errore per l'intero batch lascerebbe in IN_PROGRESS anche gli item buoni, fino al
+	// recupero orfani.
+	for _, item := range invalid {
+		items.MarkFailed(spanCtx, item.Id, item.LockToken, "invalid payload")
+	}
+	if len(recs) == 0 {
 		return nil
 	}
 
-	if errProduce := producer.ProduceMessages(spanCtx, kafkaMsgs, topic); errProduce != nil {
+	if errProduce := prod.ProduceTo(spanCtx, topic, recs); errProduce != nil {
 		span.RecordError(errProduce)
 		log.Error().Err(errProduce).Msgf("[%s] Kafka produce failed — resetting %d items to PENDING", jobId, len(valid))
 		// Transient Kafka failure — reset claimed items so they are retried next tick.
@@ -121,42 +124,69 @@ func notificationJobRun(name string, producer *kafkaproducer.ProducerService, it
 	return nil
 }
 
-// prepareMessages ritorna gli item con payload valido (allineati ai messaggi Kafka prodotti):
-// restituire gli item — non solo gli id — permette ai Mark* di usare il fencing token di ciascuno.
-func prepareMessages(items []*store.WorkItem) ([]*store.WorkItem, []*kafka.Message) {
-	var valid []*store.WorkItem
-	var out []*kafka.Message
-
+// prepareRecords converte gli item in record Kafka, separando quelli con payload inutilizzabile.
+// Ritorna gli item validi ALLINEATI ai record prodotti (servono i loro fencing token per i Mark*) e
+// quelli da marcare falliti.
+//
+// La serializzazione di chiave e valore avviene QUI, per item, e non dentro il producer: un
+// json.Marshal che fallisce è un difetto deterministico di quel payload — esattamente come un campo
+// mancante — e va trattato come tale. Nel producer sarebbe stato un errore del batch, con gli item
+// buoni fermi in IN_PROGRESS.
+//
+// La chiave è JSON-encoded, non la stringa nuda: è il formato storico di questo job, e cambiarlo
+// cambierebbe il partizionamento di tutti i topic già in esercizio.
+func prepareRecords(items []*store.WorkItem) (valid []*store.WorkItem, recs []*message.ProducerRecord, invalid []*store.WorkItem) {
 	for _, item := range items {
-		native, ok := normalizePayload(item.Payload)
-		if !ok {
-			log.Error().Msgf("Payload di tipo non gestito per work item %s: %T", item.Id, item.Payload)
+		rec, err := toRecord(item)
+		if err != nil {
+			log.Error().Err(err).Msgf("Payload non utilizzabile per work item %s", item.Id)
+			invalid = append(invalid, item)
 			continue
 		}
-		messageKey, ok := native["messageKey"]
-		if !ok {
-			log.Error().Msgf("messageKey mancante in work item %s", item.Id)
-			continue
-		}
-		messageValue, ok := native["messageValue"]
-		if !ok {
-			log.Error().Msgf("messageValue mancante in work item %s", item.Id)
-			continue
-		}
-		km := &kafka.Message{MessageKey: messageKey, MessageValue: messageValue}
-		if headersRaw, ok := native["messageHeaders"]; ok {
-			headers, err := toStringMap(headersRaw)
-			if err != nil {
-				log.Error().Msgf("Impossibile mappare headers in work item %s", item.Id)
-				continue
-			}
-			km.MessageHeader = headers
-		}
-		out = append(out, km)
+		recs = append(recs, rec)
 		valid = append(valid, item)
 	}
-	log.Debug().Msgf("S - preparati %d messaggi su %d work items", len(valid), len(items))
-	return valid, out
+	log.Debug().Msgf("S - preparati %d record su %d work items", len(recs), len(items))
+	return valid, recs, invalid
+}
+
+// toRecord traduce il payload di un WorkItem nel record da produrre. Il topic NON è impostato qui: lo
+// mette ProduceTo dalla property del job, così il topic resta una decisione del job e non si ripete su
+// ogni record.
+func toRecord(item *store.WorkItem) (*message.ProducerRecord, error) {
+	native, ok := normalizePayload(item.Payload)
+	if !ok {
+		return nil, fmt.Errorf("payload di tipo non gestito: %T", item.Payload)
+	}
+	messageKey, ok := native["messageKey"]
+	if !ok {
+		return nil, errors.New("messageKey mancante")
+	}
+	messageValue, ok := native["messageValue"]
+	if !ok {
+		return nil, errors.New("messageValue mancante")
+	}
+	key, err := json.Marshal(messageKey)
+	if err != nil {
+		return nil, fmt.Errorf("serializzazione di messageKey: %w", err)
+	}
+	value, err := json.Marshal(messageValue)
+	if err != nil {
+		return nil, fmt.Errorf("serializzazione di messageValue: %w", err)
+	}
+	rec := &message.ProducerRecord{Key: key, Value: value}
+	if headersRaw, ok := native["messageHeaders"]; ok {
+		headers, err := toStringMap(headersRaw)
+		if err != nil {
+			return nil, fmt.Errorf("mappatura di messageHeaders: %w", err)
+		}
+		// message.Headers è una LISTA perché Kafka ammette chiavi ripetute; il payload del WorkItem è
+		// una mappa, quindi qui le chiavi sono per costruzione uniche.
+		for k, v := range headers {
+			rec.Headers.Add(k, v)
+		}
+	}
+	return rec, nil
 }
 
 // bsonToNative converte ricorsivamente i tipi bson (D/M/A) in tipi JSON-native

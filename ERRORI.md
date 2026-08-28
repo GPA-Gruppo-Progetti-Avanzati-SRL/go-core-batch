@@ -41,14 +41,16 @@ da **"l'ho fatto e non riesco a scriverne l'esito"**: nel secondo caso il WorkIt
 | `BATCH-QUERY-CUR` | 500 | `errs.CodeQueryCur` | `mongostore/query_data.go:89` | lettura del cursore del feed fallita |
 | `BATCH-QUERY-IDENT` | 500 | `errs.CodeQueryIdent` | `sqlstore/query_data.go:29,34` | nome di tabella/colonna che non è un identificatore SQL valido. È il **guard anti SQL-injection** sui pezzi di query che arrivano dalla config: nessun escape, si rifiuta |
 
-### Producer Kafka del batch
+### Producer Kafka
 
-| Codice | HTTP | Costante | Origine | Significato |
-|---|---|---|---|---|
-| `BATCH-KAFKA-PRODUCER` | 500 | `errs.CodeKafkaProducer` | `internal/kafkaproducer/producer.go:113,225` | creazione del producer fallita |
-| `BATCH-KAFKA-TX` | 500 | `errs.CodeKafkaTx` | `producer.go:122,204` | `BeginTransaction`/`Commit` falliti |
-| `BATCH-KAFKA-SERIALIZE` | 500 | `errs.CodeKafkaSerialize` | `producer.go:146,153` | serializzazione di chiave o messaggio fallita |
-| `BATCH-KAFKA-PRODUCE` | 500 | `errs.CodeKafkaProduce` | `producer.go:191` | produce fallita |
+go-core-batch **non ha più un producer Kafka**: il job `NotificationKafka` produce con quello di
+go-core-kafka (`corekafka.IProducer`), quindi gli errori di produzione arrivano da lì con il codice
+`KAFKA-PRODUCE` e `Ambit = go-core-kafka` (vedi `go-core-kafka/ERRORI.md`). I quattro codici
+`BATCH-KAFKA-*` del vecchio `internal/kafkaproducer` non esistono più.
+
+Restano di questa libreria gli errori del **lifecycle** dell'item: un payload che non si riesce a
+tradurre in record Kafka non produce un `ApplicationError` ma un `MarkFailed` di quel singolo item
+(`scheduler/kafkajob/notification.go`), e un errore di produzione rimette i claimati in `PENDING`.
 
 ### Job
 

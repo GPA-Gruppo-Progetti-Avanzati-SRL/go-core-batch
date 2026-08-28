@@ -219,9 +219,6 @@ func Module(cfg *Config, register func(), opts ...Option) {
 		if cfg.Grpc.Client.Url != "" {
 			core.Supply(&cfg.Grpc.Client, sched...)
 		}
-		if cfg.KafkaConfig.BootstrapServer != "" {
-			core.Supply(&cfg.KafkaConfig, sched...)
-		}
 		if len(cfg.S3.Services) > 0 {
 			core.Supply(cfg.S3, sched...)
 		}
