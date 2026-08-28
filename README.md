@@ -326,6 +326,13 @@ flowchart TD
 
 ---
 
+## Errori
+
+Catalogo dei codici in **[ERRORI.md](ERRORI.md)**. I codici sono nel package interno
+`internal/errs`, quindi le app li vedono nel campo `Code` dell'`ApplicationError` ma non li nominano
+in codice. Gli errori di **produzione Kafka** non sono più di questa libreria: arrivano da
+go-core-kafka come `KAFKA-PRODUCE` con `Ambit = "go-core-kafka"`.
+
 ## Lock distribuito — ottimizzazione, non correttezza
 
 **La correttezza del batch è garantita dal DB claiming** (`store.ClaimBatch`: PENDING→IN_PROGRESS +
