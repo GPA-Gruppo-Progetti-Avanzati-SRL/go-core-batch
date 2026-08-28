@@ -23,6 +23,10 @@ Raccoglie i sotto-config di tutti i pezzi cablati da `Module`. L'app tipicamente
 | `WorkersConfig` | `[]worker.Config` | `workers` |
 | `KafkaConfig` | `kafka.Config` | `kafka` |
 
+> **Il lock distribuito non è più qui.** Il backend è iniettato con `batch.WithLocker` e il suo
+> eventuale config (es. `redis.Config` di go-core-redis) è gestito dalla sua libreria: `batch` non
+> importa più Redis.
+
 > **`jobs[].properties` e `tasks[].properties` non sono la stessa cosa.** Il primo blocco è
 > **infrastrutturale**: configura il *job type* (`task`, `limit`, `collection`, `filter`, `topic`,
 > `task`, …) e lo legge il framework. Il secondo è **applicativo**: sono le properties del task,
@@ -32,7 +36,7 @@ Raccoglie i sotto-config di tutti i pezzi cablati da `Module`. L'app tipicamente
 
 Wira ogni componente **esplicitamente** e lo gate **solo** tramite i suoi modes: è il `core.Mode` a runtime a decidere cosa viene effettivamente costruito, non un `if` sul valore del config. I backend (store, dispatcher, feed, job Kafka, worker pool) **non sono selezionati da enum ma iniettati dall'app come `batch.ModuleFunc` per riferimento diretto** (niente closure). Così il package `batch` non importa nessun package di backend — solo i loro `Config`, struct leggere — e ogni app trascina in `go.mod` **solo** le dipendenze di ciò che passa: un'app mongo-only non si porta dietro `uptrace/bun`, una senza Kafka non si porta dietro `franz-go`.
 
-`ModuleFunc` è la firma comune di tutti i `Module()` componibili — `func(modes ...string)`, ormai **modes-only**: il config non è più un parametro ma viene iniettato da fx, ed è `batch.Module` a fornirlo con `core.Supply` della Config unificata. I config dei backend (grpc client/server, kafka, s3, worker) sono suppliti **solo se valorizzati**: se un componente attivo richiede un config non impostato, fx fallisce subito con un chiaro "missing dependency" invece di far girare il backend con valori vuoti. La `RedisConfig` è l'unica supplita senza quel guard (lo Scheduler richiede sempre `*redis.Client` come hard dependency).
+`ModuleFunc` è la firma comune di tutti i `Module()` componibili — `func(modes ...string)`, ormai **modes-only**: il config non è più un parametro ma viene iniettato da fx, ed è `batch.Module` a fornirlo con `core.Supply` della Config unificata. I config dei backend (grpc client/server, kafka, s3, worker) sono suppliti **solo se valorizzati**: se un componente attivo richiede un config non impostato, fx fallisce subito con un chiaro "missing dependency" invece di far girare il backend con valori vuoti. Anche il **lock distribuito** è ormai un backend iniettato (`WithLocker`) e non più un'eccezione hard-dep: lo Scheduler dipende dal `lock.Locker` neutro di go-core-app, quindi `batch` non importa Redis e un'app mongo-only o sql-only non lo deploya affatto.
 
 **Opzioni:**
 
@@ -41,10 +45,11 @@ Wira ogni componente **esplicitamente** e lo gate **solo** tramite i suoi modes:
 | `WithSchedulerModes(...string)` | gate dei componenti lato scheduler (dispatcher, feed, kafkajob, query store) e dello Scheduler ai `core.Mode` indicati; vuoto = sempre attivi |
 | `WithWorkerModes(...string)` | gate dei componenti lato worker (worker pool gRPC) ai `core.Mode` indicati; vuoto = sempre attivo |
 | `WithStore(m batch.ModuleFunc)` | **obbligatorio** (panic se assente); wirato **sempre** (no mode gate, serve sia a scheduler che a worker): `storemongo.Module` / `storesql.Module` (copre `IData`/`IWorkItemStore`) |
+| `WithLocker(m batch.ModuleFunc)` | **obbligatorio** (panic se assente); gate **scheduler modes**: il backend del `lock.Locker` — `redislocker.Module` (da `go-core-redis/locker`, con `redis.Module(&cfg.Redis, ...)` wirato prima per il client), `mongolocker.Module` (da `go-core-mongo/locker`) o `sqllocker.Module` (da `go-core-sql/locker`) |
 | `WithModule(m ...batch.ModuleFunc)` | componenti lato **scheduler** (gate scheduler modes), accumula su più chiamate: `grpcdispatcher.Module`/`localdispatcher.Module`, `djmongo.Module`(o `djsql.Module`) **+** `queryfeed.Module`, `s3feed.Module`, `kafkajob.Module` |
 | `WithWorkerModule(m ...batch.ModuleFunc)` | componenti lato **worker** (gate worker modes): tipicamente `grpchandler.Module` |
 
-**Nessun default implicito:** `WithStore` è obbligatorio ed esplicito (Mongo o SQL); non esistono coppie store/dispatch mutuamente esclusive né un default Mongo/local: si passano esplicitamente i `Module` desiderati.
+**Nessun default implicito:** `WithStore` e `WithLocker` sono obbligatori ed espliciti; non esistono coppie store/dispatch mutuamente esclusive né un default Mongo/local: si passano esplicitamente i `Module` desiderati.
 
 **Ordine di registrazione indifferente.** I job type confluiscono nel value group fx `batch_jobs` (`scheduler.ProvideJob`) e `newScheduler` li consuma dal gruppo: fx risolve tutti i contributori prima di costruire lo scheduler, a prescindere dall'ordine di registrazione. Tutte le registrazioni di `Module` sono inoltre raggruppate in un `core.ModuleClosed("batch")`: batch è un **sottosistema chiuso** — consuma i seam dell'app (gli `ITaskRunner`) e non le espone nulla in cambio, quindi config dei backend, locker, dispatcher, feed, query store, worker pool e `*Scheduler` sono privati al modulo. Fa eccezione, per scelta, il **seam pubblico** `store.IWorkItemStore`/`store.IData`: `WithStore` è wirato a root, fuori dallo scope, così il data layer dell'app può accodare WorkItem dal lato API. I runner restano forniti a root e i value group (`batch_runners`, `batch_jobs`) aggregano come prima.
 
@@ -67,6 +72,7 @@ import (
     "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/queryfeed"
     "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/kafkajob"
     "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/worker/grpchandler"
+    mongolocker "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo/locker"
 )
 
 func Register() {
@@ -77,6 +83,7 @@ batch.Module(&cfg.BatchConfig, Register,
     batch.WithSchedulerModes(engine.Scheduler, engine.Batch),
     batch.WithWorkerModes(engine.Worker, engine.Batch),
     batch.WithStore(storemongo.Module),          // obbligatorio
+    batch.WithLocker(mongolocker.Module),        // obbligatorio; mongo-only → niente Redis
     batch.WithModule(                            // gate scheduler modes, riferimento diretto
         grpcdispatcher.Module,                   // dispatch via gRPC
         djmongo.Module, queryfeed.Module,        // feed by-query (query store + feed)
@@ -92,6 +99,7 @@ batch.Module(&cfg.BatchConfig, Register,
 // import localdispatcher "...go-core-batch/scheduler/distributedjob/localdispatcher"
 batch.Module(&cfg.BatchConfig, Register,
     batch.WithStore(storemongo.Module),          // obbligatorio
+    batch.WithLocker(mongolocker.Module),        // obbligatorio
     batch.WithModule(
         localdispatcher.Module,                  // dispatch in-process (niente gRPC)
         djmongo.Module, queryfeed.Module,        // feed by-query
@@ -208,7 +216,7 @@ Le properties sono risolte **al boot**: un valore non convertibile o un `validat
 
 ## Modalità (job families)
 
-Tre famiglie di job, ciascuna un modulo Fx self-contained che registra la propria `scheduler.JobRegistration` nel value group `batch_jobs` (via `scheduler.ProvideJob`). Condividono lo scheduler (gocron + **Redis distributed job lock**, applicato a *ogni* job) e lo store `work_items`.
+Tre famiglie di job, ciascuna un modulo Fx self-contained che registra la propria `scheduler.JobRegistration` nel value group `batch_jobs` (via `scheduler.ProvideJob`). Condividono lo scheduler (gocron + **distributed job lock** pluggable, applicato a *ogni* job) e lo store `work_items`.
 
 | Famiglia | Job type / registrazione | Quando usarla |
 |---|---|---|
@@ -289,13 +297,34 @@ flowchart TD
 
 ---
 
+## Lock distribuito — ottimizzazione, non correttezza
+
+**La correttezza del batch è garantita dal DB claiming** (`store.ClaimBatch`: PENDING→IN_PROGRESS +
+`RecoverOrphans`, nei runner distributedjob/simplejob/kafkajob). Il lock distribuito dello scheduler
+serve solo a evitare che N repliche eseguano lo stesso tick cron contemporaneamente
+(**dispatch-dedup**).
+
+È il [`lock.Locker`](../go-core-app) neutro di go-core-app, iniettato con `batch.WithLocker` e
+adattato a gocron da `scheduler/gocronlock` — l'unico punto di batch legato a gocron per il lock.
+Tre backend, tutti `Module(modes ...string)` modes-only:
+
+| Backend | Package | Nota |
+|---|---|---|
+| Redis | `go-core-redis/locker` (redsync/Redlock) | richiede `redis.Module(&cfg.Redis, ...)` wirato prima |
+| MongoDB | `go-core-mongo/locker` (documento lease TTL) | consuma il `*coremongo.Service` |
+| SQL | `go-core-sql/locker` (tabella `scheduler_locks`) | consuma il `*bun.DB`; `locker.EnsureTable` crea la tabella |
+
+I lease hanno un TTL (redsync ~30s, mongo/sql 30s): se un tick supera il TTL il lock può scadere e
+un'altra replica potrebbe ripartire, ma **il claiming lo rende innocuo**. È per questo che il backend
+è una scelta libera: un'app mongo-only o sql-only usa `mongolocker`/`sqllocker` e **non deploya Redis**.
+
 ## Struttura package
 
 ```
 go-core-batch/
-├── redis/                        # Client Redis (distributed lock scheduler)
 ├── scheduler/
-│   ├── scheduler.go              # NewScheduler — gocron + Redis lock
+│   ├── scheduler.go              # NewScheduler — gocron + lock.Locker iniettato
+│   ├── gocronlock/               # Adapter lock.Locker → gocron.Locker (UNICO punto legato a gocron)
 │   ├── config.go                 # Config: Name, Type, Cron, Disabled, SingletonMode, LockTimeout, Properties
 │   ├── registry.go               # JobRegistration, JobGroup ("batch_jobs"), ProvideJob, JobFactory
 │   ├── metrics.go                # Prometheus: TaskAssigned, TaskAssignedKO, JobExecution
@@ -574,7 +603,7 @@ Il blocco `properties:` di un job configura il **job type** e lo legge il framew
 | `name` | string | Nome univoco del job |
 | `type` | string | distributedjob: `"DistribuiteTask"` · `"DistribuiteTaskByQuery"` · `"DistribuiteTaskByS3File"`. simplejob/kafkajob: il tipo registrato (arg di `RegisterRunner`) |
 | `cron` | string | Espressione cron (secondi abilitati) |
-| `singleton` | bool | Redis lock — evita run paralleli su repliche diverse |
+| `singleton` | bool | distributed job lock — evita run paralleli su repliche diverse |
 | `lock-timeout` | duration | Dopo quanto un IN_PROGRESS è considerato orfano (default: 10m — distributedjob e simplejob). simplejob: anche timeout del context di `Run` (default: 30s) |
 | `disabled` | bool | Disabilita il job senza rimuoverlo dalla config |
 | `properties.task` | string | **Nome** del task da eseguire (una voce di `tasks:`) |
@@ -608,13 +637,13 @@ Il blocco `properties:` di un job configura il **job type** e lo legge il framew
 
 ```go
 // services/services.go
-core.Supply(&cfg.Batch.Redis)   // config del lock Redis
-core.Provide(batchredis.NewService)
+redis.Module(&cfg.Redis)        // client Redis (solo se il lock è redis-backed)
+redislocker.Module()            // lock.Locker — oppure mongolocker.Module() / sqllocker.Module()
 mongostore.Module()             // store.IData + store.IWorkItemStore (unico entry-point)
 scheduler.Module(cfg.Scheduler) // fornisce la config da sé + Provide/Invoke interni
 ```
 
-> Questo wiring manuale è il livello sotto l'orchestratore: `batch.Module(&cfg.BatchConfig, ...)` compone `mongostore.Module()`/`sqlstore.Module()`, `redis`, dispatcher, feed, kafkajob, grpchandler e `scheduler.Module()` in un'unica chiamata, nell'ordine corretto e gate-ata per mode (vedi "Orchestratore — `batch.Module`"). Usalo a mano solo quando serve un controllo fine non coperto dalle opzioni.
+> Questo wiring manuale è il livello sotto l'orchestratore: `batch.Module(&cfg.BatchConfig, ...)` compone `mongostore.Module()`/`sqlstore.Module()`, il locker, dispatcher, feed, kafkajob, grpchandler e `scheduler.Module()` in un'unica chiamata, nell'ordine corretto e gate-ata per mode (vedi "Orchestratore — `batch.Module`"). Usalo a mano solo quando serve un controllo fine non coperto dalle opzioni.
 
 ---
 
@@ -893,5 +922,5 @@ In gRPC, `limit` e pool size sono dimensioni ortogonali: lo scheduler può claim
 - **Le chiavi delle properties sono case-insensitive**: viper abbassa le chiavi della config, quindi `task` nello YAML arriva come `worktype`. I getter di `core.Properties` e il binding `prop:` lo gestiscono; l'indicizzazione diretta della mappa no.
 - **`gocron.NewTask` deve usare una closure zero-arg** che cattura le dipendenze — non passare interface nil come `...any` o gocron va in panic in reflect.
 - **Tabelle**: `work_items` e `task_logs` (costanti `store.TableWorkItems`, `store.TableTaskLogs`).
-- **`singleton: true`** richiede Redis attivo — senza Redis il lock fallisce all'avvio.
+- **`singleton: true`** richiede un `lock.Locker` nel grafo: `batch.WithLocker` è obbligatorio (panic al wiring se assente) e il backend che si passa dev'essere raggiungibile, o il lock fallisce all'avvio.
 - **Worker distribuito**: il processo worker deve connettersi allo stesso DB del scheduler per chiamare `MarkDone`/`MarkFailed`.
