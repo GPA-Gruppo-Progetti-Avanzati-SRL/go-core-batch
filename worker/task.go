@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/batchmetrics"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog/log"
 )
 
@@ -62,25 +62,24 @@ func (w *Task) GetJobId() string {
 }
 
 func (w *Task) LogStart(data store.IData) {
-	TaskStart.With(prometheus.Labels{"type": w.TaskName}).Inc()
-	w.StartTime = time.Now()
+	w.StartTime = batchmetrics.TaskStart(w.TaskName)
 	data.SetTaskStart(w.Context, w.Id, w.JobId, w.TaskName, w.ObjectId)
 }
 
-func (w *Task) LogTaskError(data store.IData, errMsg string) {
+// LogOutcome scrive la riga di task_log ed emette le metriche di task per l'esito classificato.
+// Sostituisce la vecchia coppia LogDone/LogTaskError, che non conosceva la store.Outcome e
+// quindi collassava un retry transitorio in un fallimento definitivo. La riga di task_log resta
+// DONE per done/handled ed ERROR per retry/failed: cambia solo che la metrica ora li distingue.
+func (w *Task) LogOutcome(data store.IData, o store.Outcome, runErr error) {
+	batchmetrics.ObserveTask(w.TaskName, o, w.StartTime)
+	if batchmetrics.Status(o) == batchmetrics.StatusSuccess {
+		data.SetTaskDone(w.Context, w.Id, w.JobId, w.TaskName, w.ObjectId)
+		return
+	}
+	errMsg := ""
+	if runErr != nil {
+		errMsg = runErr.Error()
+	}
 	log.Error().Msg(errMsg)
-	TaskError.With(prometheus.Labels{"type": w.TaskName}).Inc()
 	data.SetTaskInError(w.Context, w.Id, w.JobId, w.TaskName, w.ObjectId, errMsg)
-	w.evaluateDuration("KO")
-}
-
-func (w *Task) LogDone(data store.IData) {
-	TaskDone.With(prometheus.Labels{"type": w.TaskName}).Inc()
-	data.SetTaskDone(w.Context, w.Id, w.JobId, w.TaskName, w.ObjectId)
-	w.evaluateDuration("OK")
-}
-
-func (w *Task) evaluateDuration(result string) {
-	duration := time.Since(w.StartTime)
-	TaskDuration.With(prometheus.Labels{"type": w.TaskName, "result": result}).Observe(duration.Seconds())
 }

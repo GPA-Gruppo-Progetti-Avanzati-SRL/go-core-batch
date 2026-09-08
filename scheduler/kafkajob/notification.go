@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/batchmetrics"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
-
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-kafka/message"
@@ -79,7 +79,13 @@ func notificationJobRun(name string, prod producer.IProducer, items store.IWorkI
 		log.Trace().Msgf("[%s] no pending items", jobId)
 		return nil
 	}
+	// Label = NOME del job (name), non jobId: quest'ultimo contiene un timestamp.
+	batchmetrics.JobClaimed(name, JobType, len(all))
+
 	log.Info().Msgf("[%s] processing %d item(s) (%d orphaned, %d fresh)", jobId, len(all), norph, nfresh)
+
+	// Inizio della fase di elaborazione: è la finestra che le istogrammi misurano.
+	itemsStart := time.Now()
 
 	valid, recs, invalid := prepareRecords(all)
 	// Gli item con payload inutilizzabile sono marcati falliti UNO PER UNO (fenced dal token) e non
@@ -89,6 +95,10 @@ func notificationJobRun(name string, prod producer.IProducer, items store.IWorkI
 	for _, item := range invalid {
 		items.MarkFailed(spanCtx, item.Id, item.LockToken, "invalid payload")
 	}
+	// Gli invalidi sono item finalizzati come falliti, quindi vanno contati in OGNI esito del tick e
+	// non solo quando sono tutti invalidi: altrimenti un tick misto ne perderebbe la traccia, e
+	// batch_job_items_claimed_total non tornerebbe con la somma dei processed.
+	observeItems(name, len(invalid), store.OutcomeFailed, itemsStart)
 	if len(recs) == 0 {
 		return nil
 	}
@@ -104,6 +114,7 @@ func notificationJobRun(name string, prod producer.IProducer, items store.IWorkI
 		for _, item := range valid {
 			items.MarkPending(spanCtx, item.Id, item.LockToken, 0)
 		}
+		observeItems(name, len(valid), store.OutcomeRetry, itemsStart)
 		return errProduce
 	}
 
@@ -121,8 +132,23 @@ func notificationJobRun(name string, prod producer.IProducer, items store.IWorkI
 		}
 	}
 
+	observeItems(name, len(valid), store.OutcomeDone, itemsStart)
+
 	log.Info().Msgf("[%s] sent %d message(s) to topic %s", jobId, len(valid), topic)
 	return nil
+}
+
+// observeItems emette le metriche di task e di job per n item che hanno condiviso lo stesso
+// esito. kafkajob produce in blocco, quindi una durata per singolo item non esiste: tutte le
+// osservazioni partono dallo stesso start e registrano la latenza del batch — è l'unica lettura
+// onesta possibile. Incrementa TaskStarted direttamente (e non via batchmetrics.TaskStart) per
+// non far ripartire il cronometro a ogni item.
+func observeItems(job string, n int, outcome store.Outcome, start time.Time) {
+	for range n {
+		batchmetrics.TaskStarted.WithLabelValues(JobType).Inc()
+		batchmetrics.ObserveTask(JobType, outcome, start)
+		batchmetrics.JobProcessed(job, JobType, outcome, start)
+	}
 }
 
 // prepareRecords converte gli item in record Kafka, separando quelli con payload inutilizzabile.
