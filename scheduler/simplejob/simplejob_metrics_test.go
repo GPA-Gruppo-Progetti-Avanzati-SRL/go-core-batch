@@ -81,7 +81,21 @@ func items(n int) []*store.WorkItem {
 // I quattro esiti sono coperti tutti perché è la distinzione che il vecchio task_done/task_error
 // non poteva esprimere (un retry transitorio finiva fra i fallimenti).
 func TestRunEmitsPerItemMetrics(t *testing.T) {
-	const job, workType = "metrics-job", "MetricsType"
+	const job, taskName = "metrics-job", "metrics-task"
+
+	// Tutte le asserzioni sono su DELTA: i collector sono globali di processo, quindi con
+	// `go test -count=2` il secondo giro li troverebbe già valorizzati dal primo.
+	started := counterDelta(t, batchmetrics.TaskStarted.WithLabelValues(taskName))
+	outcomes := map[string]func() float64{}
+	for _, o := range []string{
+		batchmetrics.OutcomeDone, batchmetrics.OutcomeHandled,
+		batchmetrics.OutcomeRetry, batchmetrics.OutcomeFailed,
+	} {
+		outcomes[o] = counterDelta(t, batchmetrics.TaskOutcome.WithLabelValues(taskName, o))
+	}
+	claimed := counterDelta(t, batchmetrics.JobItemsClaimed.WithLabelValues(job, taskName))
+	success := counterDelta(t, batchmetrics.JobItemsProcessed.WithLabelValues(job, taskName, batchmetrics.StatusSuccess))
+	errored := counterDelta(t, batchmetrics.JobItemsProcessed.WithLabelValues(job, taskName, batchmetrics.StatusError))
 
 	runner := &scriptedRunner{results: []error{
 		nil,                                 // done
@@ -91,30 +105,27 @@ func TestRunEmitsPerItemMetrics(t *testing.T) {
 	}}
 	st := &metricsStore{pending: items(4)}
 
-	if err := run(job, workType, false, time.Minute, time.Minute, 100, st, runner); err != nil {
+	if err := run(job, taskName, false, time.Minute, time.Minute, 100, st, runner); err != nil {
 		t.Fatalf("run ha ritornato errore: %v", err)
 	}
 
-	if got := counterValue(t, batchmetrics.TaskStarted.WithLabelValues(workType)); got != 4 {
-		t.Errorf("batch_task_started_total = %v, atteso 4", got)
+	if got := started(); got != 4 {
+		t.Errorf("batch_task_started_total += %v, atteso 4", got)
 	}
-	for _, outcome := range []string{
-		batchmetrics.OutcomeDone, batchmetrics.OutcomeHandled,
-		batchmetrics.OutcomeRetry, batchmetrics.OutcomeFailed,
-	} {
-		if got := counterValue(t, batchmetrics.TaskOutcome.WithLabelValues(workType, outcome)); got != 1 {
-			t.Errorf("batch_task_outcome_total{outcome=%q} = %v, atteso 1", outcome, got)
+	for outcome, delta := range outcomes {
+		if got := delta(); got != 1 {
+			t.Errorf("batch_task_outcome_total{outcome=%q} += %v, atteso 1", outcome, got)
 		}
 	}
-	if got := counterValue(t, batchmetrics.JobItemsClaimed.WithLabelValues(job, workType)); got != 4 {
-		t.Errorf("batch_job_items_claimed_total = %v, atteso 4", got)
+	if got := claimed(); got != 4 {
+		t.Errorf("batch_job_items_claimed_total += %v, atteso 4", got)
 	}
 	// done + handled sono successi, retry + failed no.
-	if got := counterValue(t, batchmetrics.JobItemsProcessed.WithLabelValues(job, workType, batchmetrics.StatusSuccess)); got != 2 {
-		t.Errorf("processed success = %v, atteso 2", got)
+	if got := success(); got != 2 {
+		t.Errorf("processed success += %v, atteso 2", got)
 	}
-	if got := counterValue(t, batchmetrics.JobItemsProcessed.WithLabelValues(job, workType, batchmetrics.StatusError)); got != 2 {
-		t.Errorf("processed error = %v, atteso 2", got)
+	if got := errored(); got != 2 {
+		t.Errorf("processed error += %v, atteso 2", got)
 	}
 }
 
@@ -122,7 +133,7 @@ func TestRunEmitsPerItemMetrics(t *testing.T) {
 // cron anche quando non c'era nulla da fare. batch_job_ticks_total continua a contarli (è la
 // liveness, e la emette gocron), ma le metriche di lavoro devono restare ferme.
 func TestRunIdleTickEmitsNothing(t *testing.T) {
-	const job, workType = "idle-job", "IdleType"
+	const job, taskName = "idle-job", "idle-task"
 	st := &metricsStore{} // nessun item pending
 
 	// Il conteggio delle SERIE prima e dopo, e non il valore di una singola serie: un tick a
@@ -132,7 +143,7 @@ func TestRunIdleTickEmitsNothing(t *testing.T) {
 	processed := seriesCount(batchmetrics.JobItemsProcessed)
 	started := seriesCount(batchmetrics.TaskStarted)
 
-	if err := run(job, workType, false, time.Minute, time.Minute, 100, st, &scriptedRunner{}); err != nil {
+	if err := run(job, taskName, false, time.Minute, time.Minute, 100, st, &scriptedRunner{}); err != nil {
 		t.Fatalf("run ha ritornato errore: %v", err)
 	}
 
@@ -147,8 +158,19 @@ func TestRunIdleTickEmitsNothing(t *testing.T) {
 	}
 }
 
-// counterValue e seriesCount evitano prometheus/testutil, che trascinerebbe
+// counterDelta, counterValue e seriesCount evitano prometheus/testutil, che trascinerebbe
 // github.com/kylelemons/godebug nel go.mod della libreria per soli helper di test.
+
+// counterDelta cattura il valore corrente di una serie e ritorna la funzione che ne dà
+// l'INCREMENTO. Le asserzioni sui contatori vanno fatte sui delta e mai sui valori assoluti: i
+// collector sono globali di processo, quindi con `go test -count=2` il secondo giro li trova già
+// valorizzati dal primo.
+func counterDelta(t *testing.T, c prometheus.Counter) func() float64 {
+	t.Helper()
+	before := counterValue(t, c)
+	return func() float64 { return counterValue(t, c) - before }
+}
+
 func counterValue(t *testing.T, c prometheus.Counter) float64 {
 	t.Helper()
 	var m dto.Metric

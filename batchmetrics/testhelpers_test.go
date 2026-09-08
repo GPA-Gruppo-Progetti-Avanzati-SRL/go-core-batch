@@ -11,6 +11,19 @@ import (
 // github.com/kylelemons/godebug, e un helper di test non deve aggiungere un modulo al set di
 // dipendenze della libreria. Sono una decina di righe contro una riga di go.mod.
 
+// counterDelta cattura il valore corrente di una serie e ritorna la funzione che, chiamata dopo
+// l'azione, ne dà l'INCREMENTO.
+//
+// Le asserzioni sui contatori devono essere sui delta, mai sui valori assoluti: i collector sono
+// globali di processo, quindi con `go test -count=2` (o con un altro test che tocca le stesse
+// label) il secondo giro li trova già valorizzati dal primo e un'asserzione su "== 1" fallisce
+// contando 2.
+func counterDelta(t *testing.T, c prometheus.Counter) func() float64 {
+	t.Helper()
+	before := counterValue(t, c)
+	return func() float64 { return counterValue(t, c) - before }
+}
+
 // counterValue legge il valore corrente di una singola serie.
 func counterValue(t *testing.T, c prometheus.Counter) float64 {
 	t.Helper()
