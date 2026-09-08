@@ -1,6 +1,6 @@
 module github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch
 
-go 1.26.5
+go 1.27
 
 require (
 	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app v0.0.28
@@ -15,15 +15,15 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/rs/zerolog v1.35.1
-	github.com/twmb/franz-go v1.21.5
+	github.com/twmb/franz-go v1.21.6
 	github.com/twmb/franz-go/plugin/kotel v1.7.0
 	github.com/uptrace/bun v1.2.18
 	go.mongodb.org/mongo-driver/v2 v2.7.0
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.54.0
 	go.opentelemetry.io/otel v1.44.0
 	go.uber.org/fx v1.24.0
-	google.golang.org/grpc v1.81.1
-	google.golang.org/protobuf v1.36.11
+	google.golang.org/grpc v1.83.2
+	google.golang.org/protobuf v1.36.12
 )
 
 require (

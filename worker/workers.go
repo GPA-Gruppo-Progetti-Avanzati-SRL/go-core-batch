@@ -150,12 +150,12 @@ func Run[T any](semaphore chan struct{}, t *Task, services ITaskService[T], data
 		outcome = store.OutcomeFailed
 	}
 
-	// Task log (osservabilità): Done/Handled = successo, Retry/Failed = errore.
+	// Task log + metriche (osservabilità): Done/Handled = successo, Retry/Failed = errore.
+	// La classificazione fine (done|handled|retry|failed) la fa LogOutcome sulla Outcome.
 	if outcome == store.OutcomeDone || outcome == store.OutcomeHandled {
 		log.Trace().Msgf("W - %s - %s - Executed task %T", t.GetJobId(), t.GetId(), t)
-		t.LogDone(data)
 	} else {
 		log.Error().Msgf("W - %s - %s - Error executing task: %v", t.GetJobId(), t.GetId(), runErr)
-		t.LogTaskError(data, runErr.Error())
 	}
+	t.LogOutcome(data, outcome, runErr)
 }

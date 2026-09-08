@@ -6,11 +6,11 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/batchmetrics"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 
 	gocron "github.com/go-co-op/gocron/v2"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -80,20 +80,27 @@ func jobRunWithClaiming(name string, dispatcher ITaskDispatcher, items store.IWo
 		return nil
 	}
 
+	// Label = NOME del job (name), non jobId: quest'ultimo contiene un timestamp.
+	batchmetrics.JobClaimed(name, taskType, len(all))
+
 	log.Info().Msgf("[%s] processing %d item(s) (%d orphaned, %d fresh)", jobId, len(all), norph, nfresh)
 
-	// 3. Dispatch each item
+	// 3. Dispatch each item.
+	// Qui NON si emette batch_job_items_processed_total: il dispatch è asincrono e l'esito
+	// dell'esecuzione non torna al job. Il livello job è coperto da batch_task_assigned_total,
+	// che è ASSEGNAZIONE e non esecuzione; l'esito lo emette chi esegue (worker.Run per il
+	// percorso gRPC, runner.MuxRunner.Run per quello in-process).
 	for i, item := range all {
 		taskId := fmt.Sprintf("%s-task-%d", jobId, i+1)
-		if err := dispatcher.DispatchTask(spanCtx, jobId, taskId, item.Id, taskType); err != nil {
+		err := dispatcher.DispatchTask(spanCtx, jobId, taskId, item.Id, taskType)
+		batchmetrics.TaskAssigned(taskType, err)
+		if err != nil {
 			data.SetTaskAssignationKO(spanCtx, taskId, jobId, taskType, item.Id, err.Error())
-			scheduler.TaskAssignedKO.With(prometheus.Labels{"type": taskType}).Inc()
 			errMsg := fmt.Sprintf("[%s] dispatch failed for item %s", jobId, item.Id)
 			log.Error().Msg(errMsg)
 			span.RecordError(err)
 			span.SetStatus(codes.Error, errMsg)
 		} else {
-			scheduler.TaskAssigned.With(prometheus.Labels{"type": taskType}).Inc()
 			data.SetTaskAssigned(spanCtx, taskId, jobId, taskType, item.Id)
 			log.Info().Msgf("[%s] dispatched item %s", jobId, item.Id)
 		}

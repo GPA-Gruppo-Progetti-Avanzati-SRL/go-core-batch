@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/batchmetrics"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/kafkaproducer"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/kafka"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
@@ -84,7 +85,13 @@ func notificationJobRun(name string, producer *kafkaproducer.ProducerService, it
 		log.Trace().Msgf("[%s] no pending items", jobId)
 		return nil
 	}
+	// Label = NOME del job (name), non jobId: quest'ultimo contiene un timestamp.
+	batchmetrics.JobClaimed(name, JobType, len(all))
+
 	log.Info().Msgf("[%s] processing %d item(s) (%d orphaned, %d fresh)", jobId, len(all), norph, nfresh)
+
+	// Inizio della fase di elaborazione: è la finestra che le istogrammi misurano.
+	itemsStart := time.Now()
 
 	valid, kafkaMsgs := prepareMessages(all)
 	if len(kafkaMsgs) == 0 {
@@ -92,6 +99,7 @@ func notificationJobRun(name string, producer *kafkaproducer.ProducerService, it
 		for _, item := range all {
 			items.MarkFailed(spanCtx, item.Id, item.LockToken, "invalid payload")
 		}
+		observeItems(name, len(all), store.OutcomeFailed, itemsStart)
 		return nil
 	}
 
@@ -107,6 +115,7 @@ func notificationJobRun(name string, producer *kafkaproducer.ProducerService, it
 		for _, item := range valid {
 			items.MarkPending(spanCtx, item.Id, item.LockToken, after)
 		}
+		observeItems(name, len(valid), store.OutcomeRetry, itemsStart)
 		return errProduce
 	}
 
@@ -124,8 +133,23 @@ func notificationJobRun(name string, producer *kafkaproducer.ProducerService, it
 		}
 	}
 
+	observeItems(name, len(valid), store.OutcomeDone, itemsStart)
+
 	log.Info().Msgf("[%s] sent %d message(s) to topic %s", jobId, len(valid), topic)
 	return nil
+}
+
+// observeItems emette le metriche di task e di job per n item che hanno condiviso lo stesso
+// esito. kafkajob produce in blocco, quindi una durata per singolo item non esiste: tutte le
+// osservazioni partono dallo stesso start e registrano la latenza del batch — è l'unica lettura
+// onesta possibile. Incrementa TaskStarted direttamente (e non via batchmetrics.TaskStart) per
+// non far ripartire il cronometro a ogni item.
+func observeItems(job string, n int, outcome store.Outcome, start time.Time) {
+	for range n {
+		batchmetrics.TaskStarted.WithLabelValues(JobType).Inc()
+		batchmetrics.ObserveTask(JobType, outcome, start)
+		batchmetrics.JobProcessed(job, JobType, outcome, start)
+	}
 }
 
 // prepareMessages ritorna gli item con payload valido (allineati ai messaggi Kafka prodotti):

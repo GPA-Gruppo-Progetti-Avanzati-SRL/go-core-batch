@@ -9,6 +9,7 @@ import (
 	"io"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/batchmetrics"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"go.uber.org/fx"
 )
@@ -54,17 +55,28 @@ func NewMux(runners []*TaskRunner) *MuxRunner {
 	return &MuxRunner{routes: routes}
 }
 
+// Run è il punto in cui il percorso in-process (localdispatcher) emette le metriche di task:
+// è il solo che ha in mano sia il taskType sia la store.Outcome, e resta uno solo anche se il
+// dispatcher cambia. Il percorso gRPC NON passa di qui (va su worker.Run), quindi non c'è
+// doppio conteggio.
 func (r *MuxRunner) Run(ctx context.Context, objectId, taskType string, items store.IWorkItemStore) error {
+	// TaskStart prima di risolvere la route, a specchio di worker.Run che fa LogStart prima di
+	// risolvere il tipo: un task che non parte è comunque un task fallito, e senza questo
+	// sarebbe invisibile alle metriche.
+	start := batchmetrics.TaskStart(taskType)
 	runner, ok := r.routes[taskType]
 	if !ok {
+		batchmetrics.ObserveTask(taskType, store.OutcomeFailed, start)
 		return fmt.Errorf("no runner registered for taskType %q", taskType)
 	}
 	item, appErr := items.GetById(ctx, objectId)
 	if appErr != nil {
+		batchmetrics.ObserveTask(taskType, store.OutcomeFailed, start)
 		return appErr
 	}
 	runErr := runner.Run(ctx, item)
 	outcome, markErr := store.ApplyResult(ctx, items, item.Id, item.LockToken, runErr)
+	batchmetrics.ObserveTask(taskType, outcome, start)
 	if markErr != nil {
 		return markErr
 	}

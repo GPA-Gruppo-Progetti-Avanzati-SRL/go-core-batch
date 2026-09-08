@@ -22,6 +22,7 @@ import (
 	"time"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/batchmetrics"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	gocron "github.com/go-co-op/gocron/v2"
@@ -163,14 +164,22 @@ func run(name, workType string, selfFeed bool, timeout, orphanTimeout time.Durat
 		return nil
 	}
 
+	// Le metriche di job usano il NOME del job (name), non jobID: quest'ultimo contiene un
+	// timestamp e come label farebbe esplodere le serie.
+	batchmetrics.JobClaimed(name, workType, len(pending))
+
 	log.Info().Msgf("[%s] processing %d item(s)", jobID, len(pending))
 
 	var done, handled, retried, failed int
 	for _, item := range pending {
 		// Same lifecycle convention as distributedjob (store.ApplyResult):
 		// nil→MarkDone, store.Retry→MarkPending, err→MarkFailed, store.ErrHandled→untouched.
+		start := batchmetrics.TaskStart(workType)
 		runErr := runner.Run(ctx, item)
 		outcome, markErr := store.ApplyResult(ctx, items, item.Id, item.LockToken, runErr)
+		// Lo stesso start alle due: misurano per costruzione la stessa finestra.
+		batchmetrics.ObserveTask(workType, outcome, start)
+		batchmetrics.JobProcessed(name, workType, outcome, start)
 		if markErr != nil {
 			log.Error().Err(markErr).Msgf("[%s] persisting outcome failed for item %s", jobID, item.Id)
 		}
