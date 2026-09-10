@@ -90,17 +90,29 @@ func (s *fakeService) GetTaskExecutions(string) (RunTask[*fakeService], bool) {
 // TestRunLifecycle verifica che worker.Run sia l'unico punto di finalizzazione e applichi
 // la convenzione store.ApplyResult per ogni esito del RunTask.
 func TestRunLifecycle(t *testing.T) {
+	tetto := func(n int) *int { return &n }
+
 	cases := []struct {
 		name   string
 		known  bool
 		result error
 		wantOp string
+		// retry e maxRetry sono i campi che il bridge copia sul Task (tentativi già consumati e
+		// tetto dell'istanza): con maxRetry nil il tetto non esiste e il retry è illimitato.
+		retry    int
+		maxRetry *int
 	}{
-		{"nil → done", true, nil, "done"},
-		{"ErrHandled → no-op", true, store.ErrHandled, ""},
-		{"RetryError → pending", true, store.Retry(5 * time.Minute), "pending"},
-		{"errore generico → failed", true, errors.New("boom"), "failed"},
-		{"tipo sconosciuto → failed", false, nil, "failed"},
+		{"nil → done", true, nil, "done", 0, nil},
+		{"ErrHandled → no-op", true, store.ErrHandled, "", 0, nil},
+		{"RetryError → pending", true, store.Retry(5 * time.Minute), "pending", 0, nil},
+		{"errore generico → failed", true, errors.New("boom"), "failed", 0, nil},
+		{"tipo sconosciuto → failed", false, nil, "failed", 0, nil},
+
+		// Il tetto sul percorso del worker pool: senza il Retry copiato sul Task, ApplyResult
+		// confronterebbe sempre uno zero e non esaurirebbe mai.
+		{"tetto non raggiunto → pending", true, store.Retry(time.Minute), "pending", 1, tetto(3)},
+		{"tetto esaurito → failed", true, store.Retry(time.Minute), "failed", 3, tetto(3)},
+		{"senza tetto il retry è illimitato", true, store.Retry(time.Minute), "pending", 99, nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -109,7 +121,8 @@ func TestRunLifecycle(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			// Nel path known-type è il RunTask (bridge) a popolare t.LockToken; qui lo simuliamo.
 			// Nel path type-not-found worker.Run lo recupera da GetById (fs.item.LockToken).
-			task := &Task{Id: "t1", JobId: "j1", TaskName: "MY_TASK", ObjectId: "obj-1", LockToken: "tok-1", Context: ctx, Cancel: cancel}
+			task := &Task{Id: "t1", JobId: "j1", TaskName: "MY_TASK", ObjectId: "obj-1", LockToken: "tok-1",
+				Retry: c.retry, MaxRetry: c.maxRetry, Context: ctx, Cancel: cancel}
 			sem := make(chan struct{}, 1)
 			sem <- struct{}{}
 

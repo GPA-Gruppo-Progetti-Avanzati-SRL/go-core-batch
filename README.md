@@ -152,6 +152,7 @@ batch:
         dry-run: false
     - name: import-bulk          # stesso type, properties diverse → istanza distinta
       type: IMPORT
+      max-retry: 3               # tetto ai RITENTATIVI: 3 ritentativi = 4 esecuzioni
       properties:
         folder: /data/bulk
   jobs:
@@ -175,6 +176,29 @@ Il **`name` è obbligatorio su ogni voce e non ha fallback sul `type`**: va scri
 La validazione riguarda i riferimenti **espliciti**: la property `task` di un distributedjob, il `task` di un simplejob, le `tasks` di un worker pool — nomi scritti a mano, quindi un nome inesistente è un typo. Quando nessuna property nomina il task, il nome è **dedotto** dal job type (è il caso del simplejob senza `task`): lì il task omonimo viene attivato se dichiarato, ma non se ne pretende l'esistenza, perché nello stesso campo stanno i job type del framework (`NotificationKafka`, `DistribuiteTask`, `DistribuiteTaskByQuery`, …) che non nominano alcun task.
 
 **Il fail-fast è gate-ato sui modes.** `register` — e con esso la validazione di `tasks:` — gira solo se `core.Mode` è tra gli scheduler modes (`WithSchedulerModes`) o tra i worker modes (`WithWorkerModes`). In un processo `MODE=API`, dove nessun runner verrebbe costruito, il sottosistema batch non registra e non valida nulla: una misconfig della sezione `tasks:` deve far cadere i mode che il batch lo eseguono davvero, non l'API. Lo store resta l'eccezione di sempre (wirato in ogni mode), così l'API può iniettare `store.IWorkItemStore`. Una famiglia con modes vuoti è "sempre attiva", quindi un'app che non gate-a nulla si comporta come prima.
+
+**`max-retry` è il tetto ai ritentativi** di un work item, ed è opzionale. È un dato del *task*
+e non del job perché il ciclo di vita dell'item è per task — `ClaimPending` e `RecoverOrphans`
+filtrano per nome di task — e lo stesso task può essere servito da più job o da un worker pool:
+item identici devono avere lo stesso limite.
+
+| valore | effetto |
+|---|---|
+| assente | illimitato — la condotta storica, prima che il tetto esistesse |
+| `-1` | illimitato, esplicito |
+| `0` | nessun ritentativo: il primo `store.Retry` manda l'item in FAILED |
+| `N` | N **ritentativi**, quindi N+1 esecuzioni in tutto |
+
+Esaurito il tetto, `store.ApplyResult` non rimette l'item in PENDING: chiama `MarkFailed` con
+«superati i N ritentativi previsti: \<causa\>» e classifica l'esito come `OutcomeExhausted` —
+un'etichetta a sé di `batch_task_outcome_total`, distinta da `failed`, perché l'errore era
+transiente e si è solo smesso di riprovare. Senza tetto un guasto transiente permanente — un
+mainframe irraggiungibile — fa riprovare l'item per sempre, a ogni ciclo.
+
+⚠️ **Il contatore è uno solo.** Il tetto si misura su `WorkItem.Retry`, che incrementa anche
+`RecoverOrphans`: il recupero di un item orfano — tipicamente il riavvio di un pod — **consuma
+un tentativo** anche se il runner non ha mai fallito. Con `max-retry: 2`, tre riavvii
+consecutivi mandano l'item in FAILED senza un solo fallimento applicativo.
 
 ### Nomenclatura: name, non type
 
@@ -316,7 +340,8 @@ flowchart TD
 
 > **Runner unico e interscambiabile.** distributedjob e simplejob condividono la stessa interfaccia
 > `store.ITaskRunner` — `Run(ctx, item *WorkItem) error` — e la stessa semantica:
-> il framework applica `store.ApplyResult` sul valore di ritorno (`nil`→MarkDone, `store.Retry`→MarkPending,
+> il framework applica `store.ApplyResult` sul valore di ritorno (`nil`→MarkDone, `store.Retry`→MarkPending
+> finché il `max-retry` del task lo consente e poi MarkFailed,
 > `err`→MarkFailed, `store.ErrHandled`→invariato). Spostare un runner da una famiglia all'altra è un cambio
 > di **registrazione + config `type`**, non di logica.
 >
@@ -693,6 +718,10 @@ return store.RetryWithCause(5*time.Minute, err)  // wrappa l'errore originale
 
 Il campo `next_run_at` viene impostato a `now + After` da `MarkPending`. `ClaimPending` filtra `next_run_at <= NOW()`.
 
+Il ritentativo **non è garantito**: se il task dichiara `max-retry` e l'item ha già consumato i
+tentativi previsti, `ApplyResult` lo manda in FAILED (`OutcomeExhausted`) invece di rimetterlo in
+PENDING. Vedi "Configurazione dei task — sezione `tasks:`".
+
 ---
 
 ## IQueryStore — SQL vs MongoDB
@@ -770,9 +799,10 @@ flowchart TD
     CP -- "per ogni item (loop sequenziale)" --> RUN["ITaskRunner.Run(ctx, item)\n→ store.ApplyResult(return)\nctx timeout = lock-timeout (default 30s)"]
     RUN -- "return nil" --> DONE["MarkDone → DONE"]
     RUN -- "return store.Retry(d) / RetryWithCause(d, err)" --> PEND["MarkPending(d) → PENDING\nnext_run_at=now+d · retry++"]
+    RUN -- "store.Retry con retry >= max-retry" --> EXH["MarkFailed → FAILED\noutcome=exhausted"]
     RUN -- "return err" --> FAIL["MarkFailed → FAILED"]
     RUN -- "return store.ErrHandled" --> KEEP["invariato\n(lifecycle gestito dal runner)"]
-    DONE & PEND & FAIL & KEEP --> END
+    DONE & PEND & EXH & FAIL & KEEP --> END
     RUN -. "crash / nessun Mark" .-> STAY(["item resta IN_PROGRESS\n→ re-claimato da RecoverOrphans\ndopo lock-timeout (retry++)"])
 ```
 
@@ -877,7 +907,7 @@ scheduler:
 | Recovery crash | `RecoverOrphans` su IN_PROGRESS scaduti (idem) | `RecoverOrphans` su IN_PROGRESS scaduti |
 | Interfaccia runner | `store.ITaskRunner` (identica) | `store.ITaskRunner` (identica) |
 | Runner riceve | `*store.WorkItem` + `items` | `*store.WorkItem` + `items` (idem) |
-| Lifecycle | `store.ApplyResult` sul return: `nil`→Done, `store.Retry`→Pending, `err`→Failed, `store.ErrHandled`→manuale (idem) | idem |
+| Lifecycle | `store.ApplyResult` sul return: `nil`→Done, `store.Retry`→Pending (Failed oltre `max-retry`), `err`→Failed, `store.ErrHandled`→manuale (idem) | idem |
 | `task_logs` | no | sì (`IData.SetTask*`) |
 | Scaling | in-process | gRPC worker pool |
 | Esclusività cross-replica | distributed job lock + `singleton` | distributed job lock + `singleton` + claiming |
@@ -894,8 +924,10 @@ type ITaskRunner interface {
 }
 
 // store.ApplyResult — finalizza il workitem dal return del runner
-//   nil→MarkDone · ErrHandled→noop · *RetryError→MarkPending · altro err→MarkFailed
-func ApplyResult(ctx context.Context, items IWorkItemStore, id string, runErr error) (Outcome, *core.ApplicationError)
+//   nil→MarkDone · ErrHandled→noop · *RetryError→MarkPending (MarkFailed oltre maxRetry)
+//   · altro err→MarkFailed
+// L'item serve intero: id e LockToken per i Mark* fenced, Retry per il confronto col tetto.
+func ApplyResult(ctx context.Context, items IWorkItemStore, item *WorkItem, maxRetry int, runErr error) (Outcome, *core.ApplicationError)
 
 // distributedjob.ITaskDispatcher — chiamata dal job per ogni item
 type ITaskDispatcher interface {

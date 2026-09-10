@@ -55,6 +55,27 @@ type SimpleTaskRunner struct {
 	TaskType string
 	TaskName string
 	Runner   ITaskRunner
+	// MaxRetry è il tetto ai ritentativi dell'istanza, copiato da task.Config alla
+	// registrazione: task.Instances funziona solo dentro task.Apply, quindi dopo il boot non
+	// esiste più una lookup della config per nome e il limite deve viaggiare col runner.
+	//
+	// È un puntatore per la stessa ragione di task.Config.MaxRetry: nil vale illimitato, così
+	// nemmeno una struct costruita a mano finisce per negare ogni ritentativo.
+	MaxRetry *int
+}
+
+// ResolveMaxRetry applica la convenzione dell'assenza: nil = illimitato.
+func (r *SimpleTaskRunner) ResolveMaxRetry() int {
+	if r == nil || r.MaxRetry == nil {
+		return task.MaxRetryUnlimited
+	}
+	return *r.MaxRetry
+}
+
+// WithMaxRetry fissa il tetto ai ritentativi e restituisce il runner, per comporre con New.
+func (r *SimpleTaskRunner) WithMaxRetry(n int) *SimpleTaskRunner {
+	r.MaxRetry = &n
+	return r
 }
 
 // New returns a SimpleTaskRunner wrapping runner for the given taskType (istanza col nome = tipo).
@@ -90,7 +111,9 @@ func RegisterRunner[T any, PT interface {
 	ITaskRunner
 }](taskType string) {
 	for _, tc := range task.Instances(taskType) {
-		core.ProvideStruct(func(p *T) *SimpleTaskRunner { return NewNamed(taskType, tc.Name, PT(p)) },
+		core.ProvideStruct(func(p *T) *SimpleTaskRunner {
+			return NewNamed(taskType, tc.Name, PT(p)).WithMaxRetry(tc.ResolveMaxRetry())
+		},
 			fmt.Sprintf("batch: simplejob task %q (type %q)", tc.Name, taskType), tc.Properties, Group)
 	}
 }
@@ -106,14 +129,16 @@ func newJobRegistrations(items store.IWorkItemStore, runners []*SimpleTaskRunner
 	// Un task type può avere più istanze (più voci in `tasks:`): la JobRegistration resta una per
 	// task type — che per simplejob è il `type` del job — e la factory sceglie l'istanza col
 	// `taskName` della singola voce di `jobs:`.
-	byType := make(map[string]map[string]ITaskRunner)
+	// La mappa conserva il *SimpleTaskRunner e non il solo ITaskRunner: serve anche il tetto ai
+	// ritentativi dell'istanza, che il job passa a store.ApplyResult.
+	byType := make(map[string]map[string]*SimpleTaskRunner)
 	var order []string
 	for _, r := range runners {
 		if _, seen := byType[r.TaskType]; !seen {
-			byType[r.TaskType] = make(map[string]ITaskRunner)
+			byType[r.TaskType] = make(map[string]*SimpleTaskRunner)
 			order = append(order, r.TaskType)
 		}
-		byType[r.TaskType][r.TaskName] = r.Runner
+		byType[r.TaskType][r.TaskName] = r
 	}
 
 	regs := make([]scheduler.JobRegistration, 0, len(order))
@@ -138,7 +163,7 @@ func Module(modes ...string) {
 // defaultBatchLimit caps how many items a single tick claims when no "limit" property is set.
 const defaultBatchLimit = 100
 
-func makeFactory(items store.IWorkItemStore, instances map[string]ITaskRunner) scheduler.JobFactory {
+func makeFactory(items store.IWorkItemStore, instances map[string]*SimpleTaskRunner) scheduler.JobFactory {
 	return func(name string, _ *scheduler.Services, config scheduler.Config) gocron.Task {
 		// taskName nomina il TASK da eseguire: è il nome della voce di `tasks:` ed è anche il
 		// WorkItem.Type su cui filtra ClaimPending. Di default è il `type` del job, che copre il
@@ -168,7 +193,7 @@ func makeFactory(items store.IWorkItemStore, instances map[string]ITaskRunner) s
 	}
 }
 
-func run(name, taskName string, selfFeed bool, timeout, orphanTimeout time.Duration, limit int, items store.IWorkItemStore, runner ITaskRunner) error {
+func run(name, taskName string, selfFeed bool, timeout, orphanTimeout time.Duration, limit int, items store.IWorkItemStore, runner *SimpleTaskRunner) error {
 	jobID := fmt.Sprintf("%s-%s", name, time.Now().Format("20060102150405"))
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -211,13 +236,16 @@ func run(name, taskName string, selfFeed bool, timeout, orphanTimeout time.Durat
 
 	log.Info().Msgf("[%s] processing %d item(s)", jobID, len(pending))
 
-	var done, handled, retried, failed int
+	maxRetry := runner.ResolveMaxRetry()
+
+	var done, handled, retried, failed, exhausted int
 	for _, item := range pending {
 		// Same lifecycle convention as distributedjob (store.ApplyResult):
 		// nil→MarkDone, store.Retry→MarkPending, err→MarkFailed, store.ErrHandled→untouched.
+		// Un store.Retry oltre il tetto del task diventa MarkFailed: vedi store.ApplyResult.
 		start := batchmetrics.TaskStart(taskName)
-		runErr := runner.Run(ctx, item)
-		outcome, markErr := store.ApplyResult(ctx, items, item.Id, item.LockToken, runErr)
+		runErr := runner.Runner.Run(ctx, item)
+		outcome, markErr := store.ApplyResult(ctx, items, item, maxRetry, runErr)
 		// Lo stesso start alle due: misurano per costruzione la stessa finestra.
 		batchmetrics.ObserveTask(taskName, outcome, start)
 		batchmetrics.JobProcessed(name, taskName, outcome, start)
@@ -232,12 +260,17 @@ func run(name, taskName string, selfFeed bool, timeout, orphanTimeout time.Durat
 		case store.OutcomeRetry:
 			log.Warn().Err(runErr).Msgf("[%s] transient failure for item %s, reset to PENDING", jobID, item.Id)
 			retried++
+		case store.OutcomeExhausted:
+			log.Error().Err(runErr).Msgf("[%s] item %s: esauriti i %d ritentativi previsti, FAILED",
+				jobID, item.Id, maxRetry)
+			exhausted++
 		case store.OutcomeFailed:
 			log.Error().Err(runErr).Msgf("[%s] task failed for item %s", jobID, item.Id)
 			failed++
 		}
 	}
 
-	log.Info().Msgf("[%s] done=%d handled=%d retry=%d failed=%d", jobID, done, handled, retried, failed)
+	log.Info().Msgf("[%s] done=%d handled=%d retry=%d exhausted=%d failed=%d",
+		jobID, done, handled, retried, exhausted, failed)
 	return nil
 }

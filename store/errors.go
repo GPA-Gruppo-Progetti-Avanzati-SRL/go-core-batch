@@ -16,6 +16,10 @@ var ErrHandled = errors.New("workitem lifecycle handled by runner")
 //
 //	return store.Retry(5 * time.Minute)   // retry in 5 minutes
 //	return store.Retry(0)                 // retry immediately (next tick)
+//
+// Il ritentativo NON è garantito: il task può dichiarare `max-retry` e, esaurito il tetto,
+// ApplyResult manda l'item in FAILED (OutcomeExhausted) invece di rimetterlo in PENDING.
+// Senza `max-retry` il tetto non esiste e la condotta è quella storica, illimitata.
 type RetryError struct {
 	After time.Duration // delay from now; 0 = immediately claimable
 	Cause error

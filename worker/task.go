@@ -6,6 +6,7 @@ import (
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/batchmetrics"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
 
 	"github.com/rs/zerolog/log"
 )
@@ -17,7 +18,8 @@ type ITaskService[T any] interface {
 
 // RunTask esegue il task e ritorna l'esito secondo la convenzione runner condivisa
 // (vedi store.ApplyResult): nil → done, store.ErrHandled → già finalizzato dal runner,
-// *store.RetryError → retry, qualsiasi altro errore → failed. NON deve chiamare i Mark*
+// *store.RetryError → retry finché il tetto del task lo consente, poi failed, qualsiasi altro
+// errore → failed. NON deve chiamare i Mark*
 // da sé: è worker.Run l'UNICO punto che applica store.ApplyResult sul valore di ritorno.
 type RunTask[T any] func(t *Task, s T, items store.IWorkItemStore) error
 
@@ -32,6 +34,14 @@ type Task struct {
 	// (es. grpchandler dopo GetById) e worker.Run lo passa a store.ApplyResult per finalizzare
 	// in modo fenced. Vuoto finché non impostato.
 	LockToken string
+	// Retry è il numero di tentativi già consumati dall'item (WorkItem.Retry). Lo popola chi
+	// carica il WorkItem, esattamente come LockToken: worker.Run non legge la collection, e
+	// senza questo campo store.ApplyResult non avrebbe il contatore da confrontare col tetto.
+	Retry int
+	// MaxRetry è il tetto ai ritentativi del task, copiato dal wrapper del runner da chi
+	// instrada (il bridge grpchandler): nil = illimitato, per la stessa ragione di
+	// task.Config.MaxRetry — lo zero-value di un int direbbe "nessun ritentativo".
+	MaxRetry  *int
 	StartTime time.Time
 	Context   context.Context
 	Cancel    context.CancelFunc
@@ -47,6 +57,14 @@ func GenerateTask(id, jobid, taskName, objectid string, ctx context.Context, can
 		Context:   ctx,
 		Cancel:    cancel,
 	}
+}
+
+// ResolveMaxRetry applica la convenzione dell'assenza: nil = illimitato.
+func (w *Task) ResolveMaxRetry() int {
+	if w == nil || w.MaxRetry == nil {
+		return task.MaxRetryUnlimited
+	}
+	return *w.MaxRetry
 }
 
 func (w *Task) CancelContext() {

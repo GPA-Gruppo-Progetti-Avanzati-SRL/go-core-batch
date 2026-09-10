@@ -12,10 +12,11 @@ import (
 
 // markCall registra l'ultima transizione richiesta allo store.
 type markCall struct {
-	op    string
-	id    string
-	token string
-	after time.Duration
+	op     string
+	id     string
+	token  string
+	after  time.Duration
+	reason string
 }
 
 type fakeStore struct{ last markCall }
@@ -24,8 +25,8 @@ func (f *fakeStore) MarkDone(_ context.Context, ids []string, token string) *cor
 	f.last = markCall{op: "done", id: ids[0], token: token}
 	return nil
 }
-func (f *fakeStore) MarkFailed(_ context.Context, id, token, _ string) *core.ApplicationError {
-	f.last = markCall{op: "failed", id: id, token: token}
+func (f *fakeStore) MarkFailed(_ context.Context, id, token, reason string) *core.ApplicationError {
+	f.last = markCall{op: "failed", id: id, token: token, reason: reason}
 	return nil
 }
 func (f *fakeStore) MarkPending(_ context.Context, id, token string, after time.Duration) *core.ApplicationError {
@@ -63,12 +64,21 @@ func (f *fakeStore) List(context.Context, string, string, *page.Paging, page.Sor
 func TestApplyResult(t *testing.T) {
 	transient := errors.New("sink irraggiungibile")
 
+	// unlimited è il default dei casi che non esercitano il tetto: -1 riproduce la condotta
+	// storica, quando ApplyResult non lo conosceva affatto.
+	const unlimited = -1
+	maxRetry := func(n int) *int { return &n }
+
 	tests := []struct {
-		name    string
-		runErr  error
-		outcome Outcome
-		op      string
-		after   time.Duration
+		name   string
+		runErr error
+		// retry è WorkItem.Retry, i tentativi GIÀ consumati; maxRetry nil vale unlimited.
+		retry    int
+		maxRetry *int
+		outcome  Outcome
+		op       string
+		after    time.Duration
+		reason   string
 	}{
 		{name: "nil → done", runErr: nil, outcome: OutcomeDone, op: "done"},
 		{name: "ErrHandled → nessun Mark*", runErr: ErrHandled, outcome: OutcomeHandled, op: ""},
@@ -107,12 +117,58 @@ func TestApplyResult(t *testing.T) {
 			runErr:  core.TechnicalError().WithCause(transient),
 			outcome: OutcomeFailed, op: "failed",
 		},
+
+		// Il tetto ai ritentativi. Si misura su WorkItem.Retry, che conta i tentativi già
+		// consumati: `max-retry: N` concede N ritentativi, quindi N+1 esecuzioni in tutto.
+		{
+			name:   "tetto non raggiunto → pending",
+			runErr: Retry(time.Minute), retry: 1, maxRetry: maxRetry(3),
+			outcome: OutcomeRetry, op: "pending", after: time.Minute,
+		},
+		{
+			name:   "ultimo ritentativo concesso → pending",
+			runErr: Retry(time.Minute), retry: 2, maxRetry: maxRetry(3),
+			outcome: OutcomeRetry, op: "pending", after: time.Minute,
+		},
+		{
+			name:   "tetto raggiunto → failed col motivo",
+			runErr: RetryWithCause(time.Minute, transient), retry: 3, maxRetry: maxRetry(3),
+			outcome: OutcomeExhausted, op: "failed",
+			reason: "superati i 3 ritentativi previsti: sink irraggiungibile",
+		},
+		{
+			name:   "tetto superato senza causa → failed, motivo senza causa",
+			runErr: Retry(time.Minute), retry: 9, maxRetry: maxRetry(3),
+			outcome: OutcomeExhausted, op: "failed",
+			reason: "superati i 3 ritentativi previsti",
+		},
+		{
+			name:   "max-retry -1 → sempre pending",
+			runErr: Retry(time.Minute), retry: 999, maxRetry: maxRetry(unlimited),
+			outcome: OutcomeRetry, op: "pending", after: time.Minute,
+		},
+		{
+			name:   "max-retry 0 → failed al primo RetryError",
+			runErr: RetryWithCause(time.Minute, transient), retry: 0, maxRetry: maxRetry(0),
+			outcome: OutcomeExhausted, op: "failed",
+			reason: "superati i 0 ritentativi previsti: sink irraggiungibile",
+		},
+		{
+			name:   "il tetto non tocca gli errori non transienti",
+			runErr: transient, retry: 9, maxRetry: maxRetry(3),
+			outcome: OutcomeFailed, op: "failed", reason: transient.Error(),
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fs := &fakeStore{}
-			got, appErr := ApplyResult(context.Background(), fs, "item-1", "tok-1", tc.runErr)
+			max := unlimited
+			if tc.maxRetry != nil {
+				max = *tc.maxRetry
+			}
+			item := &WorkItem{Id: "item-1", LockToken: "tok-1", Retry: tc.retry}
+			got, appErr := ApplyResult(context.Background(), fs, item, max, tc.runErr)
 			if appErr != nil {
 				t.Fatalf("ApplyResult ha ritornato un errore: %v", appErr)
 			}
@@ -130,6 +186,9 @@ func TestApplyResult(t *testing.T) {
 			}
 			if tc.op == "pending" && fs.last.after != tc.after {
 				t.Errorf("retryDelay = %v, atteso %v", fs.last.after, tc.after)
+			}
+			if tc.reason != "" && fs.last.reason != tc.reason {
+				t.Errorf("motivo = %q, atteso %q", fs.last.reason, tc.reason)
 			}
 		})
 	}

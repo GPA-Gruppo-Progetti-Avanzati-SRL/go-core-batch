@@ -147,17 +147,22 @@ func Run[T any](semaphore chan struct{}, t *Task, services ITaskService[T], data
 		if items != nil {
 			if it, e := items.GetById(t.Context, t.ObjectId); e == nil {
 				t.LockToken = it.LockToken
+				t.Retry = it.Retry
 			}
 		}
 	}
 
 	// worker.Run è l'UNICO punto che finalizza il lifecycle del workitem per il worker pool:
 	// applica la convenzione condivisa store.ApplyResult (nil→Done, ErrHandled→no-op,
-	// RetryError→Pending, altro→Failed), fenced dal token del claim (t.LockToken). Senza items
-	// (no claiming) si salta la finalizzazione.
+	// RetryError→Pending fino al tetto del task e poi Exhausted, altro→Failed), fenced dal token
+	// del claim (t.LockToken). Senza items (no claiming) si salta la finalizzazione.
 	outcome := store.OutcomeDone
 	if items != nil {
-		o, markErr := store.ApplyResult(t.Context, items, t.ObjectId, t.LockToken, runErr)
+		// ApplyResult vuole l'item per id, token e contatore dei tentativi: qui il WorkItem non
+		// è in mano — chi lo carica è la RunTask — e i tre valori viaggiano sul Task. Si ricompone
+		// il minimo che ApplyResult legge, invece di rileggere la collection.
+		item := &store.WorkItem{Id: t.ObjectId, LockToken: t.LockToken, Retry: t.Retry}
+		o, markErr := store.ApplyResult(t.Context, items, item, t.ResolveMaxRetry(), runErr)
 		outcome = o
 		if markErr != nil {
 			log.Error().Msgf("W - %s - %s - finalizzazione lifecycle fallita: %v", t.GetJobId(), t.GetId(), markErr)

@@ -38,10 +38,37 @@ type Config struct {
 	// Name identifica l'istanza ed è ciò che job e worker referenziano; è anche il WorkItem.Type
 	// usato da claiming e instradamento. È OBBLIGATORIO e va scritto anche quando coincide col
 	// Type: è la chiave di routing, e due istanze dello stesso Type si distinguono solo per Name.
-	Name       string          `yaml:"name" mapstructure:"name" json:"name"`
-	Type       string          `yaml:"type" mapstructure:"type" json:"type" validate:"required"`
+	Name string `yaml:"name" mapstructure:"name" json:"name"`
+	Type string `yaml:"type" mapstructure:"type" json:"type" validate:"required"`
+	// MaxRetry è il numero massimo di RITENTATIVI di un work item: con `max-retry: 3` l'item
+	// viene eseguito fino a 4 volte in tutto. -1 = illimitato.
+	//
+	// Il tetto sta sul TASK e non sul job perché il ciclo di vita del work item è per task —
+	// ClaimPending e RecoverOrphans filtrano per task name — e lo stesso task può essere servito
+	// da più job o da un worker pool: item identici devono avere lo stesso limite.
+	//
+	// È un puntatore perché l'ASSENZA vale -1 (illimitato), che è la condotta storica. Lo
+	// zero-value di un int è 0, cioè "nessun ritentativo": come default silenzioso sarebbe il
+	// peggiore possibile per chi aggiorna la libreria senza toccare la propria config.
+	//
+	// ATTENZIONE: il contatore su cui si misura è WorkItem.Retry, che RecoverOrphans incrementa
+	// insieme a MarkPending. Il recupero di un item orfano — tipicamente il riavvio di un pod —
+	// consuma quindi un tentativo, anche se il runner non ha mai fallito.
+	MaxRetry   *int            `yaml:"max-retry" mapstructure:"max-retry" json:"max-retry"`
 	Properties core.Properties `yaml:"properties" mapstructure:"properties" json:"properties"`
 }
+
+// ResolveMaxRetry applica la convenzione dell'assenza: nessun valore configurato significa
+// illimitato, come si comportava il framework prima che il tetto esistesse.
+func (c Config) ResolveMaxRetry() int {
+	if c.MaxRetry == nil {
+		return MaxRetryUnlimited
+	}
+	return *c.MaxRetry
+}
+
+// MaxRetryUnlimited è il valore che disattiva il tetto ai ritentativi.
+const MaxRetryUnlimited = -1
 
 // ActiveSet è la fotografia della config che Apply mette a disposizione dei registratori.
 type ActiveSet struct {

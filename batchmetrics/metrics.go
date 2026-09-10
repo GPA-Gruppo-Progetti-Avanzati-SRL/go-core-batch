@@ -7,8 +7,9 @@
 //
 // La tassonomia è una sola:
 //
-//   - outcome ∈ done | handled | retry | failed  — l'esito fine di store.Outcome
-//   - status  ∈ success | error                  — lo split grossolano (done|handled → success)
+//   - outcome ∈ done | handled | retry | exhausted | failed  — l'esito fine di store.Outcome
+//   - status  ∈ success | error                              — lo split grossolano
+//     (done|handled → success)
 //
 // Le label sono job (nome del job di config) e task (NOME dell'istanza di task, cioè la voce di
 // `tasks:` che finisce in WorkItem.TaskName — non il task type: due istanze dello stesso type si
@@ -29,7 +30,11 @@ const (
 	OutcomeDone    = "done"
 	OutcomeHandled = "handled"
 	OutcomeRetry   = "retry"
-	OutcomeFailed  = "failed"
+	// OutcomeExhausted distingue "ha smesso di riprovare" da un fallimento secco: l'errore era
+	// transiente, ma il task ha esaurito i ritentativi previsti. Sulla dashboard è il segnale
+	// che un tetto è troppo basso o che un sistema a valle è giù da troppo tempo.
+	OutcomeExhausted = "exhausted"
+	OutcomeFailed    = "failed"
 
 	StatusSuccess = "success"
 	StatusError   = "error"
@@ -133,6 +138,8 @@ func OutcomeName(o store.Outcome) string {
 		return OutcomeHandled
 	case store.OutcomeRetry:
 		return OutcomeRetry
+	case store.OutcomeExhausted:
+		return OutcomeExhausted
 	case store.OutcomeFailed:
 		return OutcomeFailed
 	default:
@@ -141,7 +148,7 @@ func OutcomeName(o store.Outcome) string {
 }
 
 // Status è lo split grossolano dell'Outcome: done/handled sono successi (l'item è finalizzato),
-// retry/failed no.
+// retry/exhausted/failed no.
 func Status(o store.Outcome) string {
 	switch o {
 	case store.OutcomeDone, store.OutcomeHandled:

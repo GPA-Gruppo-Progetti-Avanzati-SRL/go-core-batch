@@ -79,7 +79,15 @@ quindi **funziona anche se l'errore è avvolto** in un `*ApplicationError` (per 
 | `nil` | `OutcomeDone` | `MarkDone` |
 | `store.ErrHandled` | `OutcomeHandled` | **nessun Mark\***: il runner ha già finalizzato il lifecycle (es. MarkDone + insert dei figli nella stessa transazione, outbox) |
 | `*store.RetryError` (`store.Retry(d)` / `store.RetryWithCause(d, err)`) | `OutcomeRetry` | `MarkPending(d)` → `next_run_at = now + d`; `d == 0` = riclaimabile al tick successivo |
+| `*store.RetryError` col tetto del task esaurito (`item.Retry >= max-retry`) | `OutcomeExhausted` | `MarkFailed` con «superati i N ritentativi previsti: \<causa\>» |
 | qualsiasi altro errore | `OutcomeFailed` | `MarkFailed` con `err.Error()` come messaggio |
+
+Il tetto è `tasks[].max-retry`: **numero di ritentativi**, quindi `N+1` esecuzioni in tutto.
+Assente o `-1` = illimitato (la condotta storica), `0` = nessun ritentativo. Si misura su
+`WorkItem.Retry`, lo stesso contatore che incrementa `RecoverOrphans`: il recupero di un item
+orfano — il riavvio di un pod — **consuma un tentativo** anche se il runner non ha mai fallito.
+`OutcomeExhausted` è distinto da `OutcomeFailed` perché la causa è diversa (l'errore era
+transiente, si è solo smesso di riprovare) ed è un'etichetta a sé di `batch_task_outcome_total`.
 
 Sentinelle correlate:
 

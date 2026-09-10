@@ -44,13 +44,16 @@ func Module(modes ...string) {
 
 // runnerService bridges []*runner.TaskRunner to worker.ITaskService[*runnerService].
 type runnerService struct {
-	routes map[string]runner.ITaskRunner
+	// routes conserva il *TaskRunner e non il solo ITaskRunner: porta anche il tetto ai
+	// ritentativi dell'istanza, che il bridge copia sul worker.Task perché worker.Run —
+	// l'unico punto di finalizzazione del pool — possa passarlo a store.ApplyResult.
+	routes map[string]*runner.TaskRunner
 }
 
 func newRunnerService(runners []*runner.TaskRunner) *runnerService {
-	routes := make(map[string]runner.ITaskRunner, len(runners))
+	routes := make(map[string]*runner.TaskRunner, len(runners))
 	for _, tr := range runners {
-		routes[tr.TaskName] = tr.Runner
+		routes[tr.TaskName] = tr
 	}
 	return &runnerService{routes: routes}
 }
@@ -58,7 +61,7 @@ func newRunnerService(runners []*runner.TaskRunner) *runnerService {
 func (s *runnerService) GetServices() *runnerService { return s }
 
 func (s *runnerService) GetTaskExecutions(taskName string) (worker.RunTask[*runnerService], bool) {
-	r, ok := s.routes[taskName]
+	tr, ok := s.routes[taskName]
 	if !ok {
 		return nil, false
 	}
@@ -69,8 +72,11 @@ func (s *runnerService) GetTaskExecutions(taskName string) (worker.RunTask[*runn
 		if appErr != nil {
 			return appErr
 		}
-		// Passa il fencing token (fresco) a worker.Run, che finalizzerà via store.ApplyResult.
+		// Passa a worker.Run quello che serve per finalizzare via store.ApplyResult: il fencing
+		// token (fresco), il contatore dei tentativi già consumati e il tetto dell'istanza.
 		t.LockToken = item.LockToken
-		return r.Run(t.Context, item)
+		t.Retry = item.Retry
+		t.MaxRetry = tr.MaxRetry
+		return tr.Runner.Run(t.Context, item)
 	}, true
 }

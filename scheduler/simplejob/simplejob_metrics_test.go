@@ -78,8 +78,9 @@ func items(n int) []*store.WorkItem {
 
 // TestRunEmitsPerItemMetrics è il caso che ha originato il fix: simplejob eseguiva i runner
 // senza emettere nulla, quindi "quanti item ha processato questo job" non aveva risposta.
-// I quattro esiti sono coperti tutti perché è la distinzione che il vecchio task_done/task_error
-// non poteva esprimere (un retry transitorio finiva fra i fallimenti).
+// I cinque esiti sono coperti tutti perché è la distinzione che il vecchio task_done/task_error
+// non poteva esprimere (un retry transitorio finiva fra i fallimenti, e con lui l'esaurimento
+// del tetto ai ritentativi).
 func TestRunEmitsPerItemMetrics(t *testing.T) {
 	const job, taskName = "metrics-job", "metrics-task"
 
@@ -89,7 +90,7 @@ func TestRunEmitsPerItemMetrics(t *testing.T) {
 	outcomes := map[string]func() float64{}
 	for _, o := range []string{
 		batchmetrics.OutcomeDone, batchmetrics.OutcomeHandled,
-		batchmetrics.OutcomeRetry, batchmetrics.OutcomeFailed,
+		batchmetrics.OutcomeRetry, batchmetrics.OutcomeExhausted, batchmetrics.OutcomeFailed,
 	} {
 		outcomes[o] = counterDelta(t, batchmetrics.TaskOutcome.WithLabelValues(taskName, o))
 	}
@@ -97,35 +98,40 @@ func TestRunEmitsPerItemMetrics(t *testing.T) {
 	success := counterDelta(t, batchmetrics.JobItemsProcessed.WithLabelValues(job, taskName, batchmetrics.StatusSuccess))
 	errored := counterDelta(t, batchmetrics.JobItemsProcessed.WithLabelValues(job, taskName, batchmetrics.StatusError))
 
-	runner := &scriptedRunner{results: []error{
+	// Il tetto è 1 ritentativo: l'item con Retry=0 torna PENDING, quello che ha già consumato
+	// il suo tentativo (Retry=1) esaurisce e va FAILED con outcome exhausted.
+	runner := NewNamed(taskName, taskName, &scriptedRunner{results: []error{
 		nil,                                 // done
 		store.ErrHandled,                    // handled
-		store.Retry(time.Second),            // retry
+		store.Retry(time.Second),            // retry     (item con Retry=0)
 		errors.New("fallimento definitivo"), // failed
-	}}
-	st := &metricsStore{pending: items(4)}
+		store.Retry(time.Second),            // exhausted (item con Retry=1)
+	}}).WithMaxRetry(1)
+	pending := items(5)
+	pending[4].Retry = 1
+	st := &metricsStore{pending: pending}
 
 	if err := run(job, taskName, false, time.Minute, time.Minute, 100, st, runner); err != nil {
 		t.Fatalf("run ha ritornato errore: %v", err)
 	}
 
-	if got := started(); got != 4 {
-		t.Errorf("batch_task_started_total += %v, atteso 4", got)
+	if got := started(); got != 5 {
+		t.Errorf("batch_task_started_total += %v, atteso 5", got)
 	}
 	for outcome, delta := range outcomes {
 		if got := delta(); got != 1 {
 			t.Errorf("batch_task_outcome_total{outcome=%q} += %v, atteso 1", outcome, got)
 		}
 	}
-	if got := claimed(); got != 4 {
-		t.Errorf("batch_job_items_claimed_total += %v, atteso 4", got)
+	if got := claimed(); got != 5 {
+		t.Errorf("batch_job_items_claimed_total += %v, atteso 5", got)
 	}
-	// done + handled sono successi, retry + failed no.
+	// done + handled sono successi, retry + exhausted + failed no.
 	if got := success(); got != 2 {
 		t.Errorf("processed success += %v, atteso 2", got)
 	}
-	if got := errored(); got != 2 {
-		t.Errorf("processed error += %v, atteso 2", got)
+	if got := errored(); got != 3 {
+		t.Errorf("processed error += %v, atteso 3", got)
 	}
 }
 
@@ -143,7 +149,7 @@ func TestRunIdleTickEmitsNothing(t *testing.T) {
 	processed := seriesCount(batchmetrics.JobItemsProcessed)
 	started := seriesCount(batchmetrics.TaskStarted)
 
-	if err := run(job, taskName, false, time.Minute, time.Minute, 100, st, &scriptedRunner{}); err != nil {
+	if err := run(job, taskName, false, time.Minute, time.Minute, 100, st, NewNamed(taskName, taskName, &scriptedRunner{})); err != nil {
 		t.Fatalf("run ha ritornato errore: %v", err)
 	}
 

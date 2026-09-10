@@ -37,6 +37,27 @@ type ITaskRunner = store.ITaskRunner
 type TaskRunner struct {
 	TaskName string
 	Runner   ITaskRunner
+	// MaxRetry è il tetto ai ritentativi dell'istanza, copiato da task.Config alla
+	// registrazione: task.Instances funziona solo dentro task.Apply, quindi dopo il boot non
+	// esiste più una lookup della config per nome e il limite deve viaggiare col runner.
+	//
+	// È un puntatore per la stessa ragione di task.Config.MaxRetry: nil vale illimitato, così
+	// nemmeno una struct costruita a mano finisce per negare ogni ritentativo.
+	MaxRetry *int
+}
+
+// ResolveMaxRetry applica la convenzione dell'assenza: nil = illimitato.
+func (t *TaskRunner) ResolveMaxRetry() int {
+	if t == nil || t.MaxRetry == nil {
+		return task.MaxRetryUnlimited
+	}
+	return *t.MaxRetry
+}
+
+// WithMaxRetry fissa il tetto ai ritentativi e restituisce il runner, per comporre con New.
+func (t *TaskRunner) WithMaxRetry(n int) *TaskRunner {
+	t.MaxRetry = &n
+	return t
 }
 
 // New returns a TaskRunner wrapping runner for the given task name.
@@ -46,14 +67,16 @@ func New(taskName string, r ITaskRunner) *TaskRunner {
 
 // MuxRunner routes task execution to the registered ITaskRunner by task name.
 type MuxRunner struct {
-	routes map[string]ITaskRunner
+	// routes conserva il *TaskRunner e non il solo ITaskRunner: serve anche il tetto ai
+	// ritentativi dell'istanza, che Run passa a store.ApplyResult.
+	routes map[string]*TaskRunner
 }
 
 // NewMux builds a MuxRunner from a slice of TaskRunners (typically collected via fx.Group).
 func NewMux(runners []*TaskRunner) *MuxRunner {
-	routes := make(map[string]ITaskRunner, len(runners))
+	routes := make(map[string]*TaskRunner, len(runners))
 	for _, tr := range runners {
-		routes[tr.TaskName] = tr.Runner
+		routes[tr.TaskName] = tr
 	}
 	return &MuxRunner{routes: routes}
 }
@@ -77,8 +100,8 @@ func (r *MuxRunner) Run(ctx context.Context, objectId, taskName string, items st
 		batchmetrics.ObserveTask(taskName, store.OutcomeFailed, start)
 		return appErr
 	}
-	runErr := runner.Run(ctx, item)
-	outcome, markErr := store.ApplyResult(ctx, items, item.Id, item.LockToken, runErr)
+	runErr := runner.Runner.Run(ctx, item)
+	outcome, markErr := store.ApplyResult(ctx, items, item, runner.ResolveMaxRetry(), runErr)
 	batchmetrics.ObserveTask(taskName, outcome, start)
 	if markErr != nil {
 		return markErr
@@ -134,7 +157,9 @@ func Register[T any, PT interface {
 	ITaskRunner
 }](taskType string) {
 	for _, tc := range task.Instances(taskType) {
-		core.ProvideStruct(func(p *T) *TaskRunner { return New(tc.Name, PT(p)) },
+		core.ProvideStruct(func(p *T) *TaskRunner {
+			return New(tc.Name, PT(p)).WithMaxRetry(tc.ResolveMaxRetry())
+		},
 			owner(tc.Name, taskType), tc.Properties, Group)
 	}
 }
