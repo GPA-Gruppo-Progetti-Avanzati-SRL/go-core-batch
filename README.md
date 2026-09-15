@@ -106,6 +106,48 @@ batch.Module(&cfg.BatchConfig, Register,
 )
 ```
 
+### Schedulare una cosa a un'ora — `feedjob`
+
+Quando il workitem non arriva da fuori (API, altro processo) né da una query, ma è **uno solo e
+sempre lo stesso**, il job `FeedTask` lo crea da configurazione. Non ha runner: lo lavora il job
+che serve il task indicato, qualunque famiglia sia.
+
+```go
+batch.Module(&cfg.BatchConfig, Register,
+    batch.WithStore(storemongo.Module),
+    batch.WithLocker(mongolocker.Module),
+    batch.WithModule(
+        feedjob.Module,                          // job FeedTask (solo feed)
+        simplejob.Module,                        // chi lo lavora
+    ),
+)
+```
+
+```yaml
+tasks:
+  - name: import-anagrafiche       # il task che ESEGUE
+    type: IMPORT
+jobs:
+  - name: feed-anagrafiche         # crea il workitem alle 3:00
+    type: FeedTask
+    cron: "0 0 3 * * *"
+    singleton: true
+    properties:
+      task: import-anagrafiche
+      objectId: ANAGRAFICHE
+  - name: import-pickup            # lo lavora entro 30s
+    type: IMPORT
+    cron: "*/30 * * * * *"
+    singleton: true
+    lock-timeout: 30m
+    properties: {task: import-anagrafiche, limit: 1}
+```
+
+La deduplica è `InsertIfNotActive` sulla coppia (task, objectId): finché l'esecuzione
+precedente è PENDING o IN_PROGRESS il tick successivo non ne accoda un'altra. **Attenzione alle
+chiavi del `payload`**: viper abbassa ricorsivamente le chiavi della config, quindi
+`payload: {idOrdine: X}` arriva come `idordine` e va riletto in modo case-insensitive.
+
 ### Notifiche Kafka — il producer lo wira l'app
 
 Il job `NotificationKafka` (`kafkajob.Module`) produce col producer di **go-core-kafka**, che l'app
@@ -173,7 +215,7 @@ batch:
 
 Il **`name` è obbligatorio su ogni voce e non ha fallback sul `type`**: va scritto anche quando i due coincidono, perché è la chiave di instradamento (i job lo referenziano con `properties.task`, i worker pool lo elencano in `tasks`, e finisce in `WorkItem.TaskName` — ci filtra `ClaimPending` e ci instrada il `MuxRunner`). Due istanze dello stesso `type` si distinguono solo per `name`. Una voce senza `name` fa fallire l'avvio prima che `register()` giri.
 
-La validazione riguarda i riferimenti **espliciti**: la property `task` di un distributedjob, il `task` di un simplejob, le `tasks` di un worker pool — nomi scritti a mano, quindi un nome inesistente è un typo. Quando nessuna property nomina il task, il nome è **dedotto** dal job type (è il caso del simplejob senza `task`): lì il task omonimo viene attivato se dichiarato, ma non se ne pretende l'esistenza, perché nello stesso campo stanno i job type del framework (`NotificationKafka`, `DistribuiteTask`, `DistribuiteTaskByQuery`, …) che non nominano alcun task.
+La validazione riguarda i riferimenti **espliciti**: la property `task` di un distributedjob, di un simplejob o di un `FeedTask`, le `tasks` di un worker pool — nomi scritti a mano, quindi un nome inesistente è un typo. Quando nessuna property nomina il task, il nome è **dedotto** dal job type (è il caso del simplejob senza `task`): lì il task omonimo viene attivato se dichiarato, ma non se ne pretende l'esistenza, perché nello stesso campo stanno i job type del framework (`NotificationKafka`, `DistribuiteTask`, `DistribuiteTaskByQuery`, …) che non nominano alcun task.
 
 **Il fail-fast è gate-ato sui modes.** `register` — e con esso la validazione di `tasks:` — gira solo se `core.Mode` è tra gli scheduler modes (`WithSchedulerModes`) o tra i worker modes (`WithWorkerModes`). In un processo `MODE=API`, dove nessun runner verrebbe costruito, il sottosistema batch non registra e non valida nulla: una misconfig della sezione `tasks:` deve far cadere i mode che il batch lo eseguono davvero, non l'API. Lo store resta l'eccezione di sempre (wirato in ogni mode), così l'API può iniettare `store.IWorkItemStore`. Una famiglia con modes vuoti è "sempre attiva", quindi un'app che non gate-a nulla si comporta come prima.
 
@@ -269,13 +311,16 @@ Le properties sono risolte **al boot**: un valore non convertibile o un `validat
 
 ## Modalità (job families)
 
-Tre famiglie di job, ciascuna un modulo Fx self-contained che registra la propria `scheduler.JobRegistration` nel value group `batch_jobs` (via `scheduler.ProvideJob`). Condividono lo scheduler (gocron + **distributed job lock** pluggable, applicato a *ogni* job) e lo store `work_items`.
+Quattro famiglie di job, ciascuna un modulo Fx self-contained che registra la propria `scheduler.JobRegistration` nel value group `batch_jobs` (via `scheduler.ProvideJob`). Condividono lo scheduler (gocron + **distributed job lock** pluggable, applicato a *ogni* job) e lo store `work_items`.
+
+Tre CONSUMANO workitem, una li PRODUCE: `feedjob` è l'unica che non ha runner, e si compone con qualunque delle altre.
 
 | Famiglia | Job type / registrazione | Quando usarla |
 |---|---|---|
 | **distributedjob** | `DistribuiteTask` · `DistribuiteTaskByQuery` · `DistribuiteTaskByS3File` — `localdispatcher`/`grpcdispatcher.Module()` + `runner.Register[T]` | **Molti** workitem da distribuire: claiming atomico anti-doppione, recovery orfani, `task_logs`, scaling orizzontale gRPC |
 | **simplejob** | tipo libero — `simplejob.Module()` + `simplejob.RegisterRunner[T]` | **Lavorazioni singole/poche** in-process (es. `singleton:true`): `RecoverOrphans`→`ClaimPending`→loop→`Run(item)`. Niente gRPC/task_logs |
 | **kafkajob** | tipo libero — invia i WorkItem su un topic Kafka col producer di go-core-kafka | Notifiche/outbox verso Kafka |
+| **feedjob** | `FeedTask` — `feedjob.Module()`, nessun runner | **Schedulare una cosa a un'ora**: crea UN workitem per tick, descritto nelle properties del job (`task`, `objectId`, `payload`). Non reclama e non dispatcha: a lavorarlo è il job che serve quel task |
 
 ```mermaid
 flowchart LR
@@ -283,6 +328,7 @@ flowchart LR
     Q -- "molti workitem,\nworker pool / gRPC" --> DJ["distributedjob\nClaimPending + RecoverOrphans\n+ task_logs"]
     Q -- "singola / poche,\nin-process" --> SJ["simplejob\nClaimPending + RecoverOrphans\nin-process, retry + timeout"]
     Q -- "outbox verso\nKafka" --> KJ["kafkajob\ncorekafka.IProducer"]
+    Q -- "creare il workitem\na cron, da configurazione" --> FJ["feedjob\nFeedTask: InsertIfNotActive\n(lo lavora un'altra famiglia)"]
 ```
 
 ---
@@ -406,7 +452,8 @@ go-core-batch/
 │   │   └── mongostore/           # IQueryStore su MongoDB
 │   │
 │   ├── simplejob/                # Job in-process con claiming (no gRPC/task_logs) — retry differito + timeout configurabile
-│   └── kafkajob/                 # Job che invia WorkItem su Kafka (producer di go-core-kafka)
+│   ├── kafkajob/                 # Job che invia WorkItem su Kafka (producer di go-core-kafka)
+│   └── feedjob/                  # Job FeedTask: crea un WorkItem per tick da configurazione (solo feed, nessun runner)
 │
 ├── s3/                           # Client S3 multi-service (aws-sdk-go-v2)
 │   ├── config.go                 # ServiceConfig, Config
