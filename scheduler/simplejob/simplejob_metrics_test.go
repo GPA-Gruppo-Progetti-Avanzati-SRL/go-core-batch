@@ -9,6 +9,7 @@ import (
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/page"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/batchmetrics"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/runner"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -21,9 +22,14 @@ type metricsStore struct {
 	pending []*store.WorkItem
 }
 
-func (s *metricsStore) ClaimPending(_ context.Context, _, _, _ string, _ int) ([]*store.WorkItem, *core.ApplicationError) {
-	out := s.pending
-	s.pending = nil
+// ClaimPending rispetta il limit, perché è ciò che il test deve poter osservare: SingleTask ne
+// chiede UNO per tick, e un fake che li consegnasse tutti nasconderebbe una regressione.
+func (s *metricsStore) ClaimPending(_ context.Context, _, _, _ string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+	if limit > len(s.pending) {
+		limit = len(s.pending)
+	}
+	out := s.pending[:limit]
+	s.pending = s.pending[limit:]
 	return out, nil
 }
 func (s *metricsStore) RecoverOrphans(context.Context, string, string, string, time.Duration, int) ([]*store.WorkItem, *core.ApplicationError) {
@@ -100,7 +106,7 @@ func TestRunEmitsPerItemMetrics(t *testing.T) {
 
 	// Il tetto è 1 ritentativo: l'item con Retry=0 torna PENDING, quello che ha già consumato
 	// il suo tentativo (Retry=1) esaurisce e va FAILED con outcome exhausted.
-	runner := NewNamed(taskName, taskName, &scriptedRunner{results: []error{
+	tr := runner.New(taskName, &scriptedRunner{results: []error{
 		nil,                                 // done
 		store.ErrHandled,                    // handled
 		store.Retry(time.Second),            // retry     (item con Retry=0)
@@ -111,8 +117,12 @@ func TestRunEmitsPerItemMetrics(t *testing.T) {
 	pending[4].Retry = 1
 	st := &metricsStore{pending: pending}
 
-	if err := run(job, taskName, false, time.Minute, time.Minute, 100, st, runner); err != nil {
-		t.Fatalf("run ha ritornato errore: %v", err)
+	// Cinque TICK, non un tick con cinque item: SingleTask ne esegue uno per volta, ed è la
+	// differenza che il job type promette nel nome.
+	for i := range 5 {
+		if err := run(job, taskName, time.Minute, time.Minute, st, tr); err != nil {
+			t.Fatalf("tick %d ha ritornato errore: %v", i, err)
+		}
 	}
 
 	if got := started(); got != 5 {
@@ -149,7 +159,7 @@ func TestRunIdleTickEmitsNothing(t *testing.T) {
 	processed := seriesCount(batchmetrics.JobItemsProcessed)
 	started := seriesCount(batchmetrics.TaskStarted)
 
-	if err := run(job, taskName, false, time.Minute, time.Minute, 100, st, NewNamed(taskName, taskName, &scriptedRunner{})); err != nil {
+	if err := run(job, taskName, time.Minute, time.Minute, st, runner.New(taskName, &scriptedRunner{})); err != nil {
 		t.Fatalf("run ha ritornato errore: %v", err)
 	}
 

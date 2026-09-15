@@ -2,11 +2,13 @@ package simplejob
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/page"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/runner"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
@@ -38,16 +40,19 @@ type notifyRunner struct {
 func (r *notifyRunner) Run(context.Context, *store.WorkItem) error { return nil }
 
 // Un solo test costruisce davvero il grafo fx (il container di go-core-app è uno stato globale di
-// processo): copre insieme istanze per voce di `tasks:`, properties per istanza, dipendenze condivise
-// e task non referenziato.
-func TestRegisterRunner_OneInstancePerTaskWithItsProps(t *testing.T) {
+// processo): copre insieme istanze per voce di `tasks:`, properties per istanza, dipendenze
+// condivise, task non referenziato — e il fatto che i runner registrati in modo AGNOSTICO
+// (runner.Register, gruppo batch_runners) arrivino a SingleTask senza che nessuno li abbia
+// registrati "per simplejob". È la cucitura fra i due perimetri, e sta qui perché è qui che si
+// chiude.
+func TestAgnosticRegistrationFeedsSingleTask(t *testing.T) {
 	svc := &fakeSvc{name: "svc"}
 	core.Supply(svc)
 	core.ProvideAs[store.IWorkItemStore](func() *fakeStore { return &fakeStore{} })
 
 	task.Apply(func() {
-		RegisterRunner[importRunner]("Import")
-		RegisterRunner[notifyRunner]("Notify") // nessun job/worker lo referenzia
+		runner.Register[importRunner]("Import")
+		runner.Register[notifyRunner]("Notify") // nessun job/worker lo referenzia
 	}, task.ActiveSet{
 		Tasks: []task.Config{
 			{Name: "import-in", Type: "Import", Properties: core.Properties{"folder": "/data/in"}},
@@ -58,11 +63,11 @@ func TestRegisterRunner_OneInstancePerTaskWithItsProps(t *testing.T) {
 	})
 	Module()
 
-	var runners []*SimpleTaskRunner
+	var runners []*runner.TaskRunner
 	var jobs []scheduler.JobRegistration
 	core.Invoke(func(p struct {
 		fx.In
-		Runners []*SimpleTaskRunner         `group:"batch_simple_runners"`
+		Runners []*runner.TaskRunner        `group:"batch_runners"`
 		Jobs    []scheduler.JobRegistration `group:"batch_jobs"`
 	}) {
 		runners, jobs = p.Runners, p.Jobs
@@ -79,9 +84,6 @@ func TestRegisterRunner_OneInstancePerTaskWithItsProps(t *testing.T) {
 	}
 	byName := map[string]*importRunner{}
 	for _, r := range runners {
-		if r.TaskType != "Import" {
-			t.Fatalf("task type errato: %q", r.TaskType)
-		}
 		byName[r.TaskName] = r.Runner.(*importRunner)
 	}
 	in, bulk := byName["import-in"], byName["import-bulk"]
@@ -100,26 +102,67 @@ func TestRegisterRunner_OneInstancePerTaskWithItsProps(t *testing.T) {
 	if in.scratch != nil {
 		t.Fatal("il campo di lavorazione deve restare a zero")
 	}
-	// Una sola JobRegistration per job type, anche con più istanze.
-	if len(jobs) != 1 || jobs[0].Type != "Import" {
-		t.Fatalf("attesa una JobRegistration per il solo job type Import, ottenuto %+v", jobs)
+	// UNA JobRegistration, e il suo type è il JOB type: il task type non ne genera più una
+	// propria, che era il punto in cui i due perimetri si confondevano.
+	if len(jobs) != 1 || jobs[0].Type != JobType {
+		t.Fatalf("attesa una sola JobRegistration di type %q, ottenuto %+v", JobType, jobs)
 	}
 }
 
-// Una JobRegistration per task type (che per simplejob è il type del job), con la mappa delle
-// istanze passata alla factory.
-func TestNewJobRegistrations_GroupsByJobType(t *testing.T) {
-	regs := newJobRegistrations(&fakeStore{}, []*SimpleTaskRunner{
-		NewNamed("Import", "import-in", &importRunner{}),
-		NewNamed("Import", "import-bulk", &importRunner{}),
-		NewNamed("Hello", "Hello", &importRunner{}),
+// La registrazione è una sola, di type SingleTask, con le istanze indicizzate per NOME: è il
+// nome che i job scrivono in `properties.task`.
+func TestNewJobRegistration_SingleTypeRoutedByName(t *testing.T) {
+	reg := newJobRegistration(&fakeStore{}, []*runner.TaskRunner{
+		runner.New("import-in", &importRunner{}),
+		runner.New("import-bulk", &importRunner{}),
 	})
-	if len(regs) != 2 {
-		t.Fatalf("attese 2 JobRegistration (Import, Hello), ottenuto %d", len(regs))
+	if reg.Type != JobType {
+		t.Fatalf("type = %q, atteso %q", reg.Type, JobType)
 	}
-	if regs[0].Type != "Import" || regs[1].Type != "Hello" {
-		t.Fatalf("ordine/type errati: %+v", regs)
+
+	if reg.Factory == nil {
+		t.Fatal("factory nil")
 	}
+}
+
+// La risoluzione del task NON ha ripieghi: il vecchio "se manca `task` uso il type del job" è
+// ciò che confondeva i perimetri, e un refuso finiva per eseguire silenziosamente altro.
+func TestRisolvi_NienteRipieghi(t *testing.T) {
+	instances := map[string]*runner.TaskRunner{"import-in": runner.New("import-in", &importRunner{})}
+
+	t.Run("task noto", func(t *testing.T) {
+		nome, tr, err := risolvi("j", instances, cfg(core.Properties{PropTask: "import-in"}))
+		if err != nil || nome != "import-in" || tr == nil {
+			t.Fatalf("nome=%q tr=%v err=%v", nome, tr, err)
+		}
+	})
+
+	t.Run("property mancante", func(t *testing.T) {
+		_, _, err := risolvi("j", instances, cfg(core.Properties{}))
+		if err == nil || !strings.Contains(err.Error(), PropTask) {
+			t.Fatalf("atteso un errore che nomini %q: %v", PropTask, err)
+		}
+	})
+
+	// Il job type NON è più un ripiego: un job che si chiamasse come il task non lo eseguirebbe.
+	t.Run("niente ripiego sul job type", func(t *testing.T) {
+		c := cfg(core.Properties{})
+		c.Type = "import-in"
+		if _, _, err := risolvi("import-in", instances, c); err == nil {
+			t.Error("il type del job non deve valere come nome del task")
+		}
+	})
+
+	t.Run("task sconosciuto", func(t *testing.T) {
+		_, _, err := risolvi("j", instances, cfg(core.Properties{PropTask: "boh"}))
+		if err == nil || !strings.Contains(err.Error(), "boh") {
+			t.Fatalf("atteso un errore che nomini il task: %v", err)
+		}
+	})
+}
+
+func cfg(props core.Properties) scheduler.Config {
+	return scheduler.Config{Name: "j", Type: JobType, LockTimeout: time.Minute, Properties: props}
 }
 
 // fakeStore: tutti no-op, serve solo a soddisfare il grafo.

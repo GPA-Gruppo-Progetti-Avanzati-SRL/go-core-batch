@@ -2,7 +2,7 @@
 // registro che, durante il wiring, lega ogni task type registrato alle sue istanze configurate.
 //
 // È un package foglia (importa solo go-core-app) proprio perché lo usano sia i registratori dei
-// runner (scheduler/distributedjob/runner, scheduler/simplejob) sia l'orchestratore batch.Module.
+// runner (il package runner, condiviso da tutte le famiglie di job) sia l'orchestratore batch.Module.
 //
 // Il modello:
 //
@@ -75,13 +75,13 @@ type ActiveSet struct {
 	// Tasks è la sezione `tasks:`.
 	Tasks []Config
 	// Referenced sono i task name citati ESPLICITAMENTE da jobs:/workers: — la property `task`
-	// di un distributedjob, la stessa `task` di un simplejob, le `tasks` di un worker pool. Sono
-	// riferimenti che l'autore della config ha scritto per nome: se non esistono è un typo.
+	// di un SingleTask, di un distributedjob o di un FeedTask, le `tasks` di un worker pool.
+	// Sono riferimenti che l'autore della config ha scritto per nome: se non esistono è un typo.
 	Referenced []string
-	// Implied sono i nomi DEDOTTI dal job type quando nessuna property nomina il task (un
-	// simplejob senza `task` gira il task omonimo). Attivano il task omonimo se dichiarato,
-	// ma non pretendono che esista: lo stesso posto è occupato dai job type del framework
-	// (NotificationKafka, DistribuiteTask, …), che non nominano alcun task.
+	// Implied sono i nomi DEDOTTI dal job type quando nessuna property nomina il task. Attivano
+	// il task omonimo se dichiarato, ma non pretendono che esista: lì stanno i job type del
+	// framework che un task non lo nominano (NotificationKafka), e pretenderne la dichiarazione
+	// sarebbe un falso positivo.
 	Implied []string
 }
 
@@ -201,9 +201,8 @@ func checkNames(a ActiveSet) {
 // inesistente sono errori di configurazione: panic al wiring, l'app non parte (in caso contrario il
 // job girerebbe a vuoto, senza mai trovare un runner).
 //
-// Solo i riferimenti ESPLICITI sono validati: quelli in Implied sono dedotti dal job type, e un job
-// type del framework (NotificationKafka, DistribuiteTask, …) non nomina alcun task — pretenderne la
-// dichiarazione sarebbe un falso positivo.
+// Solo i riferimenti ESPLICITI sono validati: quelli in Implied sono dedotti dal job type, e un
+// job type che non nomina alcun task (NotificationKafka) non può pretendere una dichiarazione.
 //
 // Resta un Warn il caso opposto — una voce di `tasks:` il cui type nessuno ha registrato — perché lo
 // stesso YAML è condiviso fra i MODE e fra binari diversi: uno scheduler che dispatcha via gRPC non

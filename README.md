@@ -54,7 +54,7 @@ Wira ogni componente **esplicitamente** e lo gate **solo** tramite i suoi modes:
 
 > In precedenza lo Scheduler doveva essere registrato **per ultimo** perché `newScheduler` leggeva una mappa globale `scheduler.Jobs` alla costruzione (popolata dai `Register()` dei componenti); registrarlo prima dava `"Job Type ... not found"`. Con il value group `batch_jobs` questo vincolo non esiste più.
 
-**La funzione `register`** è il gemello di quella di `corekafka.Module`: `batch.Module` la esegue **sincronamente**, con la config già nota. Le `runner.Register[T]` / `simplejob.RegisterRunner[T]` chiamate al suo interno forniscono a fx **una istanza di runner per ogni task attivo** — cioè per ogni voce di `tasks:` referenziata da un job o da un worker — ciascuna con le proprie properties. Un task che nessuno referenzia non viene istanziato: le sue dipendenze non entrano nel grafo e non vengono mai connesse.
+**La funzione `register`** è il gemello di quella di `corekafka.Module`: `batch.Module` la esegue **sincronamente**, con la config già nota. Le `runner.Register[T]` chiamate al suo interno forniscono a fx **una istanza di runner per ogni task attivo** — cioè per ogni voce di `tasks:` referenziata da un job o da un worker — ciascuna con le proprie properties. Un task che nessuno referenzia non viene istanziato: le sue dipendenze non entrano nel grafo e non vengono mai connesse.
 
 `register` è `nil` solo per un'app che non registra task runner: **registrare in un `init()` non è più supportato** (panic — lì la sezione `tasks:` non è nota). I costruttori scritti a mano con `runner.Provide` restano invece registrabili ovunque.
 
@@ -259,7 +259,7 @@ work item al suo runner **è un nome di istanza**, non un tipo:
 | `task.Config.TaskName()` | `.Name` | il metodo era diventato un getter banale dopo la rimozione della fallback |
 
 Restano `taskType` e `SimpleTaskRunner.TaskType` dove il tipo è davvero un tipo: il parametro di
-`runner.Register[T]`/`simplejob.RegisterRunner[T]`, cioè il task type registrato dal codice.
+`runner.Register[T]`, cioè il task type registrato dal codice.
 
 **Il rename dei campi persistiti richiede una migrazione dei dati.** Mongo:
 
@@ -318,7 +318,7 @@ Tre CONSUMANO workitem, una li PRODUCE: `feedjob` è l'unica che non ha runner, 
 | Famiglia | Job type / registrazione | Quando usarla |
 |---|---|---|
 | **distributedjob** | `DistribuiteTask` · `DistribuiteTaskByQuery` · `DistribuiteTaskByS3File` — `localdispatcher`/`grpcdispatcher.Module()` + `runner.Register[T]` | **Molti** workitem da distribuire: claiming atomico anti-doppione, recovery orfani, `task_logs`, scaling orizzontale gRPC |
-| **simplejob** | tipo libero — `simplejob.Module()` + `simplejob.RegisterRunner[T]` | **Lavorazioni singole/poche** in-process (es. `singleton:true`): `RecoverOrphans`→`ClaimPending`→loop→`Run(item)`. Niente gRPC/task_logs |
+| **simplejob** | `SingleTask` — `simplejob.Module()` + `runner.Register[T]` | **Una lavorazione alla volta** in-process: `RecoverOrphans`→`ClaimPending(1)`→`Run(item)`, eseguito dentro il tick. Niente gRPC/task_logs |
 | **kafkajob** | tipo libero — invia i WorkItem su un topic Kafka col producer di go-core-kafka | Notifiche/outbox verso Kafka |
 | **feedjob** | `FeedTask` — `feedjob.Module()`, nessun runner | **Schedulare una cosa a un'ora**: crea UN workitem per tick, descritto nelle properties del job (`task`, `objectId`, `payload`). Non reclama e non dispatcha: a lavorarlo è il job che serve quel task |
 
@@ -442,8 +442,6 @@ go-core-batch/
 │   │   ├── dispatcher.go         # Interface: ITaskDispatcher
 │   │   ├── store.go              # Interface: IQueryStore (feed DB)
 │   │   ├── job_claiming.go       # jobRunWithClaiming — feed → orphans → claim → dispatch
-│   │   ├── runner/               # Infrastruttura condivisa tra tutti i dispatcher
-│   │   │   └── runner.go         # ITaskRunner, TaskRunner, MuxRunner, Provide(), IFileRunner, RegisterFile()
 │   │   ├── localdispatcher/      # ITaskDispatcher in-process + Module()
 │   │   ├── grpcdispatcher/       # ITaskDispatcher via gRPC + Module()
 │   │   ├── queryfeed/            # Modulo Fx per DistribuiteTaskByQuery
@@ -451,9 +449,12 @@ go-core-batch/
 │   │   ├── sqlstore/             # IQueryStore su SQL
 │   │   └── mongostore/           # IQueryStore su MongoDB
 │   │
-│   ├── simplejob/                # Job in-process con claiming (no gRPC/task_logs) — retry differito + timeout configurabile
+│   ├── simplejob/                # Job SingleTask: un item per tick, eseguito in-process (no gRPC/task_logs)
 │   ├── kafkajob/                 # Job che invia WorkItem su Kafka (producer di go-core-kafka)
 │   └── feedjob/                  # Job FeedTask: crea un WorkItem per tick da configurazione (solo feed, nessun runner)
+│
+├── runner/                       # Registro AGNOSTICO dei task runner, condiviso da tutte le famiglie
+│   └── runner.go                 # ITaskRunner, TaskRunner, MuxRunner, Register[T](), Provide(), RegisterFile()
 │
 ├── s3/                           # Client S3 multi-service (aws-sdk-go-v2)
 │   ├── config.go                 # ServiceConfig, Config
@@ -520,7 +521,7 @@ app/batch/
 ```go
 package batch
 
-import "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/runner"
+import "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/runner"
 
 // Register è passata a batch.Module, che la esegue con la config già nota: i runner sono
 // istanziati una volta per ogni task attivo, con le properties della loro voce di `tasks:`.
@@ -536,7 +537,7 @@ package batch
 
 import (
     "context"
-    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/runner"
+    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/runner"
     "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 )
 
@@ -644,7 +645,7 @@ scheduler:
 // app/batch/batch.go
 import (
     "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/localdispatcher"
-    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/runner"
+    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/runner"
     "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/s3feed"
 )
 
@@ -709,7 +710,7 @@ Il blocco `properties:` di un job configura il **job type** e lo legge il framew
 | Campo | Tipo | Descrizione |
 |---|---|---|
 | `name` | string | Nome univoco del job |
-| `type` | string | distributedjob: `"DistribuiteTask"` · `"DistribuiteTaskByQuery"` · `"DistribuiteTaskByS3File"`. simplejob/kafkajob: il tipo registrato (arg di `RegisterRunner`) |
+| `type` | string | Il **job type**, sempre una stringa del framework: `"SingleTask"` · `"DistribuiteTask"` · `"DistribuiteTaskByQuery"` · `"DistribuiteTaskByS3File"` · `"FeedTask"` · `"NotificationKafka"`. Non è mai un task type: quale task eseguire lo dice `properties.task` |
 | `cron` | string | Espressione cron (secondi abilitati) |
 | `singleton` | bool | distributed job lock — evita run paralleli su repliche diverse |
 | `lock-timeout` | duration | Dopo quanto un IN_PROGRESS è considerato orfano (default: 10m — distributedjob e simplejob). simplejob: anche timeout del context di `Run` (default: 30s) |
@@ -724,10 +725,10 @@ Il blocco `properties:` di un job configura il **job type** e lo legge il framew
 | `properties.path` | string | Prefisso S3 per il listing (solo DistribuiteTaskByS3File) |
 | `properties.pattern` | string | Glob pattern sul basename del file, es. `"*.csv"` (solo DistribuiteTaskByS3File) |
 | `properties.dest-path` | string | Prefisso S3 dove spostare i file elaborati (solo DistribuiteTaskByS3File) |
-| `properties.task` | string | **Nome del task** da eseguire (solo simplejob), che è anche il `WorkItem.TaskName` letto da `ClaimPending`/`RecoverOrphans` — default = `type` del job |
-| `properties.selfFeed` | bool | `true`: il simplejob crea da sé un workitem a ogni tick (solo simplejob) |
+| `properties.task` | string | **Nome del task** da eseguire, che è anche il `WorkItem.TaskName` letto da `ClaimPending`/`RecoverOrphans`. Obbligatoria per `SingleTask`, `DistribuiteTask*` e `FeedTask`: nessun ripiego sul `type` del job |
+| `properties.objectId` | string | Cosa accodare (solo `FeedTask`): finisce in `WorkItem.ObjectId` ed è la chiave della deduplica |
 
-> I valori conservano il tipo YAML (`limit: 100` è un intero, `selfFeed: true` un booleano). Le forme
+> I valori conservano il tipo YAML (`limit: 100` è un intero, `singleton: true` un booleano). Le forme
 > virgolettate delle config esistenti (`limit: "100"`) restano valide: la conversione è automatica.
 > Le chiavi sono risolte in modo case-insensitive, perché viper abbassa le chiavi della config.
 
@@ -736,7 +737,7 @@ Il blocco `properties:` di un job configura il **job type** e lo legge il framew
 | Campo | Tipo | Descrizione |
 |---|---|---|
 | `name` | string | Nome dell'istanza, referenziato da `jobs[].properties.task`/`task` e da `workers[].tasks`; default = `type`. È anche il `WorkItem.TaskName` |
-| `type` | string | Task type registrato con `runner.Register[T]("...")` / `simplejob.RegisterRunner[T]("...")` |
+| `type` | string | Task type registrato con `runner.Register[T]("...")` |
 | `properties` | map | Configurazione applicativa, mappata sui campi `prop:` della struct del runner |
 
 ---
@@ -836,14 +837,10 @@ Job leggero per **lavorazioni singole/poche** eseguite in-process: claiming atom
 ```mermaid
 flowchart TD
     CRON([Cron tick]) --> LOCK["Distributed job lock\nsingleton → una sola replica"]
-    LOCK --> SELF
-    subgraph SELF["selfFeed — opzionale"]
-        SF["InsertIfNotActive\nObjectId = taskName"]
-    end
-    SELF --> RO["IWorkItemStore.RecoverOrphans\nIN_PROGRESS più vecchi di lock-timeout (default 10m)\nretry++"]
-    RO --> CP["IWorkItemStore.ClaimPending(taskName, limit)\nPENDING → IN_PROGRESS (atomico, max limit)"]
+    LOCK --> RO["IWorkItemStore.RecoverOrphans\nIN_PROGRESS più vecchi di lock-timeout (default 10m)\nretry++"]
+    RO --> CP["IWorkItemStore.ClaimPending(taskName, 1)\nPENDING → IN_PROGRESS (atomico, UN item)"]
     CP -- "nessun item" --> END([fine run])
-    CP -- "per ogni item (loop sequenziale)" --> RUN["ITaskRunner.Run(ctx, item)\n→ store.ApplyResult(return)\nctx timeout = lock-timeout (default 30s)"]
+    CP -- "l'item reclamato" --> RUN["ITaskRunner.Run(ctx, item)\n→ store.ApplyResult(return)\nctx timeout = lock-timeout (default 30s)"]
     RUN -- "return nil" --> DONE["MarkDone → DONE"]
     RUN -- "return store.Retry(d) / RetryWithCause(d, err)" --> PEND["MarkPending(d) → PENDING\nnext_run_at=now+d · retry++"]
     RUN -- "store.Retry con retry >= max-retry" --> EXH["MarkFailed → FAILED\noutcome=exhausted"]
@@ -855,7 +852,7 @@ flowchart TD
 
 > Stessa interfaccia (`store.ITaskRunner`) e stessa semantica di distributedjob: un runner è interscambiabile tra le due famiglie senza modifiche di logica.
 
-### Wiring — Module() + RegisterRunner[T]
+### Wiring — Module() + runner.Register[T]
 
 ```go
 // app/batch/batch.go
@@ -867,13 +864,15 @@ func init() {
 
 // Register è passata a batch.Module (o chiamata a mano dopo aver caricato la config).
 func Register() {
-    simplejob.RegisterRunner[myRunner]("MY_JOB")   // T: store.ITaskRunner, campi taggati
+    runner.Register[myRunner]("MY_TASK")   // T: store.ITaskRunner, campi taggati
 }
 ```
 
 In alternativa `simplejob.ProvideRunner(constructor)` (costruttore esplicito che ritorna `*simplejob.SimpleTaskRunner`, senza properties). `simplejob.Module()` raccoglie i runner dal gruppo `batch_simple_runners` ed emette una `scheduler.JobRegistration` per job type nel gruppo `batch_jobs`.
 
-Con più voci in `tasks:` dello stesso type, `RegisterRunner` fornisce **una istanza per voce**: la factory sceglie quella indicata dal `task` del job, che è il **nome del task** (ed è anche il `WorkItem.TaskName` su cui filtra il claiming). Omesso, vale il `type` del job — che copre il caso della voce senza `name`.
+Con più voci in `tasks:` dello stesso type, `runner.Register` fornisce **una istanza per voce**: la factory sceglie quella indicata dal `task` del job, che è il **nome del task** (ed è anche il `WorkItem.TaskName` su cui filtra il claiming). La property è obbligatoria e non ha ripieghi: il vecchio "omesso, vale il `type` del job" è ciò che confondeva job type e task type, e faceva sì che un refuso eseguisse in silenzio qualcos'altro.
+
+La registrazione è **agnostica**: `runner.Register` non dice da chi il task verrà eseguito. Lo stesso task, registrato una volta, può essere servito da un `SingleTask`, da un `DistribuiteTask` (dispatch in-process o gRPC) o da un worker pool — e a deciderlo è la voce di `jobs:`, non una ricompilazione.
 
 ### Runner — lifecycle dal valore di ritorno
 
@@ -922,29 +921,44 @@ func (r *myRunner) Run(ctx context.Context, item *store.WorkItem) error {
 ### Config YAML
 
 ```yaml
-scheduler:
+jobs:
   - name: "my-job"
-    type: "MY_JOB"          # = arg di RegisterRunner
+    type: "SingleTask"      # job type, sempre questo: quale task eseguire lo dice `task`
     cron: "*/5 * * * * *"
     singleton: true         # esclusività cross-replica
     lock-timeout: 15m       # timeout del context di Run (default 30s)
     properties:
-      task: "MY_JOB"    # opzionale — default = type
+      task: "my-task"       # OBBLIGATORIA — il nome di una voce di `tasks:`
 ```
 
-### selfFeed — job auto-alimentato
+### Da `selfFeed` a `FeedTask`
 
-Con la property `selfFeed: "true"`, il simplejob crea automaticamente un work item a ogni tick via `InsertIfNotActive` con `ObjectId = taskName`. Finché l'item è PENDING o IN_PROGRESS non ne viene creato un altro; una volta DONE, al tick successivo ne crea uno nuovo.
+`selfFeed` non esiste più: creare il work item è il perimetro di `FeedTask`, eseguirlo quello di
+`SingleTask`. Un job che si auto-alimentava diventa due job, uno per perimetro — e i due *quando*,
+che con `selfFeed` erano per forza lo stesso tick, tornano due cron distinti.
 
 ```yaml
+# prima
 scheduler:
   - name: "cleanup"
-    type: "Cleanup"
+    type: "Cleanup"                 # task type usato come job type
     cron: "0 */5 * * * *"
-    properties:
-      selfFeed: "true"
-      task: "Cleanup"   # opzionale — default = type
+    properties: {task: "Cleanup", selfFeed: "true"}
+
+# dopo
+jobs:
+  - name: "cleanup-feed"
+    type: "FeedTask"
+    cron: "0 */5 * * * *"           # quando accodare
+    properties: {task: "cleanup", objectId: "cleanup"}
+  - name: "cleanup"
+    type: "SingleTask"
+    cron: "*/30 * * * * *"          # quando eseguire
+    properties: {task: "cleanup"}
 ```
+
+`objectId` uguale al nome del task riproduce esattamente la chiave che `selfFeed` usava, quindi la
+deduplica si comporta come prima: finché l'item è PENDING o IN_PROGRESS non ne nasce un altro.
 
 ### Differenze da distributedjob
 
@@ -1029,9 +1043,9 @@ In gRPC, `limit` e pool size sono dimensioni ortogonali: lo scheduler può claim
 
 - **L'Invoke sullo `*scheduler.Scheduler`** è obbligatorio per forzarne la costruzione da Fx — lo fa già `scheduler.Module()` internamente (non serve aggiungerlo a mano).
 - **`localdispatcher.Module()` / `grpcdispatcher.Module()`** possono essere registrati in qualunque ordine rispetto allo scheduler: la `scheduler.JobRegistration` confluisce nel value group `batch_jobs`, che fx risolve prima di costruire `newScheduler`.
-- **`runner.Register[T]` / `simplejob.RegisterRunner[T]` vanno chiamate dentro la funzione `register` passata a `batch.Module`**: è lì che la config è nota. In un `init()` panicano. `runner.Provide(constructor)` (costruttore a mano) resta invece registrabile ovunque, ma non riceve le properties del task.
+- **`runner.Register[T]` va chiamata dentro la funzione `register` passata a `batch.Module`**: è lì che la config è nota. In un `init()` panica. `runner.Provide(constructor)` (costruttore a mano) resta invece registrabile ovunque, ma non riceve le properties del task.
 - **Ogni task va dichiarato in `tasks:`**: un task type registrato senza voce, o referenziato da un job con un nome inesistente, fa fallire l'avvio.
-- **Un campo esportato senza tag NON è una dipendenza**: nelle struct passate a `Register`/`RegisterRunner` è un campo di lavorazione. Le dipendenze vanno taggate `inject:`/`from:`, le properties `prop:`.
+- **Un campo esportato senza tag NON è una dipendenza**: nelle struct passate a `Register` è un campo di lavorazione. Le dipendenze vanno taggate `inject:`/`from:`, le properties `prop:`.
 - **`core.In` non va usato nelle struct dei runner**: è un errore al wiring. Il marker lo porta il param object sintetizzato dalla libreria; accettarlo lascerebbe passare struct scritte per la vecchia semantica, con le dipendenze silenziosamente a nil. Resta valido nei param object dei costruttori scritti a mano passati a `core.Provide`/`runner.Provide`.
 - **`jobs[].properties` è infrastrutturale, `tasks[].properties` è applicativo**: mettere la config del runner nel blocco del job non la fa arrivare ai campi `prop:`.
 - **Le chiavi delle properties sono case-insensitive**: viper abbassa le chiavi della config, quindi `task` nello YAML arriva come `worktype`. I getter di `core.Properties` e il binding `prop:` lo gestiscono; l'indicizzazione diretta della mappa no.

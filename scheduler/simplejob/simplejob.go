@@ -1,229 +1,162 @@
-// Package simplejob provides an in-process job type for go-core-batch.
-// It finds pending WorkItems and executes them locally via a registered ITaskRunner,
-// without the need for Kafka or gRPC infrastructure.
+// Package simplejob fornisce il job SingleTask: esegue in-process UN work item per tick del
+// task che la sua voce di `jobs:` nomina, senza Kafka né gRPC.
 //
-// Wiring: simplejob.Module() in init(), RegisterRunner dentro la funzione di registrazione passata a
-// batch.Module (è lì che la sezione `tasks:` è nota):
+// Sta in contrapposizione a DistribuiteTask, e la differenza è tutta nel nome: lì molti item
+// vengono reclamati e DISTRIBUITI a un dispatcher (in-process o gRPC), qui ne viene preso uno e
+// eseguito in linea, dentro il tick. Chi ha volumi usa l'altro.
+//
+// I perimetri sono tre e non si mescolano:
+//
+//   - COSA SI SA FARE — il task type, registrato una volta sola con runner.Register[T]; è
+//     agnostico, non dice da chi verrà eseguito;
+//   - COSA ACCODARE — il job FeedTask (package scheduler/feedjob), o l'applicazione, o l'API;
+//   - COME ESEGUIRE — questo job, oppure DistribuiteTask, oppure un worker pool.
+//
+// Passare dall'uno all'altro è una riga di `jobs:`, non una ricompilazione.
+//
+// Wiring: simplejob.Module() in un init() oppure via batch.WithModule; i runner si registrano
+// con runner.Register dentro la funzione passata a batch.Module (è lì che `tasks:` è nota):
 //
 //	simplejob.Module()
-//	func Register() { simplejob.RegisterRunner[myRunner]("HelloWorld") }
+//	func Register() { runner.Register[myRunner]("HelloWorld") }
 //
-// Config: il task va SEMPRE dichiarato; `taskName` nomina l'istanza da eseguire e vale di default il
-// `type` del job, quindi si omette quando la voce di `tasks:` non ha un `name` proprio.
+// Config — il `type` del job è SEMPRE "SingleTask", e `properties.task` nomina l'istanza da
+// eseguire fra quelle dichiarate in `tasks:`:
 //
 //	tasks:
-//	  - type: "HelloWorld"
+//	  - name: "hello-world"
+//	    type: "HelloWorld"
 //	    properties:
 //	      saluto: "ciao"
 //	jobs:
 //	  - name: "hello-world"
-//	    type: "HelloWorld"
+//	    type: "SingleTask"
 //	    cron: "*/5 * * * * *"
+//	    properties:
+//	      task: "hello-world"
 package simplejob
 
 import (
 	"context"
 	"fmt"
 	"time"
-	"uuid"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/batchmetrics"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/runner"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
 	gocron "github.com/go-co-op/gocron/v2"
 	"github.com/rs/zerolog/log"
 	"go.uber.org/fx"
 )
 
-// Group is the fx group tag used to collect all registered SimpleTaskRunners.
-const Group = "batch_simple_runners"
+// JobType è il `type` da scrivere nella voce di `jobs:`. È un JOB type, non un task type: quale
+// task eseguire lo dice `properties.task`.
+const JobType = "SingleTask"
 
-// ITaskRunner is the single runner contract, shared with distributedjob via
-// store.ITaskRunner — a runner is interchangeable between the two families.
-// The framework applies the lifecycle from the return value (see store.ApplyResult):
-// nil→MarkDone, store.Retry→MarkPending, err→MarkFailed, store.ErrHandled→left untouched.
+// Properties del job.
+const (
+	// PropTask nomina l'istanza di task da eseguire: una voce di `tasks:`. È OBBLIGATORIA e non
+	// ha ripieghi — prima mancando si eseguiva il task omonimo al job type, ed era il punto in
+	// cui i due perimetri si confondevano.
+	PropTask = "task"
+	// PropLimit è letta solo per dire che è ignorata: SingleTask esegue un item per tick.
+	PropLimit = "limit"
+)
+
+// ITaskRunner è il contratto dei runner, condiviso con distributedjob via store.ITaskRunner: lo
+// stesso runner è eseguibile dalle due famiglie senza modifiche.
+// Il framework applica il ciclo di vita dal valore di ritorno (vedi store.ApplyResult):
+// nil→MarkDone, store.Retry→MarkPending, err→MarkFailed, store.ErrHandled→lasciato intatto.
 type ITaskRunner = store.ITaskRunner
 
-// SimpleTaskRunner lega un ITaskRunner al task che esegue: TaskType è il tipo registrato con
-// RegisterRunner — per simplejob è anche il `type` della voce di `jobs:`, ed è quindi la chiave della
-// JobRegistration — e TaskName è il nome dell'istanza, cioè la voce della sezione `tasks:` da cui
-// arrivano le properties. È lo stesso nome che il job indica con `taskName` e che finisce in
-// WorkItem.Type.
-type SimpleTaskRunner struct {
-	TaskType string
-	TaskName string
-	Runner   ITaskRunner
-	// MaxRetry è il tetto ai ritentativi dell'istanza, copiato da task.Config alla
-	// registrazione: task.Instances funziona solo dentro task.Apply, quindi dopo il boot non
-	// esiste più una lookup della config per nome e il limite deve viaggiare col runner.
-	//
-	// È un puntatore per la stessa ragione di task.Config.MaxRetry: nil vale illimitato, così
-	// nemmeno una struct costruita a mano finisce per negare ogni ritentativo.
-	MaxRetry *int
-}
-
-// ResolveMaxRetry applica la convenzione dell'assenza: nil = illimitato.
-func (r *SimpleTaskRunner) ResolveMaxRetry() int {
-	if r == nil || r.MaxRetry == nil {
-		return task.MaxRetryUnlimited
-	}
-	return *r.MaxRetry
-}
-
-// WithMaxRetry fissa il tetto ai ritentativi e restituisce il runner, per comporre con New.
-func (r *SimpleTaskRunner) WithMaxRetry(n int) *SimpleTaskRunner {
-	r.MaxRetry = &n
-	return r
-}
-
-// New returns a SimpleTaskRunner wrapping runner for the given taskType (istanza col nome = tipo).
-func New(taskType string, r ITaskRunner) *SimpleTaskRunner {
-	return NewNamed(taskType, taskType, r)
-}
-
-// NewNamed è New per una istanza nominata (più voci in `tasks:` con lo stesso type).
-func NewNamed(taskType, taskName string, r ITaskRunner) *SimpleTaskRunner {
-	return &SimpleTaskRunner{TaskType: taskType, TaskName: taskName, Runner: r}
-}
-
-// ProvideRunner registers a SimpleTaskRunner constructor into the batch_simple_runners fx group.
-// The constructor may declare any fx-injectable parameters and must return *SimpleTaskRunner.
-func ProvideRunner(constructor any) {
-	core.Provide(fx.Annotate(constructor, fx.ResultTags(`group:"`+Group+`"`)))
-}
-
-// RegisterRunner registra il tipo struct T come runner del task type indicato — che per simplejob è
-// anche il `type` della voce di `jobs:`, non essendoci dispatch. T deve implementare
-// ITaskRunner (via receiver a puntatore) e dichiarare i suoi campi con i tag di go-core-app:
+// newJobRegistration trasforma i runner raccolti dal gruppo batch_runners in UNA JobRegistration
+// per il job type SingleTask, con le istanze indicizzate per nome.
 //
-//	`inject:""` / `inject:"nome"` / `from:"gruppo"`  → dipendenza iniettata da fx
-//	`prop:"chiave"`                                   → property applicativa del task (sezione `tasks:`)
-//	nessun tag                                        → campo di lavorazione, ignorato dal grafo
-//
-// Viene fornito un runner per ogni ISTANZA attiva: ogni voce della sezione `tasks:` con quel type e
-// referenziata da un job, che la indica con la property infrastrutturale `taskName` (di default il
-// `type` del job). La dichiarazione in `tasks:` è obbligatoria. L'istanza è condivisa fra i tick,
-// quindi i campi di lavorazione NON sono per-esecuzione.
-func RegisterRunner[T any, PT interface {
-	*T
-	ITaskRunner
-}](taskType string) {
-	for _, tc := range task.Instances(taskType) {
-		core.ProvideStruct(func(p *T) *SimpleTaskRunner {
-			return NewNamed(taskType, tc.Name, PT(p)).WithMaxRetry(tc.ResolveMaxRetry())
-		},
-			fmt.Sprintf("batch: simplejob task %q (type %q)", tc.Name, taskType), tc.Properties, Group)
-	}
-}
-
-// newJobRegistrations trasforma i SimpleTaskRunner raccolti dal gruppo batch_simple_runners
-// in JobRegistration, una per runner. Il job trova tutti i WorkItem pending di quel tipo e
-// chiama runner.Run per ciascuno. Items che riescono → DONE, che falliscono → FAILED. Un
-// runner può ritornare store.Retry/store.RetryWithCause per riportare l'item a PENDING (con
-// next_run_at schedulato) invece di fallirlo definitivamente, o store.ErrHandled per segnalare
-// di aver già finalizzato l'item (es. MarkDone insieme a insert figli in transazione), così il
-// framework non applica alcun Mark* di default.
-func newJobRegistrations(items store.IWorkItemStore, runners []*SimpleTaskRunner) []scheduler.JobRegistration {
-	// Un task type può avere più istanze (più voci in `tasks:`): la JobRegistration resta una per
-	// task type — che per simplejob è il `type` del job — e la factory sceglie l'istanza col
-	// `taskName` della singola voce di `jobs:`.
-	// La mappa conserva il *SimpleTaskRunner e non il solo ITaskRunner: serve anche il tetto ai
-	// ritentativi dell'istanza, che il job passa a store.ApplyResult.
-	byType := make(map[string]map[string]*SimpleTaskRunner)
-	var order []string
+// Una sola registrazione, e non più una per task type: il task type è il perimetro di CHI SA
+// FARE, il job type quello di COME ESEGUIRE, e prima il primo finiva per fare da secondo.
+// L'indicizzazione per nome è la stessa di runner.NewMux, cioè quella che distributedjob e il
+// worker gRPC usano già.
+func newJobRegistration(items store.IWorkItemStore, runners []*runner.TaskRunner) scheduler.JobRegistration {
+	byName := make(map[string]*runner.TaskRunner, len(runners))
 	for _, r := range runners {
-		if _, seen := byType[r.TaskType]; !seen {
-			byType[r.TaskType] = make(map[string]*SimpleTaskRunner)
-			order = append(order, r.TaskType)
-		}
-		byType[r.TaskType][r.TaskName] = r
+		byName[r.TaskName] = r
 	}
-
-	regs := make([]scheduler.JobRegistration, 0, len(order))
-	for _, taskType := range order {
-		regs = append(regs, scheduler.JobRegistration{Type: taskType, Factory: makeFactory(items, byType[taskType])})
-	}
-	return regs
+	return scheduler.JobRegistration{Type: JobType, Factory: makeFactory(items, byName)}
 }
 
-// Module registers all SimpleTaskRunners collected via the batch_simple_runners fx group,
-// emitting one JobRegistration per runner into the batch_jobs group (flatten). L'ordine
-// rispetto allo scheduler è indifferente: fx risolve il gruppo prima di newScheduler.
-// Call once in batch.go init().
+// Module registra il job SingleTask, che esegue i runner raccolti nel gruppo batch_runners —
+// lo stesso gruppo di distributedjob e del worker gRPC, perché la registrazione di un task non
+// dice da chi verrà eseguito. Se modes è vuoto registra sempre; altrimenti solo quando
+// core.Mode è tra i modes indicati.
 func Module(modes ...string) {
 	core.Provide(fx.Annotate(
-		newJobRegistrations,
-		fx.ParamTags(``, `group:"`+Group+`"`),
-		fx.ResultTags(`group:"`+scheduler.JobGroup+`,flatten"`),
+		newJobRegistration,
+		fx.ParamTags(``, `group:"`+runner.Group+`"`),
+		fx.ResultTags(`group:"`+scheduler.JobGroup+`"`),
 	), modes...)
 }
 
-// defaultBatchLimit caps how many items a single tick claims when no "limit" property is set.
-const defaultBatchLimit = 100
-
-func makeFactory(items store.IWorkItemStore, instances map[string]*SimpleTaskRunner) scheduler.JobFactory {
+func makeFactory(items store.IWorkItemStore, instances map[string]*runner.TaskRunner) scheduler.JobFactory {
 	return func(name string, _ *scheduler.Services, config scheduler.Config) gocron.Task {
-		// taskName nomina il TASK da eseguire: è il nome della voce di `tasks:` ed è anche il
-		// WorkItem.Type su cui filtra ClaimPending. Di default è il `type` del job, che copre il
-		// caso comune (voce di `tasks:` senza `name`, quindi nome uguale al type).
-		taskName := config.Properties.GetString("task", config.Type)
-		runner := instances[taskName]
-		selfFeed := config.Properties.GetBool("selfFeed", false)
-		// limit caps how many items are claimed (and processed) per tick.
-		limit := config.Properties.GetInt("limit", defaultBatchLimit)
-		if limit <= 0 {
-			log.Warn().Msgf("[%s] invalid 'limit' property, using default %d", name, defaultBatchLimit)
-			limit = defaultBatchLimit
+		taskName, tr, resolveErr := risolvi(name, instances, config)
+		if resolveErr != nil {
+			// Si logga già alla costruzione, non solo al primo tick: un job che non può
+			// funzionare deve vedersi all'avvio, quando c'è ancora qualcuno che guarda.
+			log.Error().Err(resolveErr).Msgf("[%s] il job fallirà a ogni tick", name)
+		}
+		if config.Properties.Has(PropLimit) {
+			log.Warn().Msgf("[%s] la property %q è ignorata: %s esegue un item per tick; "+
+				"per lavorarne molti si usa DistribuiteTask", name, PropLimit, JobType)
 		}
 		// Convenzione unica (scheduler.Config.ResolveTimeouts): LockTimeout governa sia il
 		// timeout del context di run sia l'età di orphan usata da RecoverOrphans.
 		timeout, orphanTimeout := config.ResolveTimeouts()
-		if runner == nil {
-			log.Error().Msgf("[%s] nessun task %q fra le istanze registrate per il type %q: il job fallirà a ogni tick",
-				name, taskName, config.Type)
-		}
 		return scheduler.LabeledTask(name, config.Type, func() error {
-			if runner == nil {
-				return fmt.Errorf("simplejob: job %q: nessun task %q registrato per il type %q", name, taskName, config.Type)
+			if resolveErr != nil {
+				return resolveErr
 			}
-			return run(name, taskName, selfFeed, timeout, orphanTimeout, limit, items, runner)
+			return run(name, taskName, timeout, orphanTimeout, items, tr)
 		})
 	}
 }
 
-func run(name, taskName string, selfFeed bool, timeout, orphanTimeout time.Duration, limit int, items store.IWorkItemStore, runner *SimpleTaskRunner) error {
+// risolvi trova il task che il job deve eseguire. Fallisce, invece di ripiegare: il ripiego che
+// c'era — il task omonimo al `type` del job — è esattamente ciò che confondeva i due perimetri,
+// e faceva sì che un refuso in `properties.task` eseguisse silenziosamente qualcos'altro.
+func risolvi(name string, instances map[string]*runner.TaskRunner, config scheduler.Config) (string, *runner.TaskRunner, error) {
+	taskName := config.Properties.GetString(PropTask, "")
+	if taskName == "" {
+		return "", nil, fmt.Errorf("simplejob: job %q di type %q senza la property %q: non si sa quale task eseguire",
+			name, JobType, PropTask)
+	}
+	tr, ok := instances[taskName]
+	if !ok {
+		return "", nil, fmt.Errorf("simplejob: job %q: nessun task %q fra le istanze registrate", name, taskName)
+	}
+	return taskName, tr, nil
+}
+
+// run esegue un tick: reclama un item del task e lo lavora in linea.
+//
+// Un item per tick è ciò che il nome del job type promette. Prima il tetto era la property
+// `limit` (default 100) e gli item venivano lavorati in SERIE dentro lo stesso tick, quindi
+// sotto lo stesso lock-timeout: un batch nascosto, con un timeout che valeva per tutti insieme.
+func run(name, taskName string, timeout, orphanTimeout time.Duration, items store.IWorkItemStore, tr *runner.TaskRunner) error {
 	jobID := fmt.Sprintf("%s-%s", name, time.Now().Format("20060102150405"))
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	if selfFeed {
-		now := time.Now()
-		wi := []*store.WorkItem{{
-			Id:         uuid.NewV7().String(),
-			TaskName:   taskName,
-			ObjectId:   taskName,
-			Status:     store.StatusPending,
-			CreateTime: now,
-			NextRunAt:  &now,
-		}}
-		if n, insertErr := items.InsertIfNotActive(ctx, wi); insertErr != nil {
-			log.Warn().Err(insertErr).Msgf("[%s] selfFeed insert failed", jobID)
-		} else if n > 0 {
-			log.Info().Msgf("[%s] selfFeed created %d workitem(s)", jobID, n)
-		}
-	}
-
-	// 1+2. Recupero orfani + claim dei PENDING freschi — loop comune (store.ClaimBatch).
-	// ClaimPending marca gli item IN_PROGRESS atomicamente (precondizione per MarkDone/Failed/Pending).
-	pending, _, _, claimErr := store.ClaimBatch(ctx, items, jobID, taskName, "", "", orphanTimeout, limit)
+	// 1+2. Recupero orfani + claim del PENDING più vecchio — loop comune (store.ClaimBatch).
+	// ClaimPending marca l'item IN_PROGRESS atomicamente (precondizione per MarkDone/Failed/Pending).
+	pending, _, _, claimErr := store.ClaimBatch(ctx, items, jobID, taskName, "", "", orphanTimeout, 1)
 	if claimErr != nil {
 		log.Error().Err(claimErr).Msgf("[%s] ClaimPending failed", jobID)
 		if len(pending) == 0 {
 			return claimErr
 		}
-		// altrimenti si processano comunque gli orfani già recuperati
+		// altrimenti si processa comunque l'orfano già recuperato
 	}
 	if len(pending) == 0 {
 		log.Trace().Msgf("[%s] no pending items", jobID)
@@ -234,43 +167,32 @@ func run(name, taskName string, selfFeed bool, timeout, orphanTimeout time.Durat
 	// timestamp e come label farebbe esplodere le serie.
 	batchmetrics.JobClaimed(name, taskName, len(pending))
 
-	log.Info().Msgf("[%s] processing %d item(s)", jobID, len(pending))
+	maxRetry := tr.ResolveMaxRetry()
+	item := pending[0]
 
-	maxRetry := runner.ResolveMaxRetry()
-
-	var done, handled, retried, failed, exhausted int
-	for _, item := range pending {
-		// Same lifecycle convention as distributedjob (store.ApplyResult):
-		// nil→MarkDone, store.Retry→MarkPending, err→MarkFailed, store.ErrHandled→untouched.
-		// Un store.Retry oltre il tetto del task diventa MarkFailed: vedi store.ApplyResult.
-		start := batchmetrics.TaskStart(taskName)
-		runErr := runner.Runner.Run(ctx, item)
-		outcome, markErr := store.ApplyResult(ctx, items, item, maxRetry, runErr)
-		// Lo stesso start alle due: misurano per costruzione la stessa finestra.
-		batchmetrics.ObserveTask(taskName, outcome, start)
-		batchmetrics.JobProcessed(name, taskName, outcome, start)
-		if markErr != nil {
-			log.Error().Err(markErr).Msgf("[%s] persisting outcome failed for item %s", jobID, item.Id)
-		}
-		switch outcome {
-		case store.OutcomeDone:
-			done++
-		case store.OutcomeHandled:
-			handled++
-		case store.OutcomeRetry:
-			log.Warn().Err(runErr).Msgf("[%s] transient failure for item %s, reset to PENDING", jobID, item.Id)
-			retried++
-		case store.OutcomeExhausted:
-			log.Error().Err(runErr).Msgf("[%s] item %s: esauriti i %d ritentativi previsti, FAILED",
-				jobID, item.Id, maxRetry)
-			exhausted++
-		case store.OutcomeFailed:
-			log.Error().Err(runErr).Msgf("[%s] task failed for item %s", jobID, item.Id)
-			failed++
-		}
+	// Stessa convenzione di ciclo di vita di distributedjob (store.ApplyResult):
+	// nil→MarkDone, store.Retry→MarkPending, err→MarkFailed, store.ErrHandled→intatto.
+	// Un store.Retry oltre il tetto del task diventa MarkFailed: vedi store.ApplyResult.
+	start := batchmetrics.TaskStart(taskName)
+	runErr := tr.Runner.Run(ctx, item)
+	outcome, markErr := store.ApplyResult(ctx, items, item, maxRetry, runErr)
+	// Lo stesso start alle due: misurano per costruzione la stessa finestra.
+	batchmetrics.ObserveTask(taskName, outcome, start)
+	batchmetrics.JobProcessed(name, taskName, outcome, start)
+	if markErr != nil {
+		log.Error().Err(markErr).Msgf("[%s] persisting outcome failed for item %s", jobID, item.Id)
 	}
 
-	log.Info().Msgf("[%s] done=%d handled=%d retry=%d exhausted=%d failed=%d",
-		jobID, done, handled, retried, exhausted, failed)
+	switch outcome {
+	case store.OutcomeRetry:
+		log.Warn().Err(runErr).Msgf("[%s] transient failure for item %s, reset to PENDING", jobID, item.Id)
+	case store.OutcomeExhausted:
+		log.Error().Err(runErr).Msgf("[%s] item %s: esauriti i %d ritentativi previsti, FAILED",
+			jobID, item.Id, maxRetry)
+	case store.OutcomeFailed:
+		log.Error().Err(runErr).Msgf("[%s] task failed for item %s", jobID, item.Id)
+	}
+
+	log.Info().Msgf("[%s] item %s: %s", jobID, item.Id, batchmetrics.OutcomeName(outcome))
 	return nil
 }

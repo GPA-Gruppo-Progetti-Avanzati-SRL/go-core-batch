@@ -98,13 +98,14 @@ func WithWorkerModule(m ...ModuleFunc) Option {
 //
 // I riferimenti sono di due specie, perché solo una delle due è un typo se non trova nulla:
 //
-//   - ESPLICITI — la property `task` di un distributedjob, il `taskName` di un simplejob, le
-//     `tasks` di un worker pool: nomi scritti a mano, che devono esistere in `tasks:`.
-//   - DEDOTTI — il job type, usato quando nessuna property nomina il task (un simplejob senza
-//     `taskName` gira il task omonimo). Qui non si può pretendere l'esistenza: nello stesso campo
-//     stanno i job type del framework (NotificationKafka, DistribuiteTask, DistribuiteTaskByQuery,
-//     …), che non nominano alcun task. E batch non può nemmeno elencarli per escluderli, visto che
-//     non importa i package dei job (è il vincolo di modularità compile-time di ModuleFunc).
+//   - ESPLICITI — la property `task` di un SingleTask, di un distributedjob, di un FeedTask, le
+//     `tasks` di un worker pool: nomi scritti a mano, che devono esistere in `tasks:`. Da quando
+//     ogni job nomina il task che serve, è qui che finisce quasi tutto.
+//   - DEDOTTI — il job type, quando nessuna property nomina il task. Resta per i job type del
+//     framework che un task non lo nominano affatto (NotificationKafka, che reclama i work item
+//     il cui TaskName è il proprio job type): lì non si può pretendere l'esistenza, e batch non
+//     può nemmeno elencarli per escluderli, visto che non importa i package dei job (è il
+//     vincolo di modularità compile-time di ModuleFunc).
 func ActiveSet(cfg *Config) task.ActiveSet {
 	seen := make(map[string]bool)
 	var referenced, implied []string
