@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo/mongoutil"
 	"slices"
 	"sync"
 	"time"
@@ -70,7 +71,7 @@ func (d *workItemData) warnIfIndexesMissing(ctx context.Context) {
 				Msg("go-core-batch: impossibile verificare gli indici di work_items")
 			return
 		}
-		defer cur.Close(ctx)
+		defer mongoutil.CloseCursor(ctx, cur, "warnIfIndexesMissing")
 		var idx []bson.M
 		if err := cur.All(ctx, &idx); err != nil {
 			log.Warn().Err(err).Str("collection", store.CollectionWorkItems).
@@ -148,7 +149,7 @@ func (d *workItemData) ClaimPending(ctx context.Context, taskName, destination, 
 	if err != nil {
 		return nil, errs.Tech(errs.CodeClaim).WithCause(err)
 	}
-	defer cursor.Close(ctx)
+	defer mongoutil.CloseCursor(ctx, cursor, "ClaimPending")
 
 	var candidates []struct {
 		Id string `bson:"_id"`
@@ -191,7 +192,7 @@ func (d *workItemData) byToken(ctx context.Context, code string, ids []string, t
 	if err != nil {
 		return nil, errs.Tech(code).WithCause(err)
 	}
-	defer cur.Close(ctx)
+	defer mongoutil.CloseCursor(ctx, cur, "byToken")
 	var claimed []*store.WorkItem
 	if err := cur.All(ctx, &claimed); err != nil {
 		return nil, errs.Tech(code).WithCause(err)
@@ -226,7 +227,7 @@ func (d *workItemData) RecoverOrphans(ctx context.Context, taskName, destination
 	if err != nil {
 		return nil, errs.Tech(errs.CodeRecover).WithCause(err)
 	}
-	defer cursor.Close(ctx)
+	defer mongoutil.CloseCursor(ctx, cursor, "RecoverOrphans")
 
 	var candidates []struct {
 		Id string `bson:"_id"`
@@ -452,7 +453,7 @@ func (d *workItemData) Purge(ctx context.Context, status string, olderThan time.
 	if err != nil {
 		return 0, errs.Tech(errs.CodePurge).WithCause(err)
 	}
-	defer cur.Close(ctx)
+	defer mongoutil.CloseCursor(ctx, cur, "Purge")
 	var vittime []struct {
 		Id string `bson:"_id"`
 	}

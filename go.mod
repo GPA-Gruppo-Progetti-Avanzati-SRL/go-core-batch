@@ -5,7 +5,7 @@ go 1.27.1
 require (
 	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app v0.0.29-0.20260916103925-732c51fed2f5
 	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-kafka v0.0.0-20260916104524-934b21ed7ff9
-	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo v0.0.20-0.20260916105926-2eaa193914d2
+	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo v0.0.20-0.20260921161356-cfd130884f93
 	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-sql v0.0.2-0.20260916105926-f2d74a564934
 	github.com/aws/aws-sdk-go-v2 v1.42.1
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.26

@@ -134,7 +134,9 @@ func publishBatch(ctx context.Context, name, jobId, topic string, all []*store.W
 	// ritornare un errore per l'intero batch lascerebbe in IN_PROGRESS anche gli item buoni, fino al
 	// recupero orfani.
 	for _, item := range invalid {
-		items.MarkFailed(ctx, item.Id, item.LockToken, "invalid payload")
+		if errMark := items.MarkFailed(ctx, item.Id, item.LockToken, "invalid payload"); errMark != nil {
+			log.Error().Err(errMark).Msgf("[%s] MarkFailed fallito per l'item %s", jobId, item.Id)
+		}
 	}
 	// Gli invalidi sono item finalizzati come falliti, quindi vanno contati in OGNI esito del tick e
 	// non solo quando sono tutti invalidi: altrimenti un tick misto ne perderebbe la traccia, e
@@ -151,7 +153,9 @@ func publishBatch(ctx context.Context, name, jobId, topic string, all []*store.W
 		// arriva qui è un *core.ApplicationError di go-core-kafka, che non conosce (né potrebbe
 		// conoscere) store.RetryError.
 		for _, item := range valid {
-			items.MarkPending(ctx, item.Id, item.LockToken, 0)
+			if errMark := items.MarkPending(ctx, item.Id, item.LockToken, 0); errMark != nil {
+				log.Error().Err(errMark).Msgf("[%s] MarkPending fallito per l'item %s", jobId, item.Id)
+			}
 		}
 		observeItems(name, len(valid), store.OutcomeRetry, itemsStart)
 		return errProduce

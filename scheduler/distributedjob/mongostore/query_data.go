@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo/mongoutil"
 	"strings"
 	"time"
 
@@ -88,7 +89,7 @@ func (q *queryData) GetIdsSorted(ctx context.Context, collection, filter, sort s
 	if err != nil {
 		return nil, errs.Tech(errs.CodeQueryCur).WithCause(err)
 	}
-	defer cursor.Close(ctx)
+	defer mongoutil.CloseCursor(ctx, cursor, "GetIdsSorted")
 
 	var ids []string
 	for cursor.Next(ctx) {

@@ -43,7 +43,11 @@ func (r *fileRunner) Run(ctx context.Context, item *store.WorkItem) error {
 		}
 		return store.RetryWithCause(0, fmt.Errorf("s3feed runner: download %q: %w", payload.Key, err))
 	}
-	defer reader.Close()
+	defer func() {
+		if errClose := reader.Close(); errClose != nil {
+			log.Warn().Err(errClose).Msgf("s3feed runner: chiusura del reader di %q fallita", payload.Key)
+		}
+	}()
 
 	// Delegate to the inner file runner. L'errore del handler segue la convenzione runner
 	// (store.ApplyResult): può ritornare store.Retry per essere ritentato, altrimenti va FAILED.

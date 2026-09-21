@@ -10,6 +10,7 @@ import (
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	mongo "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo/mongoutil"
 	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -89,7 +90,7 @@ func (d *batchData) PurgeTaskLogs(ctx context.Context, olderThan time.Time, limi
 	if err != nil {
 		return 0, errs.Tech(errs.CodePurge).WithCause(err)
 	}
-	defer cur.Close(ctx)
+	defer mongoutil.CloseCursor(ctx, cur, "PurgeTaskLogs")
 	var vittime []struct {
 		Id any `bson:"_id"`
 	}
