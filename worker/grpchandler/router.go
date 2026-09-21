@@ -1,6 +1,6 @@
 // Package grpchandler wires a gRPC server to a local worker pool.
 // Import this package only in distributed worker deployments — it pulls in google.golang.org/grpc.
-// Single-instance deployments use worker.Workers[T].DispatchTask directly (no gRPC).
+// Single-instance deployments use localdispatcher instead (no gRPC, no worker pool).
 package grpchandler
 
 import (

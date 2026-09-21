@@ -3,10 +3,8 @@ package worker
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/signal"
 	"runtime/pprof"
-	"syscall"
+	"sync"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"github.com/rs/zerolog/log"
@@ -22,11 +20,14 @@ const (
 
 type Workers[T any] struct {
 	TaskChannel map[string]chan *Task
-	OsChannel   chan os.Signal
 	StopChannel chan struct{} // closed by OnStop to broadcast shutdown to every worker
 	TaskRoutes  map[string]string
 	BatchData   store.IData
 	WorkItems   store.IWorkItemStore // optional: closes workitem lifecycle after each task
+	// wg traccia le task IN VOLO (non quelle in coda), per drenarle su OnStop. Senza, un
+	// SIGTERM troncava a metà i task già partiti: i loro item restavano IN_PROGRESS fino al
+	// recupero orfani, che oltre all'attesa gli consuma un ritentativo.
+	wg sync.WaitGroup
 }
 
 func (w *Workers[T]) GetChannel(name string) chan *Task {
@@ -45,14 +46,16 @@ func (w *Workers[T]) GetChannel(name string) chan *Task {
 
 // NewWorkers creates the worker pool. Pass items to enable workitem lifecycle management
 // (MarkDone/MarkFailed after each task). Pass nil when not using the claiming pattern.
+//
+// Il pool NON installa un handler di segnale: i segnali li gestisce l'applicazione (core.Run/fx),
+// e l'arresto arriva qui come OnStop. Prima c'era un signal.Notify di libreria — un side-effect
+// globale che rubava il segnale all'app — e i worker uscivano PRIMA che OnStop girasse, quindi
+// nessuno drenava le task già partite.
 func NewWorkers[T any](lc fx.Lifecycle, workersConfig []Config, data store.IData, services ITaskService[T], items store.IWorkItemStore) *Workers[T] {
 	w := &Workers[T]{BatchData: data, WorkItems: items}
 	w.TaskChannel = make(map[string]chan *Task)
 	w.TaskRoutes = make(map[string]string)
 	w.StopChannel = make(chan struct{})
-	osCh := make(chan os.Signal, 1)
-	signal.Notify(osCh, syscall.SIGINT, syscall.SIGTERM)
-	w.OsChannel = osCh
 
 	for _, v := range workersConfig {
 		value := v
@@ -73,7 +76,7 @@ func NewWorkers[T any](lc fx.Lifecycle, workersConfig []Config, data store.IData
 				// pprof.Do etichetta la goroutine del worker: da Go 1.27 la label
 				// compare anche nei traceback, oltre che nei profili.
 				go pprof.Do(context.Background(), pprof.Labels(LabelWorker, k), func(context.Context) {
-					NewWorker[T](k, channel, w.StopChannel, w.OsChannel, services, data, items)
+					w.loop(k, channel, services, data, items)
 				})
 			}
 			return nil
@@ -85,29 +88,39 @@ func NewWorkers[T any](lc fx.Lifecycle, workersConfig []Config, data store.IData
 			// already claimed (IN_PROGRESS) and get re-claimed by RecoverOrphans.
 			log.Info().Msg("Stopping worker pool")
 			close(w.StopChannel)
+			// Poi si attende il drain delle task IN VOLO, fino al deadline del context di stop
+			// di fx — stesso contratto del localdispatcher. Oltre il deadline le residue sono
+			// abbandonate: i loro item restano IN_PROGRESS e li recupera RecoverOrphans.
+			done := make(chan struct{})
+			go func() { w.wg.Wait(); close(done) }()
+			select {
+			case <-done:
+				log.Info().Msg("worker pool: tutte le task in volo drenate")
+			case <-ctx.Done():
+				log.Warn().Msg("worker pool: drain scaduto, task residue abbandonate (saranno recuperate come orfani)")
+			}
 			return nil
 		},
 	})
 	return w
 }
 
-func NewWorker[T any](k string, channel chan *Task, stopCh <-chan struct{}, osCh <-chan os.Signal, services ITaskService[T], batchData store.IData, items store.IWorkItemStore) *Workers[T] {
+// loop è il ciclo di un singolo worker: preleva dal canale e lancia l'esecuzione, con la
+// concorrenza limitata dalla capacità del canale.
+func (w *Workers[T]) loop(k string, channel chan *Task, services ITaskService[T], batchData store.IData, items store.IWorkItemStore) {
 	log.Info().Msgf("Starting %s worker", k)
 	capacity := cap(channel)
 	log.Info().Msgf("Capacity Channel %d", capacity)
 	semaphore := make(chan struct{}, capacity)
 	for {
 		select {
-		case <-stopCh:
+		case <-w.StopChannel:
 			log.Info().Msgf("Worker %s: stop signal received, terminating", k)
-			return nil
-		case <-osCh:
-			log.Info().Msgf("Worker %s: OS signal received, terminating", k)
-			return nil
+			return
 		case ch, ok := <-channel:
 			if !ok {
 				log.Info().Msgf("Worker %s: task channel closed, terminating", k)
-				return nil
+				return
 			}
 			if ch == nil {
 				continue
@@ -118,8 +131,10 @@ func NewWorker[T any](k string, channel chan *Task, stopCh <-chan struct{}, osCh
 			log.Trace().Msgf("W - %s - %s - Green Signal Executing task in worker channel", ch.GetJobId(), ch.GetId())
 			// Il set di label è esplicito (worker + tipo di task): pprof.Do lo
 			// sostituisce a quello ereditato dalla goroutine del worker.
-			go pprof.Do(context.Background(), pprof.Labels(LabelWorker, k, LabelTaskName, ch.TaskName), func(context.Context) {
-				Run(semaphore, ch, services, batchData, items)
+			w.wg.Go(func() {
+				pprof.Do(context.Background(), pprof.Labels(LabelWorker, k, LabelTaskName, ch.TaskName), func(context.Context) {
+					Run(semaphore, ch, services, batchData, items)
+				})
 			})
 		}
 	}
@@ -137,17 +152,16 @@ func Run[T any](semaphore chan struct{}, t *Task, services ITaskService[T], data
 	// stesso punto di finalizzazione sotto (ApplyResult → MarkFailed), niente ramo separato.
 	var runErr error
 	if run, ok := services.GetTaskExecutions(t.TaskName); ok {
-		// La RunTask (es. bridge grpchandler) carica il WorkItem e popola t.LockToken.
+		// La RunTask (es. bridge grpchandler) carica il WorkItem e popola t.Item.
 		runErr = run(t, services.GetServices(), items)
 	} else {
 		log.Error().Msgf("W - %s - %s - Esecuzione non trovata per tipo: %s", t.GetJobId(), t.GetId(), t.TaskName)
 		runErr = fmt.Errorf("execution type not found: %s", t.TaskName)
-		// Nessun RunTask ha caricato l'item: recupero il fencing token per poterlo comunque
-		// finalizzare (MarkFailed) in modo fenced, evitando un orphan-loop sul tipo sconosciuto.
-		if items != nil {
+		// Nessuna RunTask ha caricato l'item: lo si recupera per poterlo comunque finalizzare
+		// (MarkFailed) in modo fenced, evitando un orphan-loop sul tipo sconosciuto.
+		if t.Item == nil && items != nil {
 			if it, e := items.GetById(t.Context, t.ObjectId); e == nil {
-				t.LockToken = it.LockToken
-				t.Retry = it.Retry
+				t.Item = it
 			}
 		}
 	}
@@ -155,14 +169,10 @@ func Run[T any](semaphore chan struct{}, t *Task, services ITaskService[T], data
 	// worker.Run è l'UNICO punto che finalizza il lifecycle del workitem per il worker pool:
 	// applica la convenzione condivisa store.ApplyResult (nil→Done, ErrHandled→no-op,
 	// RetryError→Pending fino al tetto del task e poi Exhausted, altro→Failed), fenced dal token
-	// del claim (t.LockToken). Senza items (no claiming) si salta la finalizzazione.
+	// del claim. Senza items (no claiming) o senza item caricato si salta la finalizzazione.
 	outcome := store.OutcomeDone
-	if items != nil {
-		// ApplyResult vuole l'item per id, token e contatore dei tentativi: qui il WorkItem non
-		// è in mano — chi lo carica è la RunTask — e i tre valori viaggiano sul Task. Si ricompone
-		// il minimo che ApplyResult legge, invece di rileggere la collection.
-		item := &store.WorkItem{Id: t.ObjectId, LockToken: t.LockToken, Retry: t.Retry}
-		o, markErr := store.ApplyResult(t.Context, items, item, t.ResolveMaxRetry(), runErr)
+	if items != nil && t.Item != nil {
+		o, markErr := store.ApplyResult(t.Context, items, t.Item, t.ResolveMaxRetry(), runErr)
 		outcome = o
 		if markErr != nil {
 			log.Error().Msgf("W - %s - %s - finalizzazione lifecycle fallita: %v", t.GetJobId(), t.GetId(), markErr)

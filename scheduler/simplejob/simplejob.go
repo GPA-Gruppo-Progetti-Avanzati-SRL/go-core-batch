@@ -113,11 +113,12 @@ func makeFactory(items store.IWorkItemStore, instances map[string]*runner.TaskRu
 		// Convenzione unica (scheduler.Config.ResolveTimeouts): LockTimeout governa sia il
 		// timeout del context di run sia l'età di orphan usata da RecoverOrphans.
 		timeout, orphanTimeout := config.ResolveTimeouts()
+		backlog := config.Properties.GetBool(scheduler.PropBacklogMetrics, false)
 		return scheduler.LabeledTask(name, config.Type, func() error {
 			if resolveErr != nil {
 				return resolveErr
 			}
-			return run(name, taskName, timeout, orphanTimeout, items, tr)
+			return run(name, taskName, timeout, orphanTimeout, backlog, items, tr)
 		})
 	}
 }
@@ -138,37 +139,34 @@ func risolvi(name string, instances map[string]*runner.TaskRunner, config schedu
 	return taskName, tr, nil
 }
 
-// run esegue un tick: reclama un item del task e lo lavora in linea.
+// run esegue UN tick: claim di un solo item e lavorazione in linea.
 //
 // Un item per tick è ciò che il nome del job type promette. Prima il tetto era la property
-// `limit` (default 100) e gli item venivano lavorati in SERIE dentro lo stesso tick, quindi
-// sotto lo stesso lock-timeout: un batch nascosto, con un timeout che valeva per tutti insieme.
-func run(name, taskName string, timeout, orphanTimeout time.Duration, items store.IWorkItemStore, tr *runner.TaskRunner) error {
-	jobID := fmt.Sprintf("%s-%s", name, time.Now().Format("20060102150405"))
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+// `limit` (default 100) e gli item venivano lavorati in SERIE dentro lo stesso tick, quindi sotto
+// lo stesso lock-timeout: un batch nascosto, con un timeout che valeva per tutti insieme.
+func run(name, taskName string, timeout, orphanTimeout time.Duration, backlog bool,
+	items store.IWorkItemStore, tr *runner.TaskRunner) error {
 
-	// 1+2. Recupero orfani + claim del PENDING più vecchio — loop comune (store.ClaimBatch).
-	// ClaimPending marca l'item IN_PROGRESS atomicamente (precondizione per MarkDone/Failed/Pending).
-	pending, _, _, claimErr := store.ClaimBatch(ctx, items, jobID, taskName, "", "", orphanTimeout, 1)
-	if claimErr != nil {
-		log.Error().Err(claimErr).Msgf("[%s] ClaimPending failed", jobID)
-		if len(pending) == 0 {
-			return claimErr
-		}
-		// altrimenti si processa comunque l'orfano già recuperato
-	}
-	if len(pending) == 0 {
-		log.Trace().Msgf("[%s] no pending items", jobID)
-		return nil
-	}
+	return scheduler.ClaimingTick{
+		JobName:       name,
+		JobType:       JobType,
+		TaskName:      taskName,
+		Limit:         1,
+		RunTimeout:    timeout,
+		OrphanTimeout: orphanTimeout,
+		Backlog:       backlog,
+		Process: func(ctx context.Context, jobID string, batch []*store.WorkItem) error {
+			esegui(ctx, name, jobID, taskName, batch[0], tr, items)
+			return nil
+		},
+	}.Run(items)
+}
 
-	// Le metriche di job usano il NOME del job (name), non jobID: quest'ultimo contiene un
-	// timestamp e come label farebbe esplodere le serie.
-	batchmetrics.JobClaimed(name, taskName, len(pending))
+// esegui lavora l'unico item del tick, in linea.
+func esegui(ctx context.Context, name, jobID, taskName string, item *store.WorkItem,
+	tr *runner.TaskRunner, items store.IWorkItemStore) {
 
 	maxRetry := tr.ResolveMaxRetry()
-	item := pending[0]
 
 	// Stessa convenzione di ciclo di vita di distributedjob (store.ApplyResult):
 	// nil→MarkDone, store.Retry→MarkPending, err→MarkFailed, store.ErrHandled→intatto.
@@ -194,5 +192,4 @@ func run(name, taskName string, timeout, orphanTimeout time.Duration, items stor
 	}
 
 	log.Info().Msgf("[%s] item %s: %s", jobID, item.Id, batchmetrics.OutcomeName(outcome))
-	return nil
 }

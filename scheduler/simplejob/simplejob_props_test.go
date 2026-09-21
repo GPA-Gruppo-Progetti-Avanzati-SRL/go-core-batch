@@ -178,8 +178,12 @@ func (*fakeStore) MarkFailed(context.Context, string, string, string) *core.Appl
 func (*fakeStore) MarkPending(context.Context, string, string, time.Duration) *core.ApplicationError {
 	return nil
 }
-func (*fakeStore) FindPending(context.Context, string, string, string) ([]*store.WorkItem, *core.ApplicationError) {
-	return nil, nil
+func (*fakeStore) Release(context.Context, string, string) *core.ApplicationError { return nil }
+func (*fakeStore) Purge(context.Context, string, time.Time, int) (int, *core.ApplicationError) {
+	return 0, nil
+}
+func (*fakeStore) Backlog(context.Context, string, string, string) (int, time.Time, *core.ApplicationError) {
+	return 0, time.Time{}, nil
 }
 func (*fakeStore) ClaimPending(context.Context, string, string, string, int) ([]*store.WorkItem, *core.ApplicationError) {
 	return nil, nil

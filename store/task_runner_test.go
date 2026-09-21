@@ -35,8 +35,12 @@ func (f *fakeStore) MarkPending(_ context.Context, id, token string, after time.
 }
 
 // Resto dell'interfaccia: non esercitato da ApplyResult.
-func (f *fakeStore) FindPending(context.Context, string, string, string) ([]*WorkItem, *core.ApplicationError) {
-	return nil, nil
+func (f *fakeStore) Release(context.Context, string, string) *core.ApplicationError { return nil }
+func (f *fakeStore) Purge(context.Context, string, time.Time, int) (int, *core.ApplicationError) {
+	return 0, nil
+}
+func (f *fakeStore) Backlog(context.Context, string, string, string) (int, time.Time, *core.ApplicationError) {
+	return 0, time.Time{}, nil
 }
 func (f *fakeStore) ClaimPending(context.Context, string, string, string, int) ([]*WorkItem, *core.ApplicationError) {
 	return nil, nil

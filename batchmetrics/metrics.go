@@ -103,6 +103,25 @@ var (
 	}, []string{"task", "status"})
 )
 
+// Livello coda: quanto lavoro ASPETTA. È l'unica famiglia di gauge del modulo — i counter
+// dicono quanto ne è passato, non quanto ne resta, e dalla loro differenza non si distingue una
+// coda stabile da una che si allunga. Sono aggiornate al più una volta per tick, e solo dai job
+// che lo abilitano (property backlog-metrics): è una query in più, e la paga chi la vuole.
+var (
+	WorkItemsPending = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "batch_workitems_pending",
+		Help: "Number of PENDING work items waiting to be claimed",
+	}, []string{"job", "task"})
+
+	// WorkItemsOldestAge è l'età del PENDING più vecchio: è il numero su cui si costruisce un
+	// alert "c'è un item fermo", che il solo conteggio non dà (una coda corta ma ferma è peggio
+	// di una lunga che scorre).
+	WorkItemsOldestAge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "batch_workitems_oldest_age_seconds",
+		Help: "Age in seconds of the oldest PENDING work item (0 when the queue is empty)",
+	}, []string{"job", "task"})
+)
+
 // Livello dispatch: solo distributedjob.
 var (
 	// TaskAssignedTotal fonde le vecchie task_assigned e task_assigned_ko, che erano una
@@ -126,6 +145,8 @@ func init() {
 		TaskOutcome,
 		TaskDuration,
 		TaskAssignedTotal,
+		WorkItemsPending,
+		WorkItemsOldestAge,
 	)
 }
 
@@ -187,6 +208,18 @@ func JobProcessed(job, taskName string, o store.Outcome, started time.Time) {
 	status := Status(o)
 	JobItemsProcessed.WithLabelValues(job, taskName, status).Inc()
 	JobItemsProcessedDuration.WithLabelValues(job, taskName, status).Observe(time.Since(started).Seconds())
+}
+
+// ObserveBacklog aggiorna le gauge di coda. oldest a zero (coda vuota) si traduce in età 0 e
+// non in un'età enorme calcolata sull'epoch: una serie che salta a 1.7e9 renderebbe illeggibile
+// il grafico proprio quando non c'è niente da vedere.
+func ObserveBacklog(job, taskName string, pending int, oldest time.Time) {
+	WorkItemsPending.WithLabelValues(job, taskName).Set(float64(pending))
+	age := 0.0
+	if pending > 0 && !oldest.IsZero() {
+		age = time.Since(oldest).Seconds()
+	}
+	WorkItemsOldestAge.WithLabelValues(job, taskName).Set(age)
 }
 
 // TaskAssigned registra l'esito di un dispatch: err nil è un'assegnazione riuscita.

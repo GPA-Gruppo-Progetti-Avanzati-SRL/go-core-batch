@@ -45,8 +45,12 @@ func (s *metricsStore) MarkPending(context.Context, string, string, time.Duratio
 func (s *metricsStore) GetById(context.Context, string) (*store.WorkItem, *core.ApplicationError) {
 	return nil, nil
 }
-func (s *metricsStore) FindPending(context.Context, string, string, string) ([]*store.WorkItem, *core.ApplicationError) {
-	return nil, nil
+func (s *metricsStore) Release(context.Context, string, string) *core.ApplicationError { return nil }
+func (s *metricsStore) Purge(context.Context, string, time.Time, int) (int, *core.ApplicationError) {
+	return 0, nil
+}
+func (s *metricsStore) Backlog(context.Context, string, string, string) (int, time.Time, *core.ApplicationError) {
+	return 0, time.Time{}, nil
 }
 func (s *metricsStore) Insert(context.Context, []*store.WorkItem) *core.ApplicationError { return nil }
 func (s *metricsStore) InsertIfNotActive(context.Context, []*store.WorkItem) (int, *core.ApplicationError) {
@@ -120,7 +124,7 @@ func TestRunEmitsPerItemMetrics(t *testing.T) {
 	// Cinque TICK, non un tick con cinque item: SingleTask ne esegue uno per volta, ed è la
 	// differenza che il job type promette nel nome.
 	for i := range 5 {
-		if err := run(job, taskName, time.Minute, time.Minute, st, tr); err != nil {
+		if err := run(job, taskName, time.Minute, time.Minute, false, st, tr); err != nil {
 			t.Fatalf("tick %d ha ritornato errore: %v", i, err)
 		}
 	}
@@ -159,7 +163,7 @@ func TestRunIdleTickEmitsNothing(t *testing.T) {
 	processed := seriesCount(batchmetrics.JobItemsProcessed)
 	started := seriesCount(batchmetrics.TaskStarted)
 
-	if err := run(job, taskName, time.Minute, time.Minute, st, runner.New(taskName, &scriptedRunner{})); err != nil {
+	if err := run(job, taskName, time.Minute, time.Minute, false, st, runner.New(taskName, &scriptedRunner{})); err != nil {
 		t.Fatalf("run ha ritornato errore: %v", err)
 	}
 

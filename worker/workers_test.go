@@ -41,8 +41,12 @@ func (f *fakeStore) GetById(_ context.Context, _ string) (*store.WorkItem, *core
 }
 
 // resto dell'interfaccia: no-op non usati da worker.Run.
-func (f *fakeStore) FindPending(context.Context, string, string, string) ([]*store.WorkItem, *core.ApplicationError) {
-	return nil, nil
+func (f *fakeStore) Release(context.Context, string, string) *core.ApplicationError { return nil }
+func (f *fakeStore) Purge(context.Context, string, time.Time, int) (int, *core.ApplicationError) {
+	return 0, nil
+}
+func (f *fakeStore) Backlog(context.Context, string, string, string) (int, time.Time, *core.ApplicationError) {
+	return 0, time.Time{}, nil
 }
 func (f *fakeStore) ClaimPending(context.Context, string, string, string, int) ([]*store.WorkItem, *core.ApplicationError) {
 	return nil, nil
@@ -72,6 +76,10 @@ func (fakeData) SetTaskDone(context.Context, string, string, string, string)    
 func (fakeData) SetTaskInError(context.Context, string, string, string, string, string)       {}
 func (fakeData) SetTaskAssigned(context.Context, string, string, string, string)              {}
 func (fakeData) SetTaskAssignationKO(context.Context, string, string, string, string, string) {}
+func (fakeData) InsertTaskLogs(context.Context, []*store.TaskLog)                             {}
+func (fakeData) PurgeTaskLogs(context.Context, time.Time, int) (int, *core.ApplicationError) {
+	return 0, nil
+}
 
 // fakeService implementa ITaskService[*fakeService] con un esito RunTask configurabile.
 type fakeService struct {
@@ -119,10 +127,11 @@ func TestRunLifecycle(t *testing.T) {
 			fs := &fakeStore{item: &store.WorkItem{Id: "obj-1", LockToken: "tok-1"}}
 			svc := &fakeService{known: c.known, result: c.result}
 			ctx, cancel := context.WithCancel(context.Background())
-			// Nel path known-type è il RunTask (bridge) a popolare t.LockToken; qui lo simuliamo.
-			// Nel path type-not-found worker.Run lo recupera da GetById (fs.item.LockToken).
-			task := &Task{Id: "t1", JobId: "j1", TaskName: "MY_TASK", ObjectId: "obj-1", LockToken: "tok-1",
-				Retry: c.retry, MaxRetry: c.maxRetry, Context: ctx, Cancel: cancel}
+			// Nel path known-type è il RunTask (bridge) a popolare t.Item; qui lo simuliamo.
+			// Nel path type-not-found worker.Run lo recupera da GetById (fs.item).
+			task := &Task{Id: "t1", JobId: "j1", TaskName: "MY_TASK", ObjectId: "obj-1",
+				Item:     &store.WorkItem{Id: "obj-1", LockToken: "tok-1", Retry: c.retry},
+				MaxRetry: c.maxRetry, Context: ctx, Cancel: cancel}
 			sem := make(chan struct{}, 1)
 			sem <- struct{}{}
 

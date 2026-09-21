@@ -30,17 +30,19 @@ type Task struct {
 	// WorkItem ed è la chiave con cui il pool trova la RunTask registrata.
 	TaskName string
 	ObjectId string
-	// LockToken è il fencing token del claim dell'item: lo popola chi carica il WorkItem
-	// (es. grpchandler dopo GetById) e worker.Run lo passa a store.ApplyResult per finalizzare
-	// in modo fenced. Vuoto finché non impostato.
-	LockToken string
-	// Retry è il numero di tentativi già consumati dall'item (WorkItem.Retry). Lo popola chi
-	// carica il WorkItem, esattamente come LockToken: worker.Run non legge la collection, e
-	// senza questo campo store.ApplyResult non avrebbe il contatore da confrontare col tetto.
-	Retry int
+	// Item è il WorkItem su cui il task lavora. Lo popola chi lo carica — il bridge grpchandler
+	// dopo la GetById, o il dispatch in-process che lo riceve già claimato dal job — e worker.Run
+	// lo passa INTERO a store.ApplyResult.
+	//
+	// Prima qui c'erano tre campi copiati a mano (LockToken, Retry) e ApplyResult riceveva un
+	// WorkItem ricostruito con quelli: funzionava solo perché ApplyResult leggeva esattamente
+	// quei campi, e il giorno in cui ne avesse letto un quarto il worker pool avrebbe sbagliato
+	// in silenzio. Resta nil finché nessuno ha caricato l'item (task type sconosciuto).
+	Item *store.WorkItem
 	// MaxRetry è il tetto ai ritentativi del task, copiato dal wrapper del runner da chi
 	// instrada (il bridge grpchandler): nil = illimitato, per la stessa ragione di
-	// task.Config.MaxRetry — lo zero-value di un int direbbe "nessun ritentativo".
+	// task.Config.MaxRetry — lo zero-value di un int direbbe "nessun ritentativo". Non sta sul
+	// WorkItem perché non è un dato dell'item: è configurazione dell'istanza di task.
 	MaxRetry  *int
 	StartTime time.Time
 	Context   context.Context

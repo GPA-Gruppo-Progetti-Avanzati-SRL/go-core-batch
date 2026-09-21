@@ -3,6 +3,7 @@ package sqlstore
 import (
 	"context"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -43,40 +44,57 @@ func newWorkItemDataSQL(sqlService *coresql.Service) *workItemDataSQL {
 
 var _ store.IWorkItemStore = (*workItemDataSQL)(nil)
 
-// warnIfActiveIndexMissing logga (una sola volta) un warning se l'indice partiale unico
-// uk_workitem_active non esiste. Senza quell'indice InsertIfNotActive (ON CONFLICT DO NOTHING)
-// non deduplica → rischio work item duplicati e doppia esecuzione. L'indice NON viene creato
-// in automatico (gestione manuale via EnsureIndexes o migration/ops).
-func (d *workItemDataSQL) warnIfActiveIndexMissing(ctx context.Context) {
-	d.idxWarnOnce.Do(func() {
-		var n int
-		if err := d.DB.NewRaw(
-			"SELECT COUNT(*) FROM pg_indexes WHERE indexname = ?", "uk_workitem_active",
-		).Scan(ctx, &n); err != nil {
-			log.Warn().Err(err).Msg("go-core-batch: impossibile verificare l'indice uk_workitem_active")
-			return
-		}
-		if n == 0 {
-			log.Warn().Msg("go-core-batch: indice partiale unico 'uk_workitem_active' ASSENTE su work_items — InsertIfNotActive NON deduplica (rischio work item duplicati / doppia esecuzione). Crearlo via sqlstore.EnsureIndexes o migration, oppure confermare che l'assenza è voluta.")
-		}
-	})
+// indiciAttesi sono gli indici su cui gira il sottosistema. Non vengono creati in automatico
+// (gestione manuale via EnsureIndexes o migration/ops): il warning rende l'eventuale assenza una
+// scelta consapevole, non una svista.
+//
+//   - uk_workitem_active — unico parziale: senza, InsertIfNotActive (ON CONFLICT DO NOTHING) NON
+//     deduplica e nascono work item doppi, con rischio di doppia esecuzione;
+//   - ix_workitem_claim / ix_workitem_orphan / ix_workitem_claim_dest — servono le query di
+//     ClaimPending e RecoverOrphans, eseguite da ogni job a OGNI tick. Senza, il claim fa una
+//     sequential scan: un costo che cresce con lo storico invece che col lavoro da fare.
+var indiciAttesi = []string{
+	"uk_workitem_active",
+	"ix_workitem_claim",
+	"ix_workitem_orphan",
+	"ix_workitem_claim_dest",
 }
 
-func (d *workItemDataSQL) FindPending(ctx context.Context, taskName, destination, objectType string) ([]*store.WorkItem, *core.ApplicationError) {
-	filter := workItemFilter{
-		TaskName:    taskName,
-		Status:      store.StatusPending,
-		Destination: destination,
-		ObjectType:  objectType,
-	}
-	sort := page.SortRequest{{Field: "create_time", Dir: page.Asc}}
-	return d.Sql.GetAllByFilterSorted[store.WorkItem](ctx, filter, sort)
+// warnIfIndexesMissing logga (una sola volta) gli indici attesi che non esistono.
+func (d *workItemDataSQL) warnIfIndexesMissing(ctx context.Context) {
+	d.idxWarnOnce.Do(func() {
+		var presenti []string
+		if err := d.DB.NewRaw(
+			"SELECT indexname FROM pg_indexes WHERE tablename = ?", store.TableWorkItems,
+		).Scan(ctx, &presenti); err != nil {
+			log.Warn().Err(err).Msg("go-core-batch: impossibile verificare gli indici di work_items")
+			return
+		}
+		var mancanti []string
+		for _, nome := range indiciAttesi {
+			if !slices.Contains(presenti, nome) {
+				mancanti = append(mancanti, nome)
+			}
+		}
+		if len(mancanti) == 0 {
+			return
+		}
+		if slices.Contains(mancanti, "uk_workitem_active") {
+			log.Warn().Msg("go-core-batch: indice partiale unico 'uk_workitem_active' ASSENTE su work_items — InsertIfNotActive NON deduplica (rischio work item duplicati / doppia esecuzione)")
+		}
+		log.Warn().Strs("indici", mancanti).
+			Msg("go-core-batch: indici ASSENTI su work_items — il claim di ogni tick fa una sequential scan. Crearli via sqlstore.EnsureIndexes o migration, oppure confermare che l'assenza è voluta.")
+	})
 }
 
 // ClaimPending atomically selects up to limit PENDING items of taskName,
 // marks them IN_PROGRESS with locked_at = now, and returns the full records.
 // Uses SELECT FOR UPDATE SKIP LOCKED — safe across multiple replicas.
 func (d *workItemDataSQL) ClaimPending(ctx context.Context, taskName, destination, objectType string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+	// La verifica sta anche qui, e non solo su InsertIfNotActive: gli indici del claim servono a
+	// OGNI job, compresi quelli claim-only (DistribuiteTask, NotificationKafka) che un feed non
+	// ce l'hanno e quindi non passerebbero mai di là. È sync.Once: una sola lettura per processo.
+	d.warnIfIndexesMissing(ctx)
 	now := time.Now()
 	token := store.NewLockToken()
 	host := store.Hostname()
@@ -211,6 +229,27 @@ func (d *workItemDataSQL) MarkFailed(ctx context.Context, id, token, reason stri
 	return nil
 }
 
+// Release riporta a PENDING un item claimato ma mai eseguito (dispatch fallito), fenced dal
+// token e idempotente. È MarkPending meno l'incremento di retry: il tentativo non è avvenuto,
+// quindi non va contato. next_run_at = now, così il tick successivo lo riprende subito.
+func (d *workItemDataSQL) Release(ctx context.Context, id, token string) *core.ApplicationError {
+	now := time.Now()
+	res, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
+		Set("status = ?", store.StatusPending).
+		Set("locked_at = NULL").
+		Set("update_time = ?", now).
+		Set("next_run_at = ?", now).
+		Where("id = ? AND status = ? AND lock_token = ?", id, store.StatusInProgress, token).
+		Exec(ctx)
+	if err != nil {
+		return errs.Tech(errs.CodeRelease).WithCause(err)
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		log.Debug().Msgf("Release: item %q non aggiornato (già finalizzato o token stale)", id)
+	}
+	return nil
+}
+
 // MarkPending resets a single IN_PROGRESS item back to PENDING for retry, fenced dal token (idempotente).
 func (d *workItemDataSQL) MarkPending(ctx context.Context, id, token string, after time.Duration) *core.ApplicationError {
 	now := time.Now()
@@ -270,7 +309,7 @@ func (d *workItemDataSQL) InsertIfNotActive(ctx context.Context, items []*store.
 	if len(items) == 0 {
 		return 0, nil
 	}
-	d.warnIfActiveIndexMissing(ctx)
+	d.warnIfIndexesMissing(ctx)
 	res, err := d.DB.NewInsert().
 		Model(&items).
 		On("CONFLICT DO NOTHING").
@@ -280,6 +319,53 @@ func (d *workItemDataSQL) InsertIfNotActive(ctx context.Context, items []*store.
 	}
 	affected, _ := res.RowsAffected()
 	return int(affected), nil
+}
+
+// Purge cancella gli item nello stato indicato più vecchi di olderThan, al più limit per
+// chiamata. Il limit tiene corta la singola transazione: la retention è ripetuta a ogni tick
+// del job, non fatta tutta in una volta.
+func (d *workItemDataSQL) Purge(ctx context.Context, status string, olderThan time.Time, limit int) (int, *core.ApplicationError) {
+	res, err := d.DB.NewRaw(`
+		DELETE FROM work_items
+		WHERE id IN (
+			SELECT id FROM work_items
+			WHERE status = ? AND update_time < ?
+			ORDER BY update_time ASC
+			LIMIT ?
+		)
+	`, status, olderThan, limit).Exec(ctx)
+	if err != nil {
+		return 0, errs.Tech(errs.CodePurge).WithCause(err)
+	}
+	affected, _ := res.RowsAffected()
+	return int(affected), nil
+}
+
+// Backlog conta i PENDING in attesa e ritorna la data di creazione del più vecchio.
+func (d *workItemDataSQL) Backlog(ctx context.Context, taskName, destination, objectType string) (int, time.Time, *core.ApplicationError) {
+	where := "task_name = ? AND status = ?"
+	args := []any{taskName, store.StatusPending}
+	if destination != "" {
+		where += " AND destination = ?"
+		args = append(args, destination)
+	}
+	if objectType != "" {
+		where += " AND object_type = ?"
+		args = append(args, objectType)
+	}
+	var row struct {
+		N      int        `bun:"n"`
+		Oldest *time.Time `bun:"oldest"`
+	}
+	if err := d.DB.NewRaw(
+		"SELECT COUNT(*) AS n, MIN(create_time) AS oldest FROM work_items WHERE "+where, args...,
+	).Scan(ctx, &row); err != nil {
+		return 0, time.Time{}, errs.Tech(errs.CodeBacklog).WithCause(err)
+	}
+	if row.Oldest == nil {
+		return row.N, time.Time{}, nil
+	}
+	return row.N, *row.Oldest, nil
 }
 
 func (d *workItemDataSQL) List(ctx context.Context, taskName, status string, paging *page.Paging, sort page.SortRequest) ([]*store.WorkItem, *core.ApplicationError) {
@@ -320,15 +406,20 @@ func (d *workItemDataSQL) List(ctx context.Context, taskName, status string, pag
 	return items, nil
 }
 
-// EnsureIndexes creates the indexes and columns required by workItemDataSQL. Call once at
-// application startup. Include:
-//   - le colonne di fencing lock_token/locked_by (ADD COLUMN IF NOT EXISTS) usate da ClaimPending/
-//     RecoverOrphans/Mark* per impedire che un worker stale finalizzi un item ri-claimato;
-//   - l'indice partiale unico uk_workitem_active, che impedisce l'inserimento concorrente di
-//     item attivi (PENDING o IN_PROGRESS) duplicati per lo stesso (task_name, object_id).
+// EnsureIndexes crea colonne e indici richiesti da workItemDataSQL. Chiamarla una volta
+// all'avvio. Include:
+//   - le colonne di fencing lock_token/locked_by (ADD COLUMN IF NOT EXISTS), usate da
+//     ClaimPending/RecoverOrphans/Mark* per impedire che un worker stale finalizzi un item
+//     ri-claimato;
+//   - uk_workitem_active, unico parziale, che impedisce l'inserimento concorrente di item attivi
+//     duplicati per lo stesso (task_name, object_id);
+//   - ix_workitem_claim / ix_workitem_orphan / ix_workitem_claim_dest, che servono le query di
+//     claim e recupero orfani eseguite da ogni job a ogni tick. Sono parziali sugli stati attivi:
+//     gli item DONE/FAILED non vengono mai claimati, quindi tenerli fuori mantiene l'indice della
+//     dimensione del LAVORO e non dello storico.
 //
 // È Postgres-specifico (come il resto delle utility DDL del modulo). Su MySQL/SQLite le colonne
-// e l'indice vanno creati manualmente via migration.
+// e gli indici vanno creati manualmente via migration.
 func EnsureIndexes(ctx context.Context, db *bun.DB) error {
 	if _, err := db.ExecContext(ctx, `
 		ALTER TABLE work_items ADD COLUMN IF NOT EXISTS lock_token TEXT;
@@ -339,7 +430,19 @@ func EnsureIndexes(ctx context.Context, db *bun.DB) error {
 	_, err := db.ExecContext(ctx, `
 		CREATE UNIQUE INDEX IF NOT EXISTS uk_workitem_active
 		ON work_items (task_name, object_id)
-		WHERE status IN ('PENDING', 'IN_PROGRESS')
+		WHERE status IN ('PENDING', 'IN_PROGRESS');
+
+		CREATE INDEX IF NOT EXISTS ix_workitem_claim
+		ON work_items (task_name, status, next_run_at, create_time)
+		WHERE status IN ('PENDING', 'IN_PROGRESS');
+
+		CREATE INDEX IF NOT EXISTS ix_workitem_orphan
+		ON work_items (task_name, status, locked_at)
+		WHERE status IN ('PENDING', 'IN_PROGRESS');
+
+		CREATE INDEX IF NOT EXISTS ix_workitem_claim_dest
+		ON work_items (task_name, status, destination, object_type, next_run_at)
+		WHERE status IN ('PENDING', 'IN_PROGRESS');
 	`)
 	return err
 }

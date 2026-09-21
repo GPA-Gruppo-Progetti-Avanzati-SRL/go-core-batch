@@ -25,7 +25,10 @@ da **"l'ho fatto e non riesco a scriverne l'esito"**: nel secondo caso il WorkIt
 | `BATCH-RECOVER` | 500 | `errs.CodeRecover` | `mongostore:178,184,199`, `sqlstore:166` |
 | `BATCH-MARK-DONE` | 500 | `errs.CodeMarkDone` | `mongostore:234`, `sqlstore:186` |
 | `BATCH-MARK-FAILED` | 500 | `errs.CodeMarkFailed` | `mongostore:251`, `sqlstore:206` |
-| `BATCH-MARK-PENDING` | 500 | `errs.CodeMarkPending` | `mongostore:271`, `sqlstore:227` — è il retry di `store.Retry(d)` |
+| `BATCH-MARK-PENDING` | 500 | `errs.CodeMarkPending` | `mongostore`, `sqlstore` — è il retry di `store.Retry(d)` |
+| `BATCH-RELEASE` | 500 | `errs.CodeRelease` | `mongostore`, `sqlstore` — rilascio di un item claimato ma mai eseguito (dispatch fallito). È `MarkPending` **senza** l'incremento di `retry`: un tentativo che non è avvenuto non è un tentativo |
+| `BATCH-PURGE` | 500 | `errs.CodePurge` | `mongostore`, `sqlstore` — retention (`Purge` / `PurgeTaskLogs`) fallita |
+| `BATCH-BACKLOG` | 500 | `errs.CodeBacklog` | `mongostore`, `sqlstore` — lettura della coda per le gauge `batch_workitems_*` fallita. **Non fa fallire il tick**: è loggata come Warn, perché una metrica mancante non è un buon motivo per non lavorare |
 | `BATCH-DELETE` | 500 | `errs.CodeDelete` | `mongostore:291`, `sqlstore:244` |
 | `BATCH-GET` | 500 | `errs.CodeGet` | `mongostore:303` |
 | `BATCH-HASACTIVE` | 500 | `errs.CodeHasActive` | `mongostore:316`, `sqlstore:261` |
@@ -56,7 +59,12 @@ tradurre in record Kafka non produce un `ApplicationError` ma un `MarkFailed` di
 
 | Codice | HTTP | Costante | Origine | Significato |
 |---|---|---|---|---|
-| `BATCH-JOB-PROPS` | 500 | `errs.CodeJobProperties` | `scheduler/kafkajob/notification.go:40,44,48` | property infrastrutturale mancante in `jobs[].properties`: rispettivamente `destination`, `object`, `topic` |
+| `BATCH-JOB-PROPS` | 500 | `errs.CodeJobProperties` | `kafkajob` (`destination`, `object`, `topic`, `limit`), `distributedjob` (`task`, `limit`), `feedjob` (`task`, `objectId`), `purgejob` (`status`, `older-than`, `limit`) | property infrastrutturale mancante o non valida in `jobs[].properties` |
+
+**Quando si manifesta.** La validazione avviene alla **costruzione** del job, non dentro il tick:
+l'errore compare nei log di avvio (`il job fallirà a ogni tick`) ed è poi restituito da ogni
+esecuzione. Prima `distributedjob` e `kafkajob` verificavano le loro property dentro il tick,
+quindi un refuso in YAML non si vedeva all'avvio e si presentava come un errore di runtime.
 
 ### Cambiamenti rispetto al censimento precedente
 
@@ -102,8 +110,10 @@ Sentinelle correlate:
 
 | Messaggio | Origine | Quando |
 |---|---|---|
-| `execution type not found: <TaskName>` | `worker/workers.go:144` | il worker pool ha ricevuto un WorkItem il cui `TaskName` non corrisponde a nessun runner registrato → `OutcomeFailed` → `MarkFailed` |
-| `simplejob: job %q: nessun task %q registrato per il type %q` | `scheduler/simplejob/simplejob.go:163` | il job non trova il runner per il task risolto (property `task`, o dedotto dal `type`) |
+| `execution type not found: <TaskName>` | `worker/workers.go` | il worker pool ha ricevuto un WorkItem il cui `TaskName` non corrisponde a nessun runner registrato → `OutcomeFailed` → `MarkFailed` |
+| `simplejob: job %q: nessun task %q fra le istanze registrate` | `scheduler/simplejob/simplejob.go` | il job non trova il runner per il task nominato da `properties.task` |
+| `localdispatcher: max concurrency reached (N)` | `scheduler/distributedjob/localdispatcher/local.go` | il cap di concorrenza in-process è saturo. **Non è un errore dell'item**: il chiamante lo rilascia con `Release` (nessun ritentativo consumato) e il tick successivo lo riprende. Il cap è derivato dalla somma dei `limit` dei job attivi |
+| `no runner registered for task name %q` | `runner/runner.go` | il `TaskName` dell'item non corrisponde a nessun runner registrato in questo processo. L'item viene comunque finalizzato con `MarkFailed`, così non entra in un orphan-loop |
 
 ## 4. Fail-fast all'avvio (panic — l'app non parte)
 
@@ -115,7 +125,8 @@ Errori di **configurazione o di wiring**, deliberatamente non recuperabili:
 | `batch.Module: WithLocker è obbligatorio` | `module.go:176` | manca il backend del lock distribuito (`mongolocker` / `sqllocker` / `redislocker`) |
 | `batch: task <type> registrato fuori dalla funzione passata a batch.Module` | `task/task.go:108` | `runner.Register`/`simplejob.RegisterRunner` in un `init()`: lì la sezione `tasks:` non è ancora nota |
 | `batch: la sezione tasks: richiede un name su ogni voce` | `task/task.go:167` | voce senza `name`. Il nome è la **chiave di routing** (`WorkItem.TaskName`) e non ha fallback sul `type` |
-| `batch: <problemi>` | `task/task.go:201` | riferimenti incoerenti: `jobs[].properties.task` o `workers[].tasks` che nominano un task non dichiarato, task type registrato senza voce in `tasks:` |
+| `batch: <problemi>` | `task/task.go` | riferimenti incoerenti: `jobs[].properties.task` o `workers[].tasks` che nominano un task non dichiarato, task type registrato senza voce in `tasks:` |
+| `batch.Module: task-log %q non valido` | `module.go`, `store.ParseTaskLogLevel` | `batch.task-log` diverso da `all`, `errors`, `off`. Un valore non previsto è un errore e non un ripiego silenzioso su `all`: indovinare male significherebbe scrivere (o non scrivere) dati senza che nulla lo dica |
 
 Il fail-fast è **gate-ato sui modes**: in un processo `MODE=API` né `register` né la
 validazione girano (lo store resta wirato, così l'API può accodare WorkItem).

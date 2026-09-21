@@ -17,72 +17,113 @@ import (
 	gocron "github.com/go-co-op/gocron/v2"
 	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/v2/bson"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 )
-
-var tracer = otel.Tracer("NotificationKafkaJob")
 
 const defaultKafkaLimit = 100
 
+// Properties infrastrutturali del job.
+const (
+	// PropDestination e PropObject sono i filtri di claim: un job per coppia.
+	PropDestination = "destination"
+	PropObject      = "object"
+	// PropTopic è il topic su cui pubblicare.
+	PropTopic = "topic"
+	// PropLimit è il tetto agli item claimati per tick.
+	PropLimit = "limit"
+)
+
+type parametri struct {
+	destination string
+	object      string
+	topic       string
+	limit       int
+}
+
 func makeNotificationJobFactory(prod producer.IProducer, items store.IWorkItemStore) scheduler.JobFactory {
 	return func(name string, s *scheduler.Services, config scheduler.Config) gocron.Task {
+		p, resolveErr := risolvi(name, config)
+		if resolveErr != nil {
+			// Come per le altre famiglie: un job che non può funzionare si vede all'avvio, non
+			// al primo tick. Prima queste tre property erano verificate DENTRO il tick.
+			log.Error().Err(resolveErr).Msgf("[%s] il job fallirà a ogni tick", name)
+		}
+		runTimeout, orphanTimeout := config.ResolveTimeouts()
+		backlog := config.Properties.GetBool(scheduler.PropBacklogMetrics, false)
 		return scheduler.LabeledTask(name, config.Type, func() error {
-			return notificationJobRun(name, prod, items, config)
+			if resolveErr != nil {
+				return resolveErr
+			}
+			return runTick(name, p, runTimeout, orphanTimeout, backlog, prod, items)
 		})
 	}
 }
 
+// notificationJobRun esegue UN tick risolvendo la config al momento. È la forma usata dai test:
+// il percorso di esercizio passa dalla factory, che la config la risolve una volta sola all'avvio.
 func notificationJobRun(name string, prod producer.IProducer, items store.IWorkItemStore, config scheduler.Config) error {
-	p := config.Properties
-	jobId := jobID(name)
-
-	if !p.Has("destination") {
-		return errs.Tech(errs.CodeJobProperties).WithMessage("destination not found in properties")
+	p, err := risolvi(name, config)
+	if err != nil {
+		return err
 	}
-	destination := p.GetString("destination", "")
-	if !p.Has("object") {
-		return errs.Tech(errs.CodeJobProperties).WithMessage("object not found in properties")
-	}
-	object := p.GetString("object", "")
-	if !p.Has("topic") {
-		return errs.Tech(errs.CodeJobProperties).WithMessage("topic not found in properties")
-	}
-	topic := p.GetString("topic", "")
-
-	limit := p.GetInt("limit", defaultKafkaLimit)
-
-	// Convenzione unica (scheduler.Config.ResolveTimeouts): LockTimeout governa sia il timeout
-	// del context di run sia l'età di orphan. Prima il run usava il knob ad-hoc properties["timeout"].
 	runTimeout, orphanTimeout := config.ResolveTimeouts()
+	return runTick(name, p, runTimeout, orphanTimeout,
+		config.Properties.GetBool(scheduler.PropBacklogMetrics, false), prod, items)
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
-	defer cancel()
+// runTick è il tick: claim comune (scheduler.ClaimingTick) più la fase di publish, che è l'unica
+// cosa specifica di questa famiglia.
+func runTick(name string, p parametri, runTimeout, orphanTimeout time.Duration, backlog bool,
+	prod producer.IProducer, items store.IWorkItemStore) error {
 
-	spanCtx, span := tracer.Start(ctx, name)
-	span.SetAttributes(
-		attribute.String("jobName", name),
-		attribute.String("jobId", jobId),
-		attribute.String("destination", destination),
-		attribute.String("object", object),
-	)
-	defer span.End()
+	return scheduler.ClaimingTick{
+		JobName:       name,
+		JobType:       JobType,
+		TaskName:      JobType,
+		Destination:   p.destination,
+		ObjectType:    p.object,
+		Limit:         p.limit,
+		RunTimeout:    runTimeout,
+		OrphanTimeout: orphanTimeout,
+		Backlog:       backlog,
+		Process: func(ctx context.Context, jobID string, batch []*store.WorkItem) error {
+			return publishBatch(ctx, name, jobID, p.topic, batch, prod, items)
+		},
+	}.Run(items)
+}
 
-	// 1+2. Recupero orfani + claim dei PENDING freschi — loop comune (store.ClaimBatch).
-	all, norph, nfresh, appErr := store.ClaimBatch(spanCtx, items, jobId, JobType, destination, object, orphanTimeout, limit)
-	if appErr != nil {
-		span.RecordError(appErr)
-		log.Error().Err(appErr).Msgf("[%s] ClaimPending failed", jobId)
-		return appErr
+func risolvi(name string, config scheduler.Config) (parametri, error) {
+	p := config.Properties
+	var out parametri
+	for _, campo := range []struct {
+		prop string
+		dst  *string
+	}{
+		{PropDestination, &out.destination},
+		{PropObject, &out.object},
+		{PropTopic, &out.topic},
+	} {
+		if !p.Has(campo.prop) {
+			return out, errs.Tech(errs.CodeJobProperties).WithMessage(
+				fmt.Sprintf("kafkajob: job %q senza la property %q", name, campo.prop))
+		}
+		*campo.dst = p.GetString(campo.prop, "")
+		if *campo.dst == "" {
+			return out, errs.Tech(errs.CodeJobProperties).WithMessage(
+				fmt.Sprintf("kafkajob: job %q: la property %q è vuota", name, campo.prop))
+		}
 	}
-	if len(all) == 0 {
-		log.Trace().Msgf("[%s] no pending items", jobId)
-		return nil
+	out.limit = p.GetInt(PropLimit, defaultKafkaLimit)
+	if out.limit <= 0 {
+		return out, errs.Tech(errs.CodeJobProperties).WithMessage(
+			fmt.Sprintf("kafkajob: job %q: la property %q non è un intero positivo: %v", name, PropLimit, p[PropLimit]))
 	}
-	// Label = NOME del job (name), non jobId: quest'ultimo contiene un timestamp.
-	batchmetrics.JobClaimed(name, JobType, len(all))
+	return out, nil
+}
 
-	log.Info().Msgf("[%s] processing %d item(s) (%d orphaned, %d fresh)", jobId, len(all), norph, nfresh)
+// publishBatch è la fase di elaborazione di questa famiglia: traduce gli item in record e li
+// pubblica in blocco sul topic.
+func publishBatch(ctx context.Context, name, jobId, topic string, all []*store.WorkItem,
+	prod producer.IProducer, items store.IWorkItemStore) error {
 
 	// Inizio della fase di elaborazione: è la finestra che le istogrammi misurano.
 	itemsStart := time.Now()
@@ -93,7 +134,7 @@ func notificationJobRun(name string, prod producer.IProducer, items store.IWorkI
 	// ritornare un errore per l'intero batch lascerebbe in IN_PROGRESS anche gli item buoni, fino al
 	// recupero orfani.
 	for _, item := range invalid {
-		items.MarkFailed(spanCtx, item.Id, item.LockToken, "invalid payload")
+		items.MarkFailed(ctx, item.Id, item.LockToken, "invalid payload")
 	}
 	// Gli invalidi sono item finalizzati come falliti, quindi vanno contati in OGNI esito del tick e
 	// non solo quando sono tutti invalidi: altrimenti un tick misto ne perderebbe la traccia, e
@@ -103,16 +144,14 @@ func notificationJobRun(name string, prod producer.IProducer, items store.IWorkI
 		return nil
 	}
 
-	if errProduce := prod.ProduceTo(spanCtx, topic, recs); errProduce != nil {
-		span.RecordError(errProduce)
+	if errProduce := prod.ProduceTo(ctx, topic, recs); errProduce != nil {
 		log.Error().Err(errProduce).Msgf("[%s] Kafka produce failed — resetting %d items to PENDING", jobId, len(valid))
 		// Errore transiente: gli item claimati tornano PENDING e il tick successivo li riprende.
 		// Il delay è 0 — quando riprovare lo decide il cron del job, non il producer: l'errore che
 		// arriva qui è un *core.ApplicationError di go-core-kafka, che non conosce (né potrebbe
-		// conoscere) store.RetryError. Prima c'era un ramo che ne estraeva il delay: era morto già
-		// col producer interno, ed è impossibile per costruzione con un producer di un'altra libreria.
+		// conoscere) store.RetryError.
 		for _, item := range valid {
-			items.MarkPending(spanCtx, item.Id, item.LockToken, 0)
+			items.MarkPending(ctx, item.Id, item.LockToken, 0)
 		}
 		observeItems(name, len(valid), store.OutcomeRetry, itemsStart)
 		return errProduce
@@ -126,8 +165,7 @@ func notificationJobRun(name string, prod producer.IProducer, items store.IWorkI
 		byToken[item.LockToken] = append(byToken[item.LockToken], item.Id)
 	}
 	for token, doneIds := range byToken {
-		if errMark := items.MarkDone(spanCtx, doneIds, token); errMark != nil {
-			span.RecordError(errMark)
+		if errMark := items.MarkDone(ctx, doneIds, token); errMark != nil {
 			log.Error().Err(errMark).Msgf("[%s] MarkDone fallito per %d item", jobId, len(doneIds))
 		}
 	}
@@ -297,8 +335,4 @@ func toStringMap(input any) (map[string]string, error) {
 		out[k] = s
 	}
 	return out, nil
-}
-
-func jobID(name string) string {
-	return fmt.Sprintf("%s-%s", name, time.Now().Format("20060102150405"))
 }

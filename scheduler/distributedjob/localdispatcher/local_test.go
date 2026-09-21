@@ -9,6 +9,7 @@ import (
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/page"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/runner"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"go.uber.org/fx/fxtest"
 )
@@ -44,8 +45,12 @@ func (fakeStore) MarkFailed(context.Context, string, string, string) *core.Appli
 func (fakeStore) MarkPending(context.Context, string, string, time.Duration) *core.ApplicationError {
 	return nil
 }
-func (fakeStore) FindPending(context.Context, string, string, string) ([]*store.WorkItem, *core.ApplicationError) {
-	return nil, nil
+func (fakeStore) Release(context.Context, string, string) *core.ApplicationError { return nil }
+func (fakeStore) Purge(context.Context, string, time.Time, int) (int, *core.ApplicationError) {
+	return 0, nil
+}
+func (fakeStore) Backlog(context.Context, string, string, string) (int, time.Time, *core.ApplicationError) {
+	return 0, time.Time{}, nil
 }
 func (fakeStore) ClaimPending(context.Context, string, string, string, int) ([]*store.WorkItem, *core.ApplicationError) {
 	return nil, nil
@@ -75,6 +80,10 @@ func (d *fakeData) SetTaskInError(context.Context, string, string, string, strin
 func (d *fakeData) SetTaskAssigned(context.Context, string, string, string, string)        {}
 func (d *fakeData) SetTaskAssignationKO(context.Context, string, string, string, string, string) {
 }
+func (d *fakeData) InsertTaskLogs(context.Context, []*store.TaskLog) {}
+func (d *fakeData) PurgeTaskLogs(context.Context, time.Time, int) (int, *core.ApplicationError) {
+	return 0, nil
+}
 
 func TestLocalDispatcher(t *testing.T) {
 	br := &blockingRunner{started: make(chan struct{}, 8), release: make(chan struct{})}
@@ -82,19 +91,25 @@ func TestLocalDispatcher(t *testing.T) {
 	data := &fakeData{}
 	lc := fxtest.NewLifecycle(t)
 
-	d := New(lc, mux, fakeStore{}, data)
+	d := New(lc, nil, mux, fakeStore{}, data)
 	d.sem = make(chan struct{}, 2) // cap ridotto per un test deterministico
 	lc.RequireStart()              // necessario perché RequireStop esegua l'hook OnStop (drain)
 
 	// Riempie i 2 slot con task bloccate.
-	if err := d.DispatchTask(context.Background(), "j", "t1", "obj", "T"); err != nil {
+	req := func(id string) distributedjob.DispatchRequest {
+		return distributedjob.DispatchRequest{
+			JobId: "j", TaskId: id, TaskName: "T",
+			Item: &store.WorkItem{Id: "obj", TaskName: "T"}, Timeout: time.Minute,
+		}
+	}
+	if err := d.DispatchTask(context.Background(), req("t1")); err != nil {
 		t.Fatalf("dispatch 1: %v", err)
 	}
-	if err := d.DispatchTask(context.Background(), "j", "t2", "obj", "T"); err != nil {
+	if err := d.DispatchTask(context.Background(), req("t2")); err != nil {
 		t.Fatalf("dispatch 2: %v", err)
 	}
 	// Terzo dispatch: cap raggiunto → errore, nessuna goroutine in più.
-	if err := d.DispatchTask(context.Background(), "j", "t3", "obj", "T"); err == nil {
+	if err := d.DispatchTask(context.Background(), req("t3")); err == nil {
 		t.Fatal("dispatch 3: atteso errore per cap di concorrenza, ottenuto nil")
 	}
 
@@ -107,7 +122,7 @@ func TestLocalDispatcher(t *testing.T) {
 	}
 
 	// Dopo lo stop, nuovi dispatch sono rifiutati.
-	if err := d.DispatchTask(context.Background(), "j", "t4", "obj", "T"); err == nil {
+	if err := d.DispatchTask(context.Background(), req("t4")); err == nil {
 		t.Fatal("dispatch dopo stop: atteso errore, ottenuto nil")
 	}
 }

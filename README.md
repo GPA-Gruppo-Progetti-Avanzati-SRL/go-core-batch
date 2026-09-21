@@ -21,6 +21,14 @@ Raccoglie i sotto-config di tutti i pezzi cablati da `Module`. L'app tipicamente
 | `JobsConfig` | `[]scheduler.Config` | `jobs` |
 | `TasksConfig` | `[]task.Config` (`name`, `type`, `properties`) | `tasks` |
 | `WorkersConfig` | `[]worker.Config` | `workers` |
+| `TaskLog` | `string` — `all` (default) · `errors` · `off` | `task-log` |
+
+> **`task-log` è il volume dello storico.** Sul percorso distributedjob si scrivono **tre** righe
+> di `task_logs` per item lavorato (`ASSIGNED` dal job, `START` e `DONE`/`ERROR` dal worker), e in
+> molti deploy quelle di successo non vengono mai lette: restano un costo di scrittura e una
+> collection che cresce. `errors` tiene i soli esiti negativi, `off` non scrive nulla (lo stato
+> vive sul WorkItem e l'andamento sulle metriche). Un valore diverso dai tre **ferma l'avvio**:
+> indovinare significherebbe scrivere — o non scrivere — dati senza che nulla lo dica.
 
 > **Il lock distribuito non è più qui.** Il backend è iniettato con `batch.WithLocker` e il suo
 > eventuale config (es. `redis.Config` di go-core-redis) è gestito dalla sua libreria: `batch` non
@@ -311,9 +319,9 @@ Le properties sono risolte **al boot**: un valore non convertibile o un `validat
 
 ## Modalità (job families)
 
-Quattro famiglie di job, ciascuna un modulo Fx self-contained che registra la propria `scheduler.JobRegistration` nel value group `batch_jobs` (via `scheduler.ProvideJob`). Condividono lo scheduler (gocron + **distributed job lock** pluggable, applicato a *ogni* job) e lo store `work_items`.
+Cinque famiglie di job, ciascuna un modulo Fx self-contained che registra la propria `scheduler.JobRegistration` nel value group `batch_jobs` (via `scheduler.ProvideJob`). Condividono lo scheduler (gocron + **distributed job lock** pluggable, applicato a *ogni* job) e lo store `work_items`.
 
-Tre CONSUMANO workitem, una li PRODUCE: `feedjob` è l'unica che non ha runner, e si compone con qualunque delle altre.
+Tre CONSUMANO workitem, una li PRODUCE e una li CANCELLA: `feedjob` e `purgejob` sono le due che non hanno runner, e si compongono con qualunque delle altre.
 
 | Famiglia | Job type / registrazione | Quando usarla |
 |---|---|---|
@@ -321,6 +329,7 @@ Tre CONSUMANO workitem, una li PRODUCE: `feedjob` è l'unica che non ha runner, 
 | **simplejob** | `SingleTask` — `simplejob.Module()` + `runner.Register[T]` | **Una lavorazione alla volta** in-process: `RecoverOrphans`→`ClaimPending(1)`→`Run(item)`, eseguito dentro il tick. Niente gRPC/task_logs |
 | **kafkajob** | tipo libero — invia i WorkItem su un topic Kafka col producer di go-core-kafka | Notifiche/outbox verso Kafka |
 | **feedjob** | `FeedTask` — `feedjob.Module()`, nessun runner | **Schedulare una cosa a un'ora**: crea UN workitem per tick, descritto nelle properties del job (`task`, `objectId`, `payload`). Non reclama e non dispatcha: a lavorarlo è il job che serve quel task |
+| **purgejob** | `PurgeWorkItems` — `purgejob.Module()`, nessun runner | **Retention**: cancella gli item in uno stato terminale più vecchi di una finestra, e su richiesta anche le righe di `task_logs`. Senza, le due collection crescono per sempre e con esse gli indici su cui gira il claim di ogni tick |
 
 ```mermaid
 flowchart LR
@@ -499,7 +508,89 @@ esterna    next_run_at=now       │
     Se il worker crasha (nessun Mark chiamato):
     item resta IN_PROGRESS → RecoverOrphans (locked_at=NOW, retry++)
     → ri-dispatch immediato nello stesso run
+
+    Se il DISPATCH viene rifiutato (pool saturo, worker irraggiungibile):
+    items.Release → PENDING, next_run_at=now, retry INVARIATO
+    → ripreso al tick successivo, senza aspettare l'orphan timeout
+      e senza consumare un ritentativo che nessuno ha usato
+
+    DONE / FAILED sono stati terminali: a rimuoverli è il job PurgeWorkItems,
+    se configurato. Senza, la collection cresce per sempre.
 ```
+
+---
+
+## Indici — obbligatori, e non creati da soli
+
+Il claim di **ogni job a ogni tick** è una query per `(task_name, status, next_run_at)` ordinata
+per scadenza; il recupero orfani una per `(task_name, status, locked_at)`. Senza gli indici
+corrispondenti quelle query scandiscono la collection intera — un costo che cresce con lo
+**storico** invece che col lavoro da fare, e che non si vede finché la collection è piccola.
+
+`EnsureIndexes` (mongo e sql) li crea tutti:
+
+| Indice | Serve a | Senza |
+|---|---|---|
+| `uk_workitem_active` — unico parziale su `(task_name, object_id)` per gli stati attivi | la deduplica di `InsertIfNotActive` | nessun duplicate-key da intercettare: **il dedup salta in silenzio** e nascono workitem doppi |
+| `ix_workitem_claim` — `(task_name, status, next_run_at, create_time)` | `ClaimPending` | collection scan a ogni tick di ogni job |
+| `ix_workitem_orphan` — `(task_name, status, locked_at)` | `RecoverOrphans` | idem |
+| `ix_workitem_claim_dest` — `(task_name, status, destination, object_type, next_run_at)` | il claim filtrato per destinazione (`NotificationKafka`) | idem |
+
+I tre indici del claim sono **parziali sugli stati attivi**: gli item `DONE`/`FAILED` non vengono
+mai claimati, quindi tenerli fuori mantiene l'indice della dimensione del *lavoro* e non dello
+storico.
+
+La libreria **non li crea da sola** (gestione via `EnsureIndexes` allo startup, o migration/ops),
+ma alla **prima operazione sullo store** — il primo claim o il primo insert, quindi entro il primo
+tick — verifica quali mancano e lo dice con un Warn: l'assenza dev'essere una scelta, non una
+svista.
+
+```go
+// main.go, prima di core.Run()
+core.Invoke(func(ms *coremongo.Service) {
+    if err := mongostore.EnsureIndexes(context.Background(), ms); err != nil {
+        log.Fatal().Err(err).Msg("EnsureIndexes failed")
+    }
+})
+```
+
+---
+
+## Retention — `PurgeWorkItems`
+
+Gli stati `DONE` e `FAILED` sono terminali: senza retention `work_items` e `task_logs` crescono
+per sempre, e con loro gli indici del claim. Il job `PurgeWorkItems` cancella a finestra, con un
+tetto per tick che tiene corta la singola transazione: un arretrato grosso si smaltisce in più
+tick invece che in una botta sola che tiene il database occupato.
+
+```yaml
+jobs:
+  - name: retention-done
+    type: PurgeWorkItems
+    cron: "0 30 3 * * *"
+    singleton: true
+    lock-timeout: 10m
+    properties:
+      status:     DONE     # obbligatoria
+      older-than: 168h     # obbligatoria
+      limit:      5000     # facoltativa (default 1000)
+      task-logs:  true     # facoltativa: cancella anche le righe di task_logs più vecchie
+```
+
+```go
+batch.Module(&cfg.BatchConfig, Register,
+    batch.WithStore(storemongo.Module),
+    batch.WithLocker(mongolocker.Module),
+    batch.WithModule(localdispatcher.Module, purgejob.Module),
+)
+```
+
+**Non c'è un default.** La retention va scritta in `jobs:`: cancellare dati non può essere un
+comportamento che si ottiene aggiornando la libreria. Chi preferisce delegarla al database può
+usare un TTL index su Mongo al posto del job — il contratto è lo stesso.
+
+Un tick che cancella esattamente `limit` item logga un Warn: l'arretrato non è finito, e se
+succede sempre la finestra o la cadenza del cron sono sbagliate.
 
 ---
 
@@ -710,7 +801,7 @@ Il blocco `properties:` di un job configura il **job type** e lo legge il framew
 | Campo | Tipo | Descrizione |
 |---|---|---|
 | `name` | string | Nome univoco del job |
-| `type` | string | Il **job type**, sempre una stringa del framework: `"SingleTask"` · `"DistribuiteTask"` · `"DistribuiteTaskByQuery"` · `"DistribuiteTaskByS3File"` · `"FeedTask"` · `"NotificationKafka"`. Non è mai un task type: quale task eseguire lo dice `properties.task` |
+| `type` | string | Il **job type**, sempre una stringa del framework: `"SingleTask"` · `"DistribuiteTask"` · `"DistribuiteTaskByQuery"` · `"DistribuiteTaskByS3File"` · `"FeedTask"` · `"NotificationKafka"` · `"PurgeWorkItems"`. Non è mai un task type: quale task eseguire lo dice `properties.task` |
 | `cron` | string | Espressione cron (secondi abilitati) |
 | `singleton` | bool | distributed job lock — evita run paralleli su repliche diverse |
 | `lock-timeout` | duration | Dopo quanto un IN_PROGRESS è considerato orfano (default: 10m — distributedjob e simplejob). simplejob: anche timeout del context di `Run` (default: 30s) |
@@ -727,6 +818,13 @@ Il blocco `properties:` di un job configura il **job type** e lo legge il framew
 | `properties.dest-path` | string | Prefisso S3 dove spostare i file elaborati (solo DistribuiteTaskByS3File) |
 | `properties.task` | string | **Nome del task** da eseguire, che è anche il `WorkItem.TaskName` letto da `ClaimPending`/`RecoverOrphans`. Obbligatoria per `SingleTask`, `DistribuiteTask*` e `FeedTask`: nessun ripiego sul `type` del job |
 | `properties.objectId` | string | Cosa accodare (solo `FeedTask`): finisce in `WorkItem.ObjectId` ed è la chiave della deduplica |
+| `properties.status` | string | Stato degli item da cancellare, es. `DONE` (solo `PurgeWorkItems`, obbligatoria) |
+| `properties.older-than` | duration | Finestra di retention, misurata su `update_time` (solo `PurgeWorkItems`, obbligatoria) |
+| `properties.task-logs` | bool | Cancella anche le righe di `task_logs` più vecchie della finestra (solo `PurgeWorkItems`, default `false`) |
+| `properties.backlog-metrics` | bool | Abilita le gauge `batch_workitems_pending` / `batch_workitems_oldest_age_seconds` per questo job. Default `false`: è una query in più per tick, e la paga chi la vuole |
+
+> **Le property dei job sono validate alla COSTRUZIONE, non dentro il tick.** Un refuso in YAML
+> compare nei log di avvio (`il job fallirà a ogni tick`) ed è poi restituito da ogni esecuzione.
 
 > I valori conservano il tipo YAML (`limit: 100` è un intero, `singleton: true` un booleano). Le forme
 > virgolettate delle config esistenti (`limit: "100"`) restano valide: la conversione è automatica.
@@ -990,26 +1088,42 @@ type ITaskRunner interface {
 // L'item serve intero: id e LockToken per i Mark* fenced, Retry per il confronto col tetto.
 func ApplyResult(ctx context.Context, items IWorkItemStore, item *WorkItem, maxRetry int, runErr error) (Outcome, *core.ApplicationError)
 
-// distributedjob.ITaskDispatcher — chiamata dal job per ogni item
+// distributedjob.ITaskDispatcher — chiamata dal job per ogni item.
+// Riceve il WorkItem INTERO (il job l'ha appena claimato: rileggerlo sul percorso in-process
+// era una query per item buttata) e il deadline del job, che è l'orphan timeout: oltre quella
+// soglia l'item è ri-claimato altrove, e una task che proseguisse ne sarebbe il secondo esecutore.
 type ITaskDispatcher interface {
-    DispatchTask(ctx context.Context, jobId, taskId, objectId, taskType string) error
+    DispatchTask(ctx context.Context, req DispatchRequest) error
 }
 
-// store.IWorkItemStore — claiming + lifecycle
+type DispatchRequest struct {
+    JobId, TaskId, TaskName string
+    Item                    *store.WorkItem
+    Timeout                 time.Duration
+}
+
+// store.IWorkItemStore — claiming + lifecycle. Ogni Mark* è FENCED dal lock token del claim:
+// un worker stale (il cui item è stato ri-claimato da RecoverOrphans) non può finalizzarlo.
 type IWorkItemStore interface {
     ClaimPending(ctx context.Context, taskName, destination, objectType string, limit int) ([]*WorkItem, *core.ApplicationError)
     RecoverOrphans(ctx context.Context, taskName, destination, objectType string, maxAge time.Duration, limit int) ([]*WorkItem, *core.ApplicationError)
     InsertIfNotActive(ctx context.Context, items []*WorkItem) (int, *core.ApplicationError)
-    MarkDone(ctx context.Context, ids []string) *core.ApplicationError
-    MarkFailed(ctx context.Context, id, reason string) *core.ApplicationError
+    MarkDone(ctx context.Context, ids []string, token string) *core.ApplicationError
+    MarkFailed(ctx context.Context, id, token, reason string) *core.ApplicationError
     // MarkPending: status → PENDING, retry++, next_run_at = now + retryDelay
-    MarkPending(ctx context.Context, id string, retryDelay time.Duration) *core.ApplicationError
+    MarkPending(ctx context.Context, id, token string, retryDelay time.Duration) *core.ApplicationError
+    // Release: status → PENDING, next_run_at = now, retry INVARIATO. Per un item claimato che
+    // NESSUNO ha eseguito (dispatch rifiutato): un tentativo non avvenuto non è un tentativo.
+    Release(ctx context.Context, id, token string) *core.ApplicationError
     Insert(ctx context.Context, items []*WorkItem) *core.ApplicationError
     GetById(ctx context.Context, id string) (*WorkItem, *core.ApplicationError)
     HasActive(ctx context.Context, taskName, objectId string) (bool, *core.ApplicationError)
     DeleteIfPending(ctx context.Context, id string) (bool, *core.ApplicationError)
     List(ctx context.Context, taskName, status string, paging *page.Paging, sort page.SortRequest) ([]*WorkItem, *core.ApplicationError)
-    FindPending(ctx context.Context, taskName, destination, objectType string) ([]*WorkItem, *core.ApplicationError) // legacy, nessun caller
+    // Purge: retention. Cancella gli item nello stato indicato più vecchi di olderThan.
+    Purge(ctx context.Context, status string, olderThan time.Time, limit int) (int, *core.ApplicationError)
+    // Backlog: quanti PENDING aspettano e da quando. Alimenta le gauge batch_workitems_*.
+    Backlog(ctx context.Context, taskName, destination, objectType string) (int, time.Time, *core.ApplicationError)
 }
 
 // store.IData — ciclo di vita task su task_logs
@@ -1019,8 +1133,15 @@ type IData interface {
     SetTaskInError(ctx context.Context, taskid, jobid, typeTask, objectid, errMsg string)
     SetTaskAssigned(ctx context.Context, taskid, jobid, typeTask, objectid string)
     SetTaskAssignationKO(ctx context.Context, taskid, jobid, typeTask, objectid, errMsg string)
+    // InsertTaskLogs: più righe in UNA scrittura. La fase di dispatch ne produce una per item.
+    InsertTaskLogs(ctx context.Context, logs []*TaskLog)
+    PurgeTaskLogs(ctx context.Context, olderThan time.Time, limit int) (int, *core.ApplicationError)
 }
 ```
+
+> `FindPending` **non esiste più**: era nell'interfaccia senza alcun caller di produzione, e
+> costringeva ogni backend a implementarla. Per ispezionare la coda senza prenderla in carico ci
+> sono `List` e `Backlog`.
 
 ---
 
@@ -1029,11 +1150,23 @@ type IData interface {
 | | LocalDispatcher | gRPC worker pool |
 |---|---|---|
 | **Dispatch** | lancia goroutine, ritorna subito | invia gRPC call, ritorna subito |
-| **Concorrenza** | `limit` item in parallelo | `limit` item dispatchati, concorrenza controllata dal pool size |
+| **Concorrenza** | cap **derivato dalla config**: somma dei `limit` dei job attivi (pavimento 100) | `limit` item dispatchati, concorrenza controllata dal pool size |
 | **Scaling** | verticale (un processo) | orizzontale (N worker process × M goroutine) |
-| **Config pool** | non necessaria — bound implicito = `limit` | `[]worker.Config` per task type |
+| **Config pool** | non necessaria — il cap si dimensiona da sé sui `limit` | `[]worker.Config` per task type |
+| **Deadline della task** | l'orphan timeout del job (`lock-timeout`) | governato dal processo worker |
+| **Se il dispatch è rifiutato** | `Release` dell'item: PENDING subito, `retry` invariato | idem |
 
-In locale, `limit` è il bound naturale: `ClaimPending` restituisce al massimo `limit` item, quindi al massimo `limit` goroutine attive per run. Non serve configurare un pool separato.
+In locale il cap di concorrenza è **derivato dalla config**: la somma dei `limit` dei job attivi,
+con un pavimento di 100. Dimensionato così il dispatcher assorbe per costruzione un giro completo
+di ogni job, e non esiste più la configurazione che non poteva funzionare — un `limit` più alto di
+un cap costante faceva fallire sistematicamente una parte dei dispatch a ogni tick. Oltre il cap
+la back-pressure è la condotta giusta: l'item viene rilasciato (`Release`, nessun ritentativo
+consumato) e ripreso al tick successivo.
+
+Il **deadline** della task in-process è l'orphan timeout del job, non una costante: oltre quella
+soglia l'item viene ri-claimato da un altro tick, e lasciar proseguire la task qui significherebbe
+averne due che lavorano lo stesso item. Il fencing token impedisce al perdente di *finalizzare*,
+ma non di aver già prodotto i suoi effetti.
 
 In gRPC, `limit` e pool size sono dimensioni ortogonali: lo scheduler può claimare 100 item per tick mentre ogni worker process esegue al massimo M task in concorrenza, e si possono avere N worker process in parallelo.
 
@@ -1050,6 +1183,8 @@ In gRPC, `limit` e pool size sono dimensioni ortogonali: lo scheduler può claim
 - **`jobs[].properties` è infrastrutturale, `tasks[].properties` è applicativo**: mettere la config del runner nel blocco del job non la fa arrivare ai campi `prop:`.
 - **Le chiavi delle properties sono case-insensitive**: viper abbassa le chiavi della config, quindi `task` nello YAML arriva come `worktype`. I getter di `core.Properties` e il binding `prop:` lo gestiscono; l'indicizzazione diretta della mappa no.
 - **`gocron.NewTask` deve usare una closure zero-arg** che cattura le dipendenze — non passare interface nil come `...any` o gocron va in panic in reflect.
-- **Tabelle**: `work_items` e `task_logs` (costanti `store.TableWorkItems`, `store.TableTaskLogs`).
+- **Tabelle**: `work_items` e `task_logs` (costanti `store.TableWorkItems`, `store.TableTaskLogs`). Senza un job `PurgeWorkItems` **crescono per sempre**, e con loro gli indici del claim.
+- **Gli indici del claim non sono opzionali**: senza `ix_workitem_claim`/`ix_workitem_orphan` ogni tick di ogni job scandisce la collection. `EnsureIndexes` li crea; in assenza la libreria logga un Warn all'avvio ma non li crea da sola.
+- **Il worker pool non installa più un handler di segnale**: i segnali li gestisce l'app (`core.Run`/fx) e l'arresto arriva come `OnStop`, che drena le task in volo fino al deadline del context di stop. Prima un `signal.Notify` di libreria faceva uscire i worker *prima* di `OnStop`, abbandonando a metà le task già partite.
 - **`singleton: true`** richiede un `lock.Locker` nel grafo: `batch.WithLocker` è obbligatorio (panic al wiring se assente) e il backend che si passa dev'essere raggiungibile, o il lock fallisce all'avvio.
 - **Worker distribuito**: il processo worker deve connettersi allo stesso DB del scheduler per chiamare `MarkDone`/`MarkFailed`.

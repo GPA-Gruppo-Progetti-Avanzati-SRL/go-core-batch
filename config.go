@@ -30,4 +30,9 @@ type Config struct {
 	// Da non confondere col blocco `properties:` di un job, che è infrastrutturale.
 	TasksConfig   []task.Config   `yaml:"tasks" mapstructure:"tasks" json:"tasks"`
 	WorkersConfig []worker.Config `yaml:"workers" mapstructure:"workers" json:"workers"`
+	// TaskLog dice quali righe di task_logs scrivere: `all` (default), `errors`, `off`.
+	// Sul percorso distributedjob si scrivono TRE righe per item lavorato, e in molti deploy
+	// quelle di successo non vengono mai lette: restano un costo di scrittura e una collection
+	// che cresce. Un valore non previsto ferma l'avvio (vedi store.ParseTaskLogLevel).
+	TaskLog string `yaml:"task-log" mapstructure:"task-log" json:"task-log"`
 }

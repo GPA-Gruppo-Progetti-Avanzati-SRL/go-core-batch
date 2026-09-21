@@ -82,10 +82,14 @@ func NewMux(runners []*TaskRunner) *MuxRunner {
 }
 
 // Run è il punto in cui il percorso in-process (localdispatcher) emette le metriche di task:
-// è il solo che ha in mano sia il taskType sia la store.Outcome, e resta uno solo anche se il
+// è il solo che ha in mano sia il task name sia la store.Outcome, e resta uno solo anche se il
 // dispatcher cambia. Il percorso gRPC NON passa di qui (va su worker.Run), quindi non c'è
 // doppio conteggio.
-func (r *MuxRunner) Run(ctx context.Context, objectId, taskName string, items store.IWorkItemStore) error {
+//
+// Riceve il WorkItem già claimato dal job: prima lo rileggeva con GetById, che su questo
+// percorso era una query per item buttata — l'item era già in memoria, completo, dal claim.
+func (r *MuxRunner) Run(ctx context.Context, item *store.WorkItem, items store.IWorkItemStore) error {
+	taskName := item.TaskName
 	// TaskStart prima di risolvere la route, a specchio di worker.Run che fa LogStart prima di
 	// risolvere il runner: un task che non parte è comunque un task fallito, e senza questo
 	// sarebbe invisibile alle metriche.
@@ -93,12 +97,13 @@ func (r *MuxRunner) Run(ctx context.Context, objectId, taskName string, items st
 	runner, ok := r.routes[taskName]
 	if !ok {
 		batchmetrics.ObserveTask(taskName, store.OutcomeFailed, start)
-		return fmt.Errorf("no runner registered for task name %q", taskName)
-	}
-	item, appErr := items.GetById(ctx, objectId)
-	if appErr != nil {
-		batchmetrics.ObserveTask(taskName, store.OutcomeFailed, start)
-		return appErr
+		// L'item va finalizzato comunque, altrimenti resta IN_PROGRESS fino al recupero orfani
+		// e riprova all'infinito un task che questo processo non sa eseguire.
+		err := fmt.Errorf("no runner registered for task name %q", taskName)
+		if markErr := items.MarkFailed(ctx, item.Id, item.LockToken, err.Error()); markErr != nil {
+			return markErr
+		}
+		return err
 	}
 	runErr := runner.Runner.Run(ctx, item)
 	outcome, markErr := store.ApplyResult(ctx, items, item, runner.ResolveMaxRetry(), runErr)

@@ -21,6 +21,9 @@ const (
 	CodeMarkDone    = "BATCH-MARK-DONE"    // MarkDone fallita
 	CodeMarkFailed  = "BATCH-MARK-FAILED"  // MarkFailed fallita
 	CodeMarkPending = "BATCH-MARK-PENDING" // MarkPending (retry) fallita
+	CodeRelease     = "BATCH-RELEASE"      // Release (rilascio senza tentativo consumato) fallita
+	CodePurge       = "BATCH-PURGE"        // Purge (retention) fallita
+	CodeBacklog     = "BATCH-BACKLOG"      // Backlog (metrica di coda) fallita
 	CodeDelete      = "BATCH-DELETE"       // DeleteIfPending fallita
 	CodeGet         = "BATCH-GET"          // GetById fallita
 	CodeHasActive   = "BATCH-HASACTIVE"    // HasActive fallita

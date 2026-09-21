@@ -5,6 +5,7 @@ import (
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
 )
 
@@ -202,6 +203,15 @@ func Module(cfg *Config, register func(), opts ...Option) {
 	// consuma davvero (il data layer accoda WorkItem dal lato API). A root resta esportato per
 	// l'app e comunque visibile dall'interno del modulo, che ne è discendente.
 	o.store()
+
+	// Livello di dettaglio dei task_logs: fornito a ROOT come lo store, perché è lo store a
+	// consumarlo. Validato qui e non dentro l'implementazione: un valore non previsto è un
+	// errore di configurazione e deve fermare l'avvio, non degradare in silenzio su "all".
+	livello, errLivello := store.ParseTaskLogLevel(cfg.TaskLog)
+	if errLivello != nil {
+		panic("batch.Module: " + errLivello.Error())
+	}
+	core.Supply(livello)
 
 	// Tutte le altre registrazioni del sottosistema confluiscono in un core.ModuleClosed("batch"):
 	// batch consuma i seam dell'app (gli ITaskRunner) e non le espone nulla in cambio, quindi

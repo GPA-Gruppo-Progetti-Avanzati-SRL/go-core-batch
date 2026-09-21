@@ -11,10 +11,6 @@ import (
 // IWorkItemStore is the persistence interface for the outbox/work-item pattern.
 // Implementations live in store/mongostore and store/sqlstore.
 type IWorkItemStore interface {
-	// FindPending returns PENDING items matching the filters (read-only, no claiming),
-	// ordered by create time. Utile a consumer che vogliono ispezionare la coda senza
-	// prenderla in carico (il claiming è ClaimPending/ClaimBatch).
-	FindPending(ctx context.Context, taskName, destination, objectType string) ([]*WorkItem, *core.ApplicationError)
 	// ClaimPending atomically selects up to limit PENDING items matching the given filters,
 	// marks them IN_PROGRESS (with locked_at = now), and returns them.
 	// destination and objectType are optional — pass "" to skip.
@@ -32,6 +28,17 @@ type IWorkItemStore interface {
 	// (log Debug), senza errore. Chi finalizza un singolo item passa una slice a 1 elemento.
 	MarkDone(ctx context.Context, ids []string, token string) *core.ApplicationError
 	MarkFailed(ctx context.Context, id, token, reason string) *core.ApplicationError
+	// Release riporta a PENDING un item claimato che NON è stato eseguito — il dispatch non è
+	// riuscito (pool saturo, worker irraggiungibile) e nessun runner l'ha mai visto.
+	//
+	// È distinta da MarkPending proprio per il contatore: Release NON incrementa retry, perché
+	// un tentativo che non è avvenuto non è un tentativo. Senza di lei l'item resterebbe
+	// IN_PROGRESS fino a RecoverOrphans, che oltre a farlo aspettare l'orphan timeout gli
+	// consuma un ritentativo — con max-retry configurato, una saturazione temporanea del pool
+	// esaurisce il budget di item mai eseguiti.
+	//
+	// È fenced dal token come i Mark*, e idempotente: un id non matchato è ignorato.
+	Release(ctx context.Context, id, token string) *core.ApplicationError
 	// MarkPending resets an item back to PENDING and increments retry.
 	// Use this when a task returns store.RetryError.
 	// retryDelay controls when the item becomes claimable again:
@@ -52,6 +59,25 @@ type IWorkItemStore interface {
 	// DeleteIfPending deletes the item with the given id only if its status is PENDING.
 	// Returns (true, nil) if deleted, (false, nil) if the item is not found or is no longer PENDING.
 	DeleteIfPending(ctx context.Context, id string) (bool, *core.ApplicationError)
+	// Purge cancella definitivamente gli item nello stato indicato più vecchi di olderThan
+	// (confrontando update_time), al più limit per chiamata. Ritorna quanti ne ha cancellati.
+	//
+	// Esiste perché senza di lei work_items cresce per sempre: gli item DONE non venivano mai
+	// rimossi, e con la collection crescono gli indici su cui gira il claim di ogni tick. Il
+	// limit serve a tenere corta la singola transazione: la cancellazione è ripetuta a ogni
+	// tick del job di retention, non fatta tutta in una volta.
+	//
+	// Non ha un default e non viene chiamata da sola: la retention si abilita in config
+	// (job type PurgeWorkItems). Cancellare dati non può essere un comportamento che si
+	// ottiene aggiornando la libreria.
+	Purge(ctx context.Context, status string, olderThan time.Time, limit int) (int, *core.ApplicationError)
+	// Backlog ritorna quanti item PENDING sono in attesa per i filtri dati e la data di
+	// creazione del più vecchio (zero se non ce ne sono). È il numero su cui si costruisce un
+	// alert — "la coda cresce", "c'è un item fermo" — che i counter di claimed/processed non
+	// danno: dalla loro differenza non si distingue una coda stabile da una che si allunga.
+	//
+	// È una query in più per tick, quindi la paga solo chi la abilita (property backlog-metrics).
+	Backlog(ctx context.Context, taskName, destination, objectType string) (pending int, oldest time.Time, appErr *core.ApplicationError)
 	// List returns a paginated list of workitems filtered by type and optionally by status.
 	// Pass status="" to include all statuses.
 	// sort controls the order; pass nil to use the default (createTime DESC).

@@ -72,10 +72,10 @@ func (s *runnerService) GetTaskExecutions(taskName string) (worker.RunTask[*runn
 		if appErr != nil {
 			return appErr
 		}
-		// Passa a worker.Run quello che serve per finalizzare via store.ApplyResult: il fencing
-		// token (fresco), il contatore dei tentativi già consumati e il tetto dell'istanza.
-		t.LockToken = item.LockToken
-		t.Retry = item.Retry
+		// Passa a worker.Run l'item INTERO: è ciò che store.ApplyResult riceve per finalizzare
+		// (fencing token, contatore dei tentativi). Il tetto ai ritentativi viaggia a parte,
+		// perché è configurazione dell'istanza di task e non un dato dell'item.
+		t.Item = item
 		t.MaxRetry = tr.MaxRetry
 		return tr.Runner.Run(t.Context, item)
 	}, true
