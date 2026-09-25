@@ -30,7 +30,6 @@ type options struct {
 	schedulerModes []string
 	workerModes    []string
 	store          ModuleFunc   // obbligatorio, sempre attivo
-	locker         ModuleFunc   // obbligatorio, gate-ato sui scheduler modes
 	modules        []ModuleFunc // gate-ati sui scheduler modes
 	workerModules  []ModuleFunc // gate-ati sui worker modes
 }
@@ -57,19 +56,6 @@ func WithWorkerModes(modes ...string) Option {
 //	batch.WithStore(storemongo.Module)   // l'app importa SOLO storemongo → niente bun
 func WithStore(m ModuleFunc) Option {
 	return func(o *options) { o.store = m }
-}
-
-// WithLocker inietta il backend del lock distribuito dello scheduler (un lock.Locker).
-// È OBBLIGATORIO (come WithStore): rende esplicita la scelta infrastrutturale. Il lock è
-// un'ottimizzazione di dispatch-dedup tra repliche, NON la garanzia di correttezza (quella
-// è il DB claiming nei runner). Il backend è iniettato per riferimento diretto e gate-ato
-// sui scheduler modes; il suo eventuale config è gestito dalla sua lib (non da batch).
-//
-//	batch.WithLocker(redislocker.Module)   // da go-core-redis/locker (+ redis.Module per il client)
-//	batch.WithLocker(mongolocker.Module)   // da go-core-mongo/locker — nessun Redis richiesto
-//	batch.WithLocker(sqllocker.Module)     // da go-core-sql/locker
-func WithLocker(m ModuleFunc) Option {
-	return func(o *options) { o.locker = m }
 }
 
 // WithModule aggiunge uno o più componenti lato scheduler, gate-ati sui scheduler modes. I
@@ -147,7 +133,8 @@ func ActiveSet(cfg *Config) task.ActiveSet {
 // (grpc client/server, kafka, s3, worker) sono suppliti SOLO se valorizzati: un config non
 // impostato non viene supplito e, se un componente attivo lo richiede, fx fallisce subito con un
 // chiaro "missing dependency" invece di far girare il backend con valori vuoti. Il lock distribuito
-// non è più un'eccezione: è un backend iniettato (WithLocker), come store e gli altri.
+// non è più un'eccezione: lo wira l'applicazione con corelock.Module, e lo scheduler lo riceve da
+// fx come qualsiasi altra dipendenza.
 //
 // Gating: i componenti di WithModule e lo Scheduler girano sui scheduler modes; quelli di
 // WithWorkerModule sui worker modes. Lo store fa eccezione: è wirato sempre (serve a entrambi i lati).
@@ -173,9 +160,6 @@ func Module(cfg *Config, register func(), opts ...Option) {
 	}
 	if o.store == nil {
 		panic("batch.Module: WithStore è obbligatorio (store.IData/IWorkItemStore serve a scheduler e worker)")
-	}
-	if o.locker == nil {
-		panic("batch.Module: WithLocker è obbligatorio (lock distribuito dello scheduler: redis/mongo/sql)")
 	}
 	sched := o.schedulerModes
 	work := o.workerModes
@@ -220,10 +204,6 @@ func Module(cfg *Config, register func(), opts ...Option) {
 	// batch_runners li porta dentro (root → discendenti), e batch_jobs aggrega come prima. Il
 	// mode-gating resta per-registrazione dentro ogni core.Provide/Supply.
 	core.ModuleClosed("batch", func() {
-		// Lock distribuito: backend iniettato (redis/mongo/sql), gate-ato sui scheduler modes.
-		// Il suo eventuale config è fornito dalla sua lib (es. redis.Module dell'app), non da batch.
-		o.locker(sched...)
-
 		// Config dei backend: suppliti a fx SOLO se valorizzati. Un config non impostato non viene
 		// supplito, così se un componente attivo lo richiede fx fallisce subito con un chiaro
 		// "missing dependency" invece di far girare il backend con valori vuoti (fallimento tardivo).

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/lock"
+	corelock "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-locker"
 )
 
 type fakeLocker struct {
@@ -16,7 +16,7 @@ type fakeHandle struct {
 	released bool
 }
 
-func (f *fakeLocker) Acquire(ctx context.Context, key string, opts ...lock.AcquireOption) (lock.Handle, error) {
+func (f *fakeLocker) Acquire(ctx context.Context, key string, opts ...corelock.AcquireOption) (corelock.Handle, error) {
 	if f.acquireErr != nil {
 		return nil, f.acquireErr
 	}
@@ -48,8 +48,8 @@ func TestAdaptLockUnlock(t *testing.T) {
 // TestAdaptContentionPropagates verifies that a failed Acquire (contention or
 // backend error) surfaces as a Lock error, so gocron skips the run this tick.
 func TestAdaptContentionPropagates(t *testing.T) {
-	g := Adapt(&fakeLocker{acquireErr: lock.ErrNotAcquired})
-	if _, err := g.Lock(context.Background(), "job-1"); !errors.Is(err, lock.ErrNotAcquired) {
+	g := Adapt(&fakeLocker{acquireErr: corelock.ErrNotAcquired})
+	if _, err := g.Lock(context.Background(), "job-1"); !errors.Is(err, corelock.ErrNotAcquired) {
 		t.Fatalf("expected ErrNotAcquired to propagate, got %v", err)
 	}
 }

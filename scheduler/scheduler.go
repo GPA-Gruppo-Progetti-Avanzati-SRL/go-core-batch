@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/lock"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/gocronlock"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
+	corelock "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-locker"
 	gocron "github.com/go-co-op/gocron/v2"
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/otel"
@@ -26,7 +26,7 @@ type schedulerParams struct {
 	fx.In
 	LC     fx.Lifecycle
 	Config []Config
-	Locker lock.Locker
+	Locker corelock.Locker
 	Data   store.IData
 	Jobs   []JobRegistration `group:"batch_jobs"`
 }
@@ -40,7 +40,7 @@ func newScheduler(p schedulerParams) (*Scheduler, error) {
 	logger := gocron.NewLogger(-1)
 	// The distributed lock is a dispatch-dedup optimization across replicas, not
 	// the correctness mechanism (that is the DB claiming in the job runners). The
-	// concrete backend (Redis/Mongo/SQL) is injected as a neutral lock.Locker and
+	// concrete backend (Redis/Mongo/SQL) is injected as a neutral corelock.Locker and
 	// adapted to gocron here.
 	locker := gocronlock.Adapt(p.Locker)
 	opts = append(opts, gocron.WithDistributedLocker(locker), gocron.WithMonitor(sm), gocron.WithLogger(logger))

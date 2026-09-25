@@ -5,7 +5,8 @@ go 1.27.1
 require (
 	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app v0.0.29-0.20260916103925-732c51fed2f5
 	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-kafka v0.0.0-20260916104524-934b21ed7ff9
-	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo v0.0.20-0.20260921161356-cfd130884f93
+	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-locker v0.0.0-20260925154640-9052fa89bfe1
+	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo v0.0.20-0.20260925130605-f4703ff25400
 	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-sql v0.0.2-0.20260916105926-f2d74a564934
 	github.com/aws/aws-sdk-go-v2 v1.42.1
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.26
@@ -58,7 +59,7 @@ require (
 	github.com/leodido/go-urn v1.5.0 // indirect
 	github.com/lucasjones/reggen v0.0.0-20200904144131-37ba4fa293bb // indirect
 	github.com/mattn/go-colorable v0.1.15 // indirect
-	github.com/mattn/go-isatty v0.0.23 // indirect
+	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58 // indirect
 	github.com/pelletier/go-toml/v2 v2.4.3 // indirect

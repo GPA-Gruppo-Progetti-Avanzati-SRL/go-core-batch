@@ -9,8 +9,8 @@ import (
 // deve più fare core.Supply. Il costruttore concreto (newScheduler) non è esportato:
 // l'unico entry-point è Module().
 //
-// Dipendenze risolte da fx (fornite altrove): lock.Locker (lock distribuito, backend
-// iniettato via batch.WithLocker: redis/mongo/sql) e store.IData (via Services).
+// Dipendenze risolte da fx (fornite altrove): corelock.Locker (lock distribuito, wirato
+// dall'applicazione con corelock.Module) e store.IData (via Services).
 // Registrare i job type (distributedjob/kafkajob/simplejob) e lo store PRIMA di Module().
 //
 // Se modes è vuoto registra sempre; altrimenti solo quando core.Mode è tra i modes indicati.
