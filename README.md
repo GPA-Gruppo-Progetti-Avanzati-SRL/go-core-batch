@@ -17,6 +17,7 @@ Raccoglie i sotto-config di tutti i pezzi cablati da `Module`. L'app tipicamente
 | Campo | Tipo | Tag yaml/mapstructure/json |
 |---|---|---|
 | `Grpc` | `grpc.Config` (`Client{Url}`, `Server{Hostname,Port}`) | `grpc` |
+| `Lock` | `corelock.Config` (`ttl`, `retry-delay`, `key-prefix`, `mongo.collection`, `sql.table`) | `lock` |
 | `S3` | `s3.Config` | `s3` |
 | `JobsConfig` | `[]scheduler.Config` | `jobs` |
 | `TasksConfig` | `[]task.Config` (`name`, `type`, `properties`) | `tasks` |
@@ -30,9 +31,20 @@ Raccoglie i sotto-config di tutti i pezzi cablati da `Module`. L'app tipicamente
 > vive sul WorkItem e l'andamento sulle metriche). Un valore diverso dai tre **ferma l'avvio**:
 > indovinare significherebbe scrivere — o non scrivere — dati senza che nulla lo dica.
 
-> **Il lock distribuito non è più qui.** Lo wira l'applicazione con `corelock.Module` e il suo
-> eventuale config (es. `redis.Config` di go-core-redis) è gestito dalla sua libreria: `batch` non
-> importa più Redis.
+> **Il lock distribuito lo wira `batch.Module`.** Il motore è quello di **go-core-locker**, ma la
+> chiamata a `corelock.Module` non è più dell'applicazione: `batch.WithLocker(lockmongo.Module)` —
+> **obbligatoria** — passa il solo backend, per riferimento diretto come ogni altro Module, e la
+> config è la sezione `lock:` di `batch.Config`. `batch` importa il package root di go-core-locker
+> ma **nessuno dei suoi backend**: il `go.mod` dell'app elenca solo quello che ha importato lei.
+>
+> Il `corelock.Locker` prodotto è fornito a **root**, non dentro il `ModuleClosed("batch")`: resta
+> quindi iniettabile dall'applicazione per le proprie sezioni critiche, esattamente come prima. Per
+> la stessa ragione un'app che wira il batch **non deve** chiamare `corelock.Module` da sé — sarebbe
+> un secondo provider dello stesso tipo.
+>
+> `key-prefix` va scritto quando più deployment condividono lo stesso backend: senza, due
+> applicazioni si contendono il lock sui nomi dei propri job — che spesso coincidono — e il sintomo
+> è soltanto un tick che non parte.
 
 > **`jobs[].properties` e `tasks[].properties` non sono la stessa cosa.** Il primo blocco è
 > **infrastrutturale**: configura il *job type* (`task`, `limit`, `collection`, `filter`, `topic`,
@@ -90,6 +102,7 @@ batch.Module(&cfg.BatchConfig, Register,
     batch.WithSchedulerModes(engine.Scheduler, engine.Batch),
     batch.WithWorkerModes(engine.Worker, engine.Batch),
     batch.WithStore(storemongo.Module),          // obbligatorio
+    batch.WithLocker(lockmongo.Module),          // obbligatorio
     batch.WithModule(                            // gate scheduler modes, riferimento diretto
         grpcdispatcher.Module,                   // dispatch via gRPC
         djmongo.Module, queryfeed.Module,        // feed by-query (query store + feed)
@@ -105,6 +118,7 @@ batch.Module(&cfg.BatchConfig, Register,
 // import localdispatcher "...go-core-batch/scheduler/distributedjob/localdispatcher"
 batch.Module(&cfg.BatchConfig, Register,
     batch.WithStore(storemongo.Module),          // obbligatorio
+    batch.WithLocker(lockmongo.Module),          // obbligatorio
     batch.WithModule(
         localdispatcher.Module,                  // dispatch in-process (niente gRPC)
         djmongo.Module, queryfeed.Module,        // feed by-query
@@ -121,6 +135,7 @@ che serve il task indicato, qualunque famiglia sia.
 ```go
 batch.Module(&cfg.BatchConfig, Register,
     batch.WithStore(storemongo.Module),
+    batch.WithLocker(lockmongo.Module),
     batch.WithModule(
         feedjob.Module,                          // job FeedTask (solo feed)
         simplejob.Module,                        // chi lo lavora
@@ -165,6 +180,7 @@ corekafka.ProducerModule(&svc.Kafka,
 
 batch.Module(&cfg.BatchConfig, Register,
     batch.WithStore(storemongo.Module),
+    batch.WithLocker(lockmongo.Module),
     batch.WithModule(kafkajob.Module),
 )
 ```
@@ -575,6 +591,7 @@ esecuzione; l'esito lo emette chi esegue.
 batch.Module(&cfg.Batch, Register,
     batch.WithSchedulerModes(engine.Batch),
     batch.WithStore(storemongo.Module),
+    batch.WithLocker(lockmongo.Module),
     batch.WithModule(localdispatcher.Module),   // niente gRPC, niente worker pool
 )
 ```
@@ -616,6 +633,7 @@ batch.Module(&cfg.Batch, Register,
     batch.WithSchedulerModes(engine.Scheduler),
     batch.WithWorkerModes(engine.Worker),
     batch.WithStore(storemongo.Module),
+    batch.WithLocker(lockmongo.Module),
     batch.WithModule(grpcdispatcher.Module),        // client gRPC
     batch.WithWorkerModule(grpchandler.Module),     // server gRPC + worker pool
 )
@@ -750,19 +768,33 @@ go-core-kafka come `KAFKA-PRODUCE` con `Ambit = "go-core-kafka"`.
 serve solo a evitare che N repliche eseguano lo stesso tick cron contemporaneamente
 (**dispatch-dedup**).
 
-È il [`corelock.Locker`](../go-core-locker) di go-core-locker, wirato dall'applicazione e
-adattato a gocron da `scheduler/gocronlock` — l'unico punto di batch legato a gocron per il lock.
-Tre backend, tutti `Module(modes ...string)` modes-only:
+È il [`corelock.Locker`](../go-core-locker) di go-core-locker, adattato a gocron da
+`scheduler/gocronlock` — l'unico punto di batch legato a gocron per il lock.
+
+**Lo wira `batch.Module`**, non l'applicazione: `batch.WithLocker(m)` è **obbligatoria** e prende il
+solo backend, per riferimento diretto come `WithStore`; la config è la sezione `lock:` di
+`batch.Config`. Quattro backend, tutti `Module(modes ...string)` modes-only:
 
 | Backend | Package | Nota |
 |---|---|---|
-| Redis | `go-core-redis/locker` (redsync/Redlock) | richiede `redis.Module(&cfg.Redis, ...)` wirato prima |
-| MongoDB | `go-core-mongo/locker` (documento lease TTL) | consuma il `*coremongo.Service` |
-| SQL | `go-core-sql/locker` (tabella `scheduler_locks`) | consuma il `*bun.DB`; `locker.EnsureTable` crea la tabella |
+| MongoDB | `go-core-locker/mongostore` | consuma il `*coremongo.Service` dell'app |
+| SQL | `go-core-locker/sqlstore` | consuma il `*coresql.Service`; `sqlstore.EnsureSchema` crea la tabella |
+| Redis | `go-core-locker/redisstore` | `SET NX`, non Redlock: con un client solo non sarebbe Redlock comunque |
+| in-process | `go-core-locker/memstore` | `Locker` legittimo **a replica singola**, e solo lì |
 
-I lease hanno un TTL (redsync ~30s, mongo/sql 30s): se un tick supera il TTL il lock può scadere e
-un'altra replica potrebbe ripartire, ma **il claiming lo rende innocuo**. È per questo che il backend
-è una scelta libera: un'app mongo-only o sql-only usa `mongostore`/`sqlstore` e **non deploya Redis**.
+```go
+batch.Module(&svc.Batch, Register,
+    batch.WithStore(storemongo.Module),
+    batch.WithLocker(lockmongo.Module))   // obbligatoria
+```
+
+Il Locker è fornito a **root**, fuori dal `ModuleClosed("batch")`: resta iniettabile
+dall'applicazione per le proprie sezioni critiche. Per la stessa ragione **non** va chiamata anche
+`corelock.Module` — sarebbe un secondo provider dello stesso tipo, e l'avvio fallisce.
+
+Il lease ha un TTL (default 30s): se un tick lo supera il lock può scadere e un'altra replica
+ripartire, ma **il claiming lo rende innocuo**. È per questo che il backend è una scelta libera: un
+app mongo-only o sql-only usa `mongostore`/`sqlstore` e **non deploya Redis**.
 
 ## Struttura package
 
@@ -848,6 +880,45 @@ esterna    next_run_at=now       │
     se configurato. Senza, la collection cresce per sempre.
 ```
 
+### Chi ha claimato e chi ha eseguito — sono due hostname diversi
+
+Sul WorkItem ci sono **due** colonne, e confonderle porta a diagnosi sbagliate in un deployment
+distribuito:
+
+| Campo | Chi ci finisce | Scritto da |
+|---|---|---|
+| `lockedBy` / `locked_by` | chi ha **claimato**, cioè il processo che gira il tick del job | `ClaimPending`, `RecoverOrphans` |
+| `executedBy` / `executed_by` | chi ha **eseguito** l'ultimo tentativo | `MarkDone`, `MarkFailed`, `MarkPending` |
+
+Coincidono su `SingleTask` e col `localdispatcher`, dove a eseguire è lo stesso processo che ha
+claimato. **Non** coincidono col `grpcdispatcher`: lì `locked_by` è lo scheduler, che l'item lo
+dispatcha e non lo esegue, e l'esecutore è il worker remoto — che è precisamente ciò che
+`executed_by` risponde. I `Mark*` sono gli unici punti che girano nel processo che ha davvero
+eseguito il runner, ed è per questo che scrivono loro.
+
+`Release` **non** lo scrive: lì il dispatch non è riuscito e nessuno ha eseguito nulla — la stessa
+ragione per cui non consuma nemmeno un ritentativo.
+
+**I tre campi di lock non vengono ripuliti alla finalizzazione, tranne uno.** I `Mark*` e `Release`
+azzerano il solo `locked_at`; `lock_token` e `locked_by` restano, e il claim successivo li
+sovrascrive. Quindi:
+
+- **il segnale di "è in carico a qualcuno" è `status = IN_PROGRESS` + `locked_at != NULL`**, non
+  `locked_by` valorizzato;
+- un token rimasto su un item terminale o tornato `PENDING` non autorizza nulla, perché ogni
+  `Mark*` pretende anche `status = IN_PROGRESS`;
+- su un item `DONE` resta leggibile chi l'aveva preso in carico, che insieme a `executed_by` è la
+  coppia con cui si ricostruisce cos'è successo senza dipendere da `task_logs`;
+- su un item tornato `PENDING` in attesa di ritentativo, `locked_by` è **stale**: nomina chi teneva
+  il lease nel tentativo precedente.
+
+Prima l'unica traccia dell'esecutore era la riga `START`/`DONE` di `task_logs` (il suo campo
+`hostname` è di chi scrive la riga, quindi il worker per quelle due): con `task-log: errors` non
+c'è per gli esiti riusciti, con `off` non c'è affatto, e `SingleTask` non scrive `task_logs`.
+
+> **Migrazione SQL:** `sqlstore.EnsureIndexes` aggiunge `executed_by` con `ADD COLUMN IF NOT
+> EXISTS`. Su Mongo non serve nulla. Le righe già esistenti restano col campo vuoto.
+
 ---
 
 ## Indici — obbligatori, e non creati da soli
@@ -916,6 +987,7 @@ jobs:
 ```go
 batch.Module(&cfg.BatchConfig, Register,
     batch.WithStore(storemongo.Module),
+    batch.WithLocker(lockmongo.Module),
     batch.WithModule(localdispatcher.Module, purgejob.Module),
 )
 ```
@@ -1199,7 +1271,7 @@ un solo job type conosce (`older-than`, `task-logs`, `topic`, `objectId`, `paylo
 ```go
 // services/services.go
 redis.Module(&cfg.Redis)        // client Redis (solo se il lock è redis-backed)
-corelock.Module(&cfg.Lock, corelock.WithBackend(redisstore.Module))  // oppure mongostore / sqlstore
+batch.WithLocker(lockredis.Module)   // oppure lockmongo.Module / locksql.Module / lockmem.Module
 mongostore.Module()             // store.IData + store.IWorkItemStore (unico entry-point)
 scheduler.Module(cfg.Scheduler) // fornisce la config da sé + Provide/Invoke interni
 ```
@@ -1261,6 +1333,7 @@ batch.Module(&svc.Batch, Register,
     batch.WithSchedulerModes(engine.Scheduler),
     batch.WithWorkerModes(engine.Worker),
     batch.WithStore(storemongo.Module),           // obbligatorio, wirato in ogni mode
+    batch.WithLocker(lockmongo.Module),           // obbligatorio, wirato in ogni mode
     batch.WithModule(grpcdispatcher.Module),      // lato scheduler: client gRPC
     batch.WithWorkerModule(grpchandler.Module),   // lato worker: server gRPC + pool
 )
@@ -1581,5 +1654,6 @@ In gRPC, `limit` e pool size sono dimensioni ortogonali: lo scheduler può claim
 - **Tabelle**: `work_items` e `task_logs` (costanti `store.TableWorkItems`, `store.TableTaskLogs`). Senza un job `PurgeWorkItems` **crescono per sempre**, e con loro gli indici del claim.
 - **Gli indici del claim non sono opzionali**: senza `ix_workitem_claim`/`ix_workitem_orphan` ogni tick di ogni job scandisce la collection. `EnsureIndexes` li crea; in assenza la libreria logga un Warn all'avvio ma non li crea da sola.
 - **Il worker pool non installa più un handler di segnale**: i segnali li gestisce l'app (`core.Run`/fx) e l'arresto arriva come `OnStop`, che drena le task in volo fino al deadline del context di stop. Prima un `signal.Notify` di libreria faceva uscire i worker *prima* di `OnStop`, abbandonando a metà le task già partite.
-- **`singleton: true`** richiede un `corelock.Locker` nel grafo: se `corelock.Module` non è wirato, fx fallisce l'avvio con un `missing type`, e il backend scelto dev'essere raggiungibile o il lock fallisce alla prima acquisizione.
+- **`singleton: true`** richiede un `corelock.Locker` nel grafo: lo wira `batch.WithLocker`, che è obbligatoria (senza, `batch.Module` panica al wiring), e il backend scelto dev'essere raggiungibile o il lock fallisce alla prima acquisizione.
+- **Non chiamare `corelock.Module` in un'app che wira il batch**: il Locker glielo fornisce già `batch.WithLocker`, a root, e un secondo provider dello stesso tipo fa fallire l'avvio.
 - **Worker distribuito**: il processo worker deve connettersi allo stesso DB del scheduler per chiamare `MarkDone`/`MarkFailed`.

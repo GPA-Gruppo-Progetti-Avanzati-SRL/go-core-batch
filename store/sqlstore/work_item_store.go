@@ -169,6 +169,7 @@ func (d *workItemDataSQL) MarkDone(ctx context.Context, ids []string, token stri
 	res, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
 		Set("status = ?", store.StatusDone).
 		Set("update_time = ?", now).
+		Set("executed_by = ?", store.Hostname()).
 		Set("locked_at = NULL").
 		Where("id IN (?) AND status = ? AND lock_token = ?", bun.List(ids), store.StatusInProgress, token).
 		Exec(ctx)
@@ -189,6 +190,7 @@ func (d *workItemDataSQL) MarkFailed(ctx context.Context, id, token, reason stri
 		Set("status = ?", store.StatusFailed).
 		Set("error = ?", reason).
 		Set("update_time = ?", now).
+		Set("executed_by = ?", store.Hostname()).
 		Set("locked_at = NULL").
 		Where("id = ? AND status = ? AND lock_token = ?", id, store.StatusInProgress, token).
 		Exec(ctx)
@@ -230,6 +232,7 @@ func (d *workItemDataSQL) MarkPending(ctx context.Context, id, token string, aft
 		Set("status = ?", store.StatusPending).
 		Set("locked_at = NULL").
 		Set("update_time = ?", now).
+		Set("executed_by = ?", store.Hostname()).
 		Set("retry = retry + 1").
 		Set("next_run_at = ?", nextRunAt).
 		Where("id = ? AND status = ? AND lock_token = ?", id, store.StatusInProgress, token).
@@ -384,7 +387,8 @@ func (d *workItemDataSQL) List(ctx context.Context, taskName, status string, pag
 // all'avvio. Include:
 //   - le colonne di fencing lock_token/locked_by (ADD COLUMN IF NOT EXISTS), usate da
 //     ClaimPending/RecoverOrphans/Mark* per impedire che un worker stale finalizzi un item
-//     ri-claimato;
+//     ri-claimato, più executed_by, che i Mark* riempiono con l'hostname di CHI HA ESEGUITO
+//     (diverso da locked_by, che è di chi ha claimato, quando il dispatch passa per gRPC);
 //   - uk_workitem_active, unico parziale, che impedisce l'inserimento concorrente di item attivi
 //     duplicati per lo stesso (task_name, object_id);
 //   - ix_workitem_claim / ix_workitem_orphan / ix_workitem_claim_dest, che servono le query di
@@ -395,15 +399,21 @@ func (d *workItemDataSQL) List(ctx context.Context, taskName, status string, pag
 // È Postgres-specifico (come il resto delle utility DDL del modulo). Su MySQL/SQLite le colonne
 // e gli indici vanno creati manualmente via migration.
 func EnsureIndexes(ctx context.Context, db *bun.DB) error {
-	if _, err := db.ExecContext(ctx, `
-		ALTER TABLE work_items ADD COLUMN IF NOT EXISTS lock_token TEXT;
-		ALTER TABLE work_items ADD COLUMN IF NOT EXISTS locked_by  TEXT;
-	`); err != nil {
+	if _, err := db.ExecContext(ctx, ensureColumnsDDL); err != nil {
 		return err
 	}
 	_, err := db.ExecContext(ctx, ensureIndexesDDL)
 	return err
 }
+
+// ensureColumnsDDL sono le colonne che la libreria aggiunge a una tabella già esistente. Come per
+// gli indici è una costante e non un literal in linea, perché ha un secondo lettore: il test che
+// verifica che ci sia una ADD COLUMN per ogni colonna scritta dal claim e dai Mark*.
+const ensureColumnsDDL = `
+		ALTER TABLE work_items ADD COLUMN IF NOT EXISTS lock_token  TEXT;
+		ALTER TABLE work_items ADD COLUMN IF NOT EXISTS locked_by   TEXT;
+		ALTER TABLE work_items ADD COLUMN IF NOT EXISTS executed_by TEXT;
+	`
 
 // ensureIndexesDDL è il DDL degli indici, estratto in una costante perché ha due lettori:
 // EnsureIndexes che lo esegue e un test che verifica che crei tutti gli store.ExpectedIndexes —

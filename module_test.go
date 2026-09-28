@@ -115,3 +115,31 @@ func TestApply_StillFailsOnUnknownExplicitReference(t *testing.T) {
 	}()
 	task.Apply(func() {}, a)
 }
+
+// I due backend obbligatori devono fermare l'avvio se non sono passati, e il messaggio deve dire
+// COSA scegliere: sono l'unica configurazione di batch.Module che non ha un default sensato —
+// dove vivono i work item e dove vive il lock non sono domande a cui la libreria possa rispondere.
+func TestModule_BackendObbligatori(t *testing.T) {
+	casi := map[string][]Option{
+		"senza WithStore":  {WithLocker(func(...string) {})},
+		"senza WithLocker": {WithStore(func(...string) {})},
+	}
+	for nome, opts := range casi {
+		t.Run(nome, func(t *testing.T) {
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatal("atteso un panic al wiring")
+				}
+				msg, _ := r.(string)
+				if !strings.Contains(msg, "obbligatori") && !strings.Contains(msg, "obbligatorio") {
+					t.Fatalf("il panic non dice che l'opzione è obbligatoria: %v", r)
+				}
+				if !strings.Contains(msg, "Module") {
+					t.Fatalf("il panic non nomina un backend da passare: %v", r)
+				}
+			}()
+			Module(&Config{}, nil, opts...)
+		})
+	}
+}

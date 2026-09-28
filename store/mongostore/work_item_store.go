@@ -247,7 +247,10 @@ func (d *workItemData) MarkDone(ctx context.Context, ids []string, token string)
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	res, err := coll.UpdateMany(ctx,
 		bson.M{"_id": bson.M{"$in": ids}, "status": store.StatusInProgress, "lockToken": token},
-		bson.M{"$set": bson.M{"status": store.StatusDone, "updateTime": now, "lockedAt": nil}},
+		bson.M{"$set": bson.M{
+			"status": store.StatusDone, "updateTime": now, "lockedAt": nil,
+			"executedBy": store.Hostname(),
+		}},
 	)
 	if err != nil {
 		return errs.Tech(errs.CodeMarkDone).WithCause(err)
@@ -264,7 +267,10 @@ func (d *workItemData) MarkFailed(ctx context.Context, id, token, reason string)
 	now := time.Now()
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	res, err := coll.UpdateOne(ctx, fencedFilter(id, token),
-		bson.M{"$set": bson.M{"status": store.StatusFailed, "error": reason, "updateTime": now, "lockedAt": nil}},
+		bson.M{"$set": bson.M{
+			"status": store.StatusFailed, "error": reason, "updateTime": now, "lockedAt": nil,
+			"executedBy": store.Hostname(),
+		}},
 	)
 	if err != nil {
 		return errs.Tech(errs.CodeMarkFailed).WithCause(err)
@@ -302,7 +308,10 @@ func (d *workItemData) MarkPending(ctx context.Context, id, token string, after 
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	res, err := coll.UpdateOne(ctx, fencedFilter(id, token),
 		bson.M{
-			"$set": bson.M{"status": store.StatusPending, "lockedAt": nil, "updateTime": now, "nextRunAt": nextRunAt},
+			"$set": bson.M{
+				"status": store.StatusPending, "lockedAt": nil, "updateTime": now,
+				"nextRunAt": nextRunAt, "executedBy": store.Hostname(),
+			},
 			"$inc": bson.M{"retry": 1},
 		},
 	)

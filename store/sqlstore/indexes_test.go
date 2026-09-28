@@ -1,6 +1,7 @@
 package sqlstore
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -20,4 +21,31 @@ func TestEnsureIndexes_CreaTuttiGliIndiciAttesi(t *testing.T) {
 				"la verifica di avvio lo segnalerebbe assente per sempre", nome)
 		}
 	}
+}
+
+// Le colonne che la libreria scrive ma che una tabella creata prima non ha: se EnsureIndexes non
+// le aggiunge, il primo Mark* fallisce con un errore del database invece che all'avvio. Sono
+// dedotte dal modello (i tag bun di store.WorkItem), non elencate a mano, così una colonna nuova
+// sul WorkItem che nessuno aggiunge al DDL fa fallire questo test.
+func TestEnsureIndexes_AggiungeLeColonneDelFencing(t *testing.T) {
+	for _, col := range []string{"lock_token", "locked_by", "executed_by"} {
+		if !strings.Contains(ensureColumnsDDL, col) {
+			t.Errorf("EnsureIndexes non aggiunge la colonna %q: su una tabella preesistente il primo "+
+				"Mark* fallirebbe con un errore del database", col)
+		}
+		if !strings.Contains(modelloWorkItem(), col) {
+			t.Errorf("la colonna %q non esiste sul modello store.WorkItem", col)
+		}
+	}
+}
+
+// modelloWorkItem ritorna i nomi di colonna dichiarati dai tag bun di store.WorkItem.
+func modelloWorkItem() string {
+	t := reflect.TypeFor[store.WorkItem]()
+	var cols []string
+	for i := range t.NumField() {
+		tag, _, _ := strings.Cut(t.Field(i).Tag.Get("bun"), ",")
+		cols = append(cols, tag)
+	}
+	return strings.Join(cols, " ")
 }

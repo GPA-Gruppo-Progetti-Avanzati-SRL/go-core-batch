@@ -7,6 +7,7 @@ import (
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
+	corelock "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-locker"
 )
 
 // ModuleFunc è la firma comune di TUTTI i Module() componibili di go-core-batch (store,
@@ -29,9 +30,10 @@ type ModuleFunc func(modes ...string)
 type options struct {
 	schedulerModes []string
 	workerModes    []string
-	store          ModuleFunc   // obbligatorio, sempre attivo
-	modules        []ModuleFunc // gate-ati sui scheduler modes
-	workerModules  []ModuleFunc // gate-ati sui worker modes
+	store          ModuleFunc          // obbligatorio, sempre attivo
+	locker         corelock.ModuleFunc // obbligatorio, sempre attivo
+	modules        []ModuleFunc        // gate-ati sui scheduler modes
+	workerModules  []ModuleFunc        // gate-ati sui worker modes
 }
 
 // Option configura Module.
@@ -56,6 +58,28 @@ func WithWorkerModes(modes ...string) Option {
 //	batch.WithStore(storemongo.Module)   // l'app importa SOLO storemongo → niente bun
 func WithStore(m ModuleFunc) Option {
 	return func(o *options) { o.store = m }
+}
+
+// WithLocker inietta il backend del lock distribuito. È OBBLIGATORIA: senza un lock condiviso fra
+// le repliche N istanze eseguirebbero lo stesso tick cron contemporaneamente. (Il lock è
+// dispatch-dedup, non correttezza — quella la garantisce il claiming sul database — ma è ciò che
+// evita di dispatchare N volte lo stesso lavoro.)
+//
+// A wirare go-core-locker è batch.Module: l'applicazione NON chiama più corelock.Module, e passa
+// solo il backend, per riferimento diretto come ogni altro Module. Il suo go.mod elencherà
+// soltanto quello — un'app mongo-only non si porta dietro bun né Redis.
+//
+//	batch.WithLocker(lockmongo.Module)    // go-core-locker/mongostore
+//	batch.WithLocker(locksql.Module)      // go-core-locker/sqlstore
+//	batch.WithLocker(lockredis.Module)    // go-core-locker/redisstore
+//	batch.WithLocker(lockmem.Module)      // in-process: legittimo a REPLICA SINGOLA, e solo lì
+//
+// La config del lock è cfg.Lock (sezione `lock:`), e il Locker prodotto è fornito a ROOT: resta
+// quindi iniettabile dall'applicazione per le proprie sezioni critiche, esattamente come prima.
+// Per la stessa ragione un'app che wira il batch non deve chiamare corelock.Module da sé: sarebbe
+// un secondo provider dello stesso tipo.
+func WithLocker(m corelock.ModuleFunc) Option {
+	return func(o *options) { o.locker = m }
 }
 
 // WithModule aggiunge uno o più componenti lato scheduler, gate-ati sui scheduler modes. I
@@ -133,8 +157,8 @@ func ActiveSet(cfg *Config) task.ActiveSet {
 // (grpc client/server, kafka, s3, worker) sono suppliti SOLO se valorizzati: un config non
 // impostato non viene supplito e, se un componente attivo lo richiede, fx fallisce subito con un
 // chiaro "missing dependency" invece di far girare il backend con valori vuoti. Il lock distribuito
-// non è più un'eccezione: lo wira l'applicazione con corelock.Module, e lo scheduler lo riceve da
-// fx come qualsiasi altra dipendenza.
+// segue la stessa regola dello store: lo wira batch.Module a partire da cfg.Lock e dal backend
+// passato con WithLocker, e lo fornisce a root — l'applicazione non chiama più corelock.Module.
 //
 // Gating: i componenti di WithModule e lo Scheduler girano sui scheduler modes; quelli di
 // WithWorkerModule sui worker modes. Lo store fa eccezione: è wirato sempre (serve a entrambi i lati).
@@ -164,6 +188,11 @@ func Module(cfg *Config, register func(), opts ...Option) {
 	if o.store == nil {
 		panic("batch.Module: WithStore è obbligatorio (store.IData/IWorkItemStore serve a scheduler e worker)")
 	}
+	if o.locker == nil {
+		panic("batch.Module: WithLocker è obbligatorio — senza un lock condiviso fra le repliche N " +
+			"istanze eseguono lo stesso tick cron insieme. Scegliere fra batch.WithLocker(mongostore.Module), " +
+			"(sqlstore.Module), (redisstore.Module) di go-core-locker, o (memstore.Module) per una replica sola")
+	}
 	sched := o.schedulerModes
 	work := o.workerModes
 
@@ -191,6 +220,13 @@ func Module(cfg *Config, register func(), opts ...Option) {
 	// l'app e comunque visibile dall'interno del modulo, che ne è discendente.
 	o.store()
 
+	// Lock distribuito: wirato SEMPRE e a ROOT come lo store, e per la stessa ragione. Il Locker
+	// non è un ingranaggio privato del sottosistema — lo scheduler ne è il consumatore principale,
+	// ma l'applicazione lo inietta per le proprie sezioni critiche — quindi non può stare dentro
+	// il ModuleClosed, che lo renderebbe invisibile fuori da batch. Senza mode gate perché
+	// core.ProvideAs è lazy: in un mode che non lo usa non viene costruito comunque.
+	corelock.Module(&cfg.Lock, corelock.WithBackend(o.locker))
+
 	// Livello di dettaglio dei task_logs: fornito a ROOT come lo store, perché è lo store a
 	// consumarlo. Validato qui e non dentro l'implementazione: un valore non previsto è un
 	// errore di configurazione e deve fermare l'avvio, non degradare in silenzio su "all".
@@ -202,8 +238,8 @@ func Module(cfg *Config, register func(), opts ...Option) {
 
 	// Tutte le altre registrazioni del sottosistema confluiscono in un core.ModuleClosed("batch"):
 	// batch consuma i seam dell'app (gli ITaskRunner) e non le espone nulla in cambio, quindi
-	// config dei backend, locker, dispatcher, feed, query store, worker pool, producer Kafka
-	// interno e *Scheduler sono privati al modulo. I runner restano forniti a root: il value group
+	// config dei backend, dispatcher, feed, query store, worker pool e *Scheduler sono privati al
+	// modulo (lo store e il Locker no: sono registrati a root, vedi sopra). I runner restano forniti a root: il value group
 	// batch_runners li porta dentro (root → discendenti), e batch_jobs aggrega come prima. Il
 	// mode-gating resta per-registrazione dentro ogni core.Provide/Supply.
 	core.ModuleClosed("batch", func() {

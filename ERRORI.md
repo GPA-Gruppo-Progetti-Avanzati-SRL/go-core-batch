@@ -121,7 +121,8 @@ Errori di **configurazione o di wiring**, deliberatamente non recuperabili:
 
 | Messaggio | Origine | Causa |
 |---|---|---|
-| `batch.Module: WithStore è obbligatorio` | `module.go:173` | manca il backend dello store (`storemongo.Module` / `storesql.Module`) |
+| `batch.Module: WithStore è obbligatorio` | `module.go` | manca il backend dello store (`storemongo.Module` / `storesql.Module`) |
+| `batch.Module: WithLocker è obbligatorio` | `module.go` | manca il backend del lock distribuito di go-core-locker (`mongostore` / `sqlstore` / `redisstore`, o `memstore` a replica singola). Senza, N repliche eseguono lo stesso tick cron insieme |
 | `batch: task <type> registrato fuori dalla funzione passata a batch.Module` | `task/task.go:108` | `runner.Register`/`runner.RegisterFile` in un `init()`: lì la sezione `tasks:` non è ancora nota |
 | `batch: la sezione tasks: richiede un name su ogni voce` | `task/task.go:167` | voce senza `name`. Il nome è la **chiave di routing** (`WorkItem.TaskName`) e non ha fallback sul `type` |
 | `batch: <problemi>` | `task/task.go` | riferimenti incoerenti: `jobs[].properties.task` o `workers[].tasks` che nominano un task non dichiarato, task type registrato senza voce in `tasks:` |
