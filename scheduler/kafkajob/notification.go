@@ -40,7 +40,7 @@ type parametri struct {
 }
 
 func makeNotificationJobFactory(prod producer.IProducer, items store.IWorkItemStore) scheduler.JobFactory {
-	return func(name string, s *scheduler.Services, config scheduler.Config) gocron.Task {
+	return func(name string, config scheduler.Config) gocron.Task {
 		p, resolveErr := risolvi(name, config)
 		if resolveErr != nil {
 			// Come per le altre famiglie: un job che non può funzionare si vede all'avvio, non

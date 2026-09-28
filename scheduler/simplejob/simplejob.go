@@ -14,6 +14,13 @@
 //
 // Passare dall'uno all'altro è una riga di `jobs:`, non una ricompilazione.
 //
+// Il contratto del runner non è ridichiarato qui: è runner.ITaskRunner (alias di
+// store.ITaskRunner), lo stesso di distributedjob e del worker pool. C'era un
+// `simplejob.ITaskRunner` identico ed è stato tolto — un secondo nome per lo stesso contratto è
+// già un modo in più di dichiarare un runner, ed è ciò che questa libreria non vuole avere. Il
+// ciclo di vita lo applica il framework dal valore di ritorno (store.ApplyResult): nil→MarkDone,
+// store.Retry→MarkPending, err→MarkFailed, store.ErrHandled→lasciato intatto.
+//
 // Wiring: simplejob.Module() in un init() oppure via batch.WithModule; i runner si registrano
 // con runner.Register dentro la funzione passata a batch.Module (è lì che `tasks:` è nota):
 //
@@ -65,12 +72,6 @@ const (
 	PropLimit = "limit"
 )
 
-// ITaskRunner è il contratto dei runner, condiviso con distributedjob via store.ITaskRunner: lo
-// stesso runner è eseguibile dalle due famiglie senza modifiche.
-// Il framework applica il ciclo di vita dal valore di ritorno (vedi store.ApplyResult):
-// nil→MarkDone, store.Retry→MarkPending, err→MarkFailed, store.ErrHandled→lasciato intatto.
-type ITaskRunner = store.ITaskRunner
-
 // newJobRegistration trasforma i runner raccolti dal gruppo batch_runners in UNA JobRegistration
 // per il job type SingleTask, con le istanze indicizzate per nome.
 //
@@ -99,7 +100,7 @@ func Module(modes ...string) {
 }
 
 func makeFactory(items store.IWorkItemStore, instances map[string]*runner.TaskRunner) scheduler.JobFactory {
-	return func(name string, _ *scheduler.Services, config scheduler.Config) gocron.Task {
+	return func(name string, config scheduler.Config) gocron.Task {
 		taskName, tr, resolveErr := risolvi(name, instances, config)
 		if resolveErr != nil {
 			// Si logga già alla costruzione, non solo al primo tick: un job che non può

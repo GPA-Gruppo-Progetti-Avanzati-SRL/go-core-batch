@@ -1,6 +1,24 @@
-// Package runner provides the shared ITaskRunner interface and registration
-// infrastructure used by all distributedjob dispatcher implementations
-// (localdispatcher, grpcdispatcher worker side, and any future transport).
+// Package runner porta il contratto ITaskRunner e la SOLA forma di registrazione di un task
+// runner, condivisa da tutte le famiglie di job (simplejob, distributedjob con dispatch
+// in-process o gRPC, worker pool) e da ogni trasporto futuro.
+//
+// La registrazione è UNA: Register[T](taskType) — e RegisterFile[T](taskType) per l'altro
+// contratto, quello dei runner su file (S3). Non esiste una seconda forma.
+//
+// Le vecchie Provide/ProvideFile — un costruttore fx fornito direttamente al value group — sono
+// state RIMOSSE, per la stessa ragione per cui go-core-kafka ha tolto ProvideHandler /
+// ProvideTransformer: non passando dalla sezione `tasks:` erano l'unica forma che
+//
+//   - non riceveva le properties applicative dell'istanza né il suo `max-retry`;
+//   - non veniva filtrata dai riferimenti di jobs:/workers: (il runner si costruiva, con le sue
+//     dipendenze, anche quando nessuno lo eseguiva);
+//   - poteva essere chiamata in un init(), cioè FUORI dalla finestra di batch.Module — quindi
+//     fuori dal fail-fast che verifica la coerenza fra `tasks:`, `jobs:` e i type registrati.
+//
+// Tenere in vita due forme con semantiche di gating diverse significava tenere in vita proprio
+// l'asimmetria che la registrazione unica toglie. Un runner che ha bisogno di logica di
+// costruzione la mette nei campi `inject:`/`prop:` della sua struct, che è ciò che
+// core.ProvideStruct sa leggere.
 package runner
 
 import (
@@ -12,7 +30,6 @@ import (
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/batchmetrics"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
-	"go.uber.org/fx"
 )
 
 // Group is the fx group tag used to collect all registered TaskRunners.
@@ -118,20 +135,6 @@ func (r *MuxRunner) Run(ctx context.Context, item *store.WorkItem, items store.I
 	return runErr
 }
 
-// Provide registers a TaskRunner constructor into the batch_runners fx group.
-// The constructor may declare any fx-injectable parameters.
-//
-// Example:
-//
-//	func init() { runner.Provide(newMyRunner) }
-//
-//	func newMyRunner(svc myPkg.IService) *runner.TaskRunner {
-//	    return runner.New("MY_TASK", &myRunner{svc: svc})
-//	}
-func Provide(constructor any) {
-	core.Provide(fx.Annotate(constructor, fx.ResultTags(`group:"`+Group+`"`)))
-}
-
 // Register registra il tipo struct T come task runner per il task type indicato. T deve implementare
 // ITaskRunner (via receiver a puntatore) e dichiarare i suoi campi con i tag di go-core-app:
 //
@@ -194,12 +197,6 @@ func NewFile(taskName string, r IFileRunner) *FileTaskRunner {
 
 // FileGroup is the fx group tag used to collect all registered FileTaskRunners.
 const FileGroup = "batch_file_runners"
-
-// ProvideFile registers a FileTaskRunner constructor into the batch_file_runners fx group.
-// The constructor may declare any fx-injectable parameters.
-func ProvideFile(constructor any) {
-	core.Provide(fx.Annotate(constructor, fx.ResultTags(`group:"`+FileGroup+`"`)))
-}
 
 // RegisterFile è l'analogo di Register per i runner su file (es. S3): T deve implementare IFileRunner.
 // Vale lo stesso contratto sui tag e la stessa istanziazione per voce della sezione `tasks:` (che va

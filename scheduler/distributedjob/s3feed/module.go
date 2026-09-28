@@ -5,13 +5,11 @@
 // Usage (modes-only: la s3.Config è iniettata da fx — la fornisce batch.Module, o l'app con
 // core.Supply(cfg.S3) prima di Module() nel wiring manuale):
 //
-//	func init() {
-//	    core.Supply(cfg.S3)
-//	    s3feed.Module()
-//	    runner.RegisterFile[myS3Runner]("S3_IMPORT")
-//	}
+//	batch.Module(&svc.Batch, Register, …, batch.WithModule(s3feed.Module))
+//	func Register() { runner.RegisterFile[myS3Runner]("S3_IMPORT") }
 //
-// File runners are registered with runner.RegisterFile or runner.ProvideFile.
+// File runners are registered with runner.RegisterFile — l'unica forma, come per ogni altro
+// runner (runner.ProvideFile è stata rimossa insieme a runner.Provide).
 // They are collected from the batch_file_runners fx group and wrapped with
 // S3 download/move lifecycle, then injected into the batch_runners group
 // so the localdispatcher's MuxRunner can route them.

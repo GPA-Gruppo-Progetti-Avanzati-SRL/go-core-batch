@@ -147,10 +147,13 @@ func ActiveSet(cfg *Config) task.ActiveSet {
 // la mappa globale scheduler.Jobs al momento della costruzione.)
 //
 // Registrazione dei runner: si passa la funzione register, come in corekafka.Module — dentro, le
-// runner.Register / simplejob.RegisterRunner vedono la config e istanziano un runner per ogni task
-// attivo, con le sue properties (sezione `tasks:`, obbligatoria). register è nil solo per un'app che
-// non registra task runner; registrare in un init() non è più supportato (panic: lì la config non è
-// nota). I costruttori scritti a mano — runner.Provide — restano invece registrabili ovunque.
+// runner.Register[T] (e runner.RegisterFile[T] per i runner su file) vedono la config e istanziano
+// un runner per ogni task attivo, con le sue properties (sezione `tasks:`, obbligatoria). È l'UNICA
+// forma di registrazione, uguale per ogni famiglia di job e per le due sponde del dispatch gRPC:
+// runner.Provide/ProvideFile e grpchandler.Provide — costruttori forniti a mano al value group, che
+// saltavano `tasks:` e potevano stare in un init() — sono state rimosse. register è nil solo per
+// un'app che non registra task runner; registrare fuori da questa finestra fa panicare, perché lì la
+// sezione `tasks:` non è nota.
 //
 // Resta a carico dell'app la fornitura del driver DB (coremongo.Module / coresql.Module).
 func Module(cfg *Config, register func(), opts ...Option) {

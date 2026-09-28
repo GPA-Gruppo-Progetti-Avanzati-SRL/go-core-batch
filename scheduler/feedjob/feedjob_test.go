@@ -192,7 +192,7 @@ func TestRegister(t *testing.T) {
 	if reg.Factory == nil {
 		t.Fatal("factory nil")
 	}
-	if task := reg.Factory("feed-test", nil, config(core.Properties{
+	if task := reg.Factory("feed-test", config(core.Properties{
 		PropTask: "import-anagrafiche", PropObjectId: "ANAGRAFICHE",
 	})); task == nil {
 		t.Error("la factory deve costruire una gocron.Task")

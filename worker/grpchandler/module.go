@@ -9,12 +9,6 @@ import (
 	"go.uber.org/fx"
 )
 
-// Provide registers a TaskRunner constructor on the worker side,
-// identical to runner.Provide — both sides share the same fx group.
-func Provide(constructor any) {
-	runner.Provide(constructor)
-}
-
 type moduleParams struct {
 	core.In
 	Lifecycle  fx.Lifecycle
@@ -27,8 +21,8 @@ type moduleParams struct {
 
 func wire(p moduleParams) {
 	svc := newRunnerService(p.Runners)
-	w := worker.NewWorkers[*runnerService](p.Lifecycle, p.WorkersCfg, p.Data, svc, p.Items)
-	NewRouter[*runnerService](w, p.GrpcServer, svc)
+	w := worker.NewWorkers(p.Lifecycle, p.WorkersCfg, p.Data, svc, p.Items)
+	NewRouter(w, p.GrpcServer, svc)
 }
 
 // Module provvede il gRPC Server e wire il worker pool usando i TaskRunner registrati.
@@ -42,7 +36,7 @@ func Module(modes ...string) {
 	core.Invoke(wire, modes...)
 }
 
-// runnerService bridges []*runner.TaskRunner to worker.ITaskService[*runnerService].
+// runnerService bridges []*runner.TaskRunner to worker.ITaskService.
 type runnerService struct {
 	// routes conserva il *TaskRunner e non il solo ITaskRunner: porta anche il tetto ai
 	// ritentativi dell'istanza, che il bridge copia sul worker.Task perché worker.Run —
@@ -58,16 +52,14 @@ func newRunnerService(runners []*runner.TaskRunner) *runnerService {
 	return &runnerService{routes: routes}
 }
 
-func (s *runnerService) GetServices() *runnerService { return s }
-
-func (s *runnerService) GetTaskExecutions(taskName string) (worker.RunTask[*runnerService], bool) {
+func (s *runnerService) GetTaskExecutions(taskName string) (worker.RunTask, bool) {
 	tr, ok := s.routes[taskName]
 	if !ok {
 		return nil, false
 	}
 	// Solo adattamento: carica il WorkItem ed esegue il runner. La finalizzazione del
 	// lifecycle (store.ApplyResult) è centralizzata in worker.Run, che riceve questo errore.
-	return func(t *worker.Task, _ *runnerService, items store.IWorkItemStore) error {
+	return func(t *worker.Task, items store.IWorkItemStore) error {
 		item, appErr := items.GetById(t.Context, t.ObjectId)
 		if appErr != nil {
 			return appErr

@@ -91,7 +91,7 @@ func Module(modes ...string) {
 }
 
 func makeFactory(items store.IWorkItemStore) scheduler.JobFactory {
-	return func(name string, _ *scheduler.Services, config scheduler.Config) gocron.Task {
+	return func(name string, config scheduler.Config) gocron.Task {
 		return scheduler.LabeledTask(name, config.Type, func() error {
 			return run(name, items, config)
 		})

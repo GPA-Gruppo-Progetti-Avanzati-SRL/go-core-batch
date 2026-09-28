@@ -3,7 +3,7 @@
 // Sta in un package foglia — dipende solo da store e da client_golang — perché le metriche di
 // task devono essere emesse sia dal worker pool sia dalle famiglie di job lato scheduler
 // (simplejob, localdispatcher, kafkajob): tenerle in worker costringerebbe tre package dello
-// scheduler a dipendere dal pool (Workers[T], canali, semafori) solo per delle var.
+// scheduler a dipendere dal pool (Workers, canali, semafori) solo per delle var.
 //
 // La tassonomia è una sola:
 //

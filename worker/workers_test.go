@@ -81,18 +81,17 @@ func (fakeData) PurgeTaskLogs(context.Context, time.Time, int) (int, *core.Appli
 	return 0, nil
 }
 
-// fakeService implementa ITaskService[*fakeService] con un esito RunTask configurabile.
+// fakeService implementa ITaskService con un esito RunTask configurabile.
 type fakeService struct {
 	known  bool
 	result error
 }
 
-func (s *fakeService) GetServices() *fakeService { return s }
-func (s *fakeService) GetTaskExecutions(string) (RunTask[*fakeService], bool) {
+func (s *fakeService) GetTaskExecutions(string) (RunTask, bool) {
 	if !s.known {
 		return nil, false
 	}
-	return func(*Task, *fakeService, store.IWorkItemStore) error { return s.result }, true
+	return func(*Task, store.IWorkItemStore) error { return s.result }, true
 }
 
 // TestRunLifecycle verifica che worker.Run sia l'unico punto di finalizzazione e applichi
@@ -135,7 +134,7 @@ func TestRunLifecycle(t *testing.T) {
 			sem := make(chan struct{}, 1)
 			sem <- struct{}{}
 
-			Run[*fakeService](sem, task, svc, fakeData{}, fs)
+			Run(sem, task, svc, fakeData{}, fs)
 
 			if fs.last.op != c.wantOp {
 				t.Fatalf("lifecycle op = %q, want %q", fs.last.op, c.wantOp)

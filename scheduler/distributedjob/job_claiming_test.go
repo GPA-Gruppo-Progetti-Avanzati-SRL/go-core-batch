@@ -121,7 +121,7 @@ func TestDispatchFallito_RilasciaSenzaConsumareRitentativo(t *testing.T) {
 	disp := &fakeDispatcher{err: errors.New("pool saturo")}
 
 	factory := makeClaimingFactory(disp, items, nil, data)
-	_ = factory("j", &scheduler.Services{}, conf(core.Properties{"task": "T", "limit": 10}))
+	_ = factory("j", conf(core.Properties{"task": "T", "limit": 10}))
 
 	if err := jobTick(t, disp, items, data); err != nil {
 		t.Fatalf("il tick non deve fallire per un dispatch rifiutato: %v", err)

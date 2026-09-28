@@ -122,8 +122,7 @@ Errori di **configurazione o di wiring**, deliberatamente non recuperabili:
 | Messaggio | Origine | Causa |
 |---|---|---|
 | `batch.Module: WithStore è obbligatorio` | `module.go:173` | manca il backend dello store (`storemongo.Module` / `storesql.Module`) |
-| `batch.Module: WithLocker è obbligatorio` | `module.go:176` | manca il backend del lock distribuito (`mongolocker` / `sqllocker` / `redislocker`) |
-| `batch: task <type> registrato fuori dalla funzione passata a batch.Module` | `task/task.go:108` | `runner.Register`/`simplejob.RegisterRunner` in un `init()`: lì la sezione `tasks:` non è ancora nota |
+| `batch: task <type> registrato fuori dalla funzione passata a batch.Module` | `task/task.go:108` | `runner.Register`/`runner.RegisterFile` in un `init()`: lì la sezione `tasks:` non è ancora nota |
 | `batch: la sezione tasks: richiede un name su ogni voce` | `task/task.go:167` | voce senza `name`. Il nome è la **chiave di routing** (`WorkItem.TaskName`) e non ha fallback sul `type` |
 | `batch: <problemi>` | `task/task.go` | riferimenti incoerenti: `jobs[].properties.task` o `workers[].tasks` che nominano un task non dichiarato, task type registrato senza voce in `tasks:` |
 | `batch.Module: task-log %q non valido` | `module.go`, `store.ParseTaskLogLevel` | `batch.task-log` diverso da `all`, `errors`, `off`. Un valore non previsto è un errore e non un ripiego silenzioso su `all`: indovinare male significherebbe scrivere (o non scrivere) dati senza che nulla lo dica |

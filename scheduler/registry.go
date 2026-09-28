@@ -2,7 +2,6 @@ package scheduler
 
 import (
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 
 	gocron "github.com/go-co-op/gocron/v2"
 	"go.uber.org/fx"
@@ -10,7 +9,14 @@ import (
 
 // JobFactory is the function type used to create a gocron.Task for a registered job type.
 // The full Config is passed so factories can access both Properties and typed fields (e.g. LockTimeout).
-type JobFactory = func(name string, services *Services, config Config) gocron.Task
+//
+// Non riceve altro: c'era un terzo parametro *Services — una struct con il solo store.IData — che
+// newScheduler costruiva e passava a ogni factory, e che NESSUNA delle cinque usava (tre lo
+// ricevevano già come `_`). Era una dipendenza che il contratto pubblico imponeva di dichiarare a
+// chi scrive un job type, e che nessuno poteva consumare: i job che di IData hanno bisogno — il
+// dispatch di distributedjob, la retention di purgejob — se lo fanno iniettare da fx nel proprio
+// costruttore, come ogni altra dipendenza.
+type JobFactory = func(name string, config Config) gocron.Task
 
 // JobGroup is the fx value group into which all job type registrations are collected.
 // newScheduler consumes the whole group and builds its lookup map from it, so the
@@ -32,10 +38,4 @@ type JobRegistration struct {
 // modes opzionale, coerente con gli altri Provide.
 func ProvideJob(constructor any, modes ...string) {
 	core.Provide(fx.Annotate(constructor, fx.ResultTags(`group:"`+JobGroup+`"`)), modes...)
-}
-
-// Services is passed to each JobFactory. È costruita da newScheduler a partire dallo
-// store.IData iniettato — non è più una struct fx.In iniettata direttamente.
-type Services struct {
-	Data store.IData
 }

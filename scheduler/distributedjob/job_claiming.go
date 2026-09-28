@@ -29,7 +29,7 @@ const (
 // di runtime al primo tick e a ogni tick successivo. È la stessa forma di simplejob e feedjob,
 // che già facevano così.
 func makeClaimingFactory(dispatcher ITaskDispatcher, items store.IWorkItemStore, feed IFeedSource, data store.IData) scheduler.JobFactory {
-	return func(name string, s *scheduler.Services, config scheduler.Config) gocron.Task {
+	return func(name string, config scheduler.Config) gocron.Task {
 		taskName, limit, resolveErr := risolvi(name, config)
 		if resolveErr != nil {
 			log.Error().Err(resolveErr).Msgf("[%s] il job fallirà a ogni tick", name)

@@ -7,7 +7,7 @@ import (
 
 // ErrHandled signals that the runner has already finalized the workitem lifecycle
 // itself — e.g. MarkDone together with child workitem inserts in a single transaction
-// (outbox pattern). Return it from simplejob.ITaskRunner.Run so the framework does NOT
+// (outbox pattern). Return it from ITaskRunner.Run so the framework does NOT
 // apply its default Mark* (MarkDone on nil / MarkFailed on error).
 var ErrHandled = errors.New("workitem lifecycle handled by runner")
 

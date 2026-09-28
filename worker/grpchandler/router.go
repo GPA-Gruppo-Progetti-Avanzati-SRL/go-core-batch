@@ -1,6 +1,11 @@
 // Package grpchandler wires a gRPC server to a local worker pool.
 // Import this package only in distributed worker deployments — it pulls in google.golang.org/grpc.
 // Single-instance deployments use localdispatcher instead (no gRPC, no worker pool).
+//
+// I runner del processo worker si registrano come ovunque: runner.Register[T](taskType), dentro la
+// funzione passata a batch.Module. Non esiste una forma "lato worker" — c'era (grpchandler.Provide,
+// alias di runner.Provide) e non aggiungeva nulla: il value group batch_runners è lo stesso per le
+// due sponde del filo, ed è precisamente il senso di avere un contratto runner solo.
 package grpchandler
 
 import (
@@ -18,19 +23,19 @@ import (
 // Router embedda UnimplementedDistributionChannelServer (default gRPC forward-compatible): i
 // metodi non implementati ritornano codes.Unimplemented, e nuovi metodi nel proto non rompono
 // la compilazione. Implementa solo DistribuiteTask; DistribuiteSimpleTask resta non implementato.
-type Router[T any] struct {
+type Router struct {
 	proto.UnimplementedDistributionChannelServer
-	workers      *worker.Workers[T]
-	taskServices worker.ITaskService[T]
+	workers      *worker.Workers
+	taskServices worker.ITaskService
 }
 
-func NewRouter[T any](w *worker.Workers[T], gs *grpctransport.Server, service worker.ITaskService[T]) *Router[T] {
-	r := &Router[T]{workers: w, taskServices: service}
+func NewRouter(w *worker.Workers, gs *grpctransport.Server, service worker.ITaskService) *Router {
+	r := &Router{workers: w, taskServices: service}
 	proto.RegisterDistributionChannelServer(gs, r)
 	return r
 }
 
-func (r *Router[T]) DistribuiteTask(ctx context.Context, s *proto.TaskMessage) (*proto.TaskStatus, error) {
+func (r *Router) DistribuiteTask(ctx context.Context, s *proto.TaskMessage) (*proto.TaskStatus, error) {
 	log.Info().Msgf("G - %s - %s - Distribuisco Task su Worker %s", s.JobId, s.TaskId, s.TaskName)
 
 	_, ok := r.taskServices.GetTaskExecutions(s.TaskName)

@@ -18,7 +18,7 @@ const (
 	LabelTaskName = "batch_task_name"
 )
 
-type Workers[T any] struct {
+type Workers struct {
 	TaskChannel map[string]chan *Task
 	StopChannel chan struct{} // closed by OnStop to broadcast shutdown to every worker
 	TaskRoutes  map[string]string
@@ -30,7 +30,7 @@ type Workers[T any] struct {
 	wg sync.WaitGroup
 }
 
-func (w *Workers[T]) GetChannel(name string) chan *Task {
+func (w *Workers) GetChannel(name string) chan *Task {
 	routes, okR := w.TaskRoutes[name]
 	if !okR {
 		log.Trace().Msgf("No Routes found switching on default worker")
@@ -51,8 +51,8 @@ func (w *Workers[T]) GetChannel(name string) chan *Task {
 // e l'arresto arriva qui come OnStop. Prima c'era un signal.Notify di libreria — un side-effect
 // globale che rubava il segnale all'app — e i worker uscivano PRIMA che OnStop girasse, quindi
 // nessuno drenava le task già partite.
-func NewWorkers[T any](lc fx.Lifecycle, workersConfig []Config, data store.IData, services ITaskService[T], items store.IWorkItemStore) *Workers[T] {
-	w := &Workers[T]{BatchData: data, WorkItems: items}
+func NewWorkers(lc fx.Lifecycle, workersConfig []Config, data store.IData, services ITaskService, items store.IWorkItemStore) *Workers {
+	w := &Workers{BatchData: data, WorkItems: items}
 	w.TaskChannel = make(map[string]chan *Task)
 	w.TaskRoutes = make(map[string]string)
 	w.StopChannel = make(chan struct{})
@@ -107,7 +107,7 @@ func NewWorkers[T any](lc fx.Lifecycle, workersConfig []Config, data store.IData
 
 // loop è il ciclo di un singolo worker: preleva dal canale e lancia l'esecuzione, con la
 // concorrenza limitata dalla capacità del canale.
-func (w *Workers[T]) loop(k string, channel chan *Task, services ITaskService[T], batchData store.IData, items store.IWorkItemStore) {
+func (w *Workers) loop(k string, channel chan *Task, services ITaskService, batchData store.IData, items store.IWorkItemStore) {
 	log.Info().Msgf("Starting %s worker", k)
 	capacity := cap(channel)
 	log.Info().Msgf("Capacity Channel %d", capacity)
@@ -140,7 +140,7 @@ func (w *Workers[T]) loop(k string, channel chan *Task, services ITaskService[T]
 	}
 }
 
-func Run[T any](semaphore chan struct{}, t *Task, services ITaskService[T], data store.IData, items store.IWorkItemStore) {
+func Run(semaphore chan struct{}, t *Task, services ITaskService, data store.IData, items store.IWorkItemStore) {
 	defer func() {
 		t.CancelContext()
 		<-semaphore
@@ -153,7 +153,7 @@ func Run[T any](semaphore chan struct{}, t *Task, services ITaskService[T], data
 	var runErr error
 	if run, ok := services.GetTaskExecutions(t.TaskName); ok {
 		// La RunTask (es. bridge grpchandler) carica il WorkItem e popola t.Item.
-		runErr = run(t, services.GetServices(), items)
+		runErr = run(t, items)
 	} else {
 		log.Error().Msgf("W - %s - %s - Esecuzione non trovata per tipo: %s", t.GetJobId(), t.GetId(), t.TaskName)
 		runErr = fmt.Errorf("execution type not found: %s", t.TaskName)

@@ -17,10 +17,8 @@ type bloccante struct {
 	finiti  atomic.Int32
 }
 
-func (b *bloccante) GetServices() *bloccante { return b }
-
-func (b *bloccante) GetTaskExecutions(string) (RunTask[*bloccante], bool) {
-	return func(t *Task, _ *bloccante, _ store.IWorkItemStore) error {
+func (b *bloccante) GetTaskExecutions(string) (RunTask, bool) {
+	return func(t *Task, _ store.IWorkItemStore) error {
 		select {
 		case b.partito <- struct{}{}:
 		default:
@@ -40,7 +38,7 @@ func (b *bloccante) GetTaskExecutions(string) (RunTask[*bloccante], bool) {
 func TestOnStop_DrenaLeTaskInVolo(t *testing.T) {
 	svc := &bloccante{partito: make(chan struct{}, 1), release: make(chan struct{})}
 	lc := fxtest.NewLifecycle(t)
-	w := NewWorkers[*bloccante](lc, []Config{{Name: "Default", Size: 1, Tasks: []string{"T"}}},
+	w := NewWorkers(lc, []Config{{Name: "Default", Size: 1, Tasks: []string{"T"}}},
 		fakeData{}, svc, &fakeStore{item: &store.WorkItem{Id: "wi", LockToken: "tok"}})
 	lc.RequireStart()
 
@@ -75,7 +73,7 @@ func TestOnStop_DrainScadutoNonBlocca(t *testing.T) {
 	defer close(svc.release)
 
 	lc := fxtest.NewLifecycle(t)
-	w := NewWorkers[*bloccante](lc, []Config{{Name: "Default", Size: 1, Tasks: []string{"T"}}},
+	w := NewWorkers(lc, []Config{{Name: "Default", Size: 1, Tasks: []string{"T"}}},
 		fakeData{}, svc, &fakeStore{item: &store.WorkItem{Id: "wi", LockToken: "tok"}})
 	lc.RequireStart()
 

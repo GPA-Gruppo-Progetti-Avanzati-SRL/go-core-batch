@@ -26,7 +26,7 @@ func TestJobValueGroupOrderIndependent(t *testing.T) {
 	provideJob := func(typ string) fx.Option {
 		return fx.Provide(fx.Annotate(
 			func() JobRegistration {
-				return JobRegistration{Type: typ, Factory: func(name string, s *Services, c Config) gocron.Task {
+				return JobRegistration{Type: typ, Factory: func(name string, c Config) gocron.Task {
 					return gocron.NewTask(func() error { return nil })
 				}}
 			},

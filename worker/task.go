@@ -11,9 +11,15 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-type ITaskService[T any] interface {
-	GetTaskExecutions(taskName string) (RunTask[T], bool)
-	GetServices() T
+// ITaskService è ciò che il pool interroga per sapere COME si esegue un task name: l'unica
+// implementazione è il bridge di grpchandler, che risolve il runner nel value group batch_runners.
+//
+// Non è generica. Lo era — ITaskService[T] con un GetServices() T il cui valore veniva passato a
+// ogni RunTask[T] — ma T non trasportava nulla: l'unica implementazione di produzione ritornava
+// sé stessa e la sua RunTask ignorava il parametro, perché la closure ha già catturato ciò che le
+// serve. Un type param che ogni istanza soddisfa con sé stessa non è polimorfismo, è un giro.
+type ITaskService interface {
+	GetTaskExecutions(taskName string) (RunTask, bool)
 }
 
 // RunTask esegue il task e ritorna l'esito secondo la convenzione runner condivisa
@@ -21,7 +27,7 @@ type ITaskService[T any] interface {
 // *store.RetryError → retry finché il tetto del task lo consente, poi failed, qualsiasi altro
 // errore → failed. NON deve chiamare i Mark*
 // da sé: è worker.Run l'UNICO punto che applica store.ApplyResult sul valore di ritorno.
-type RunTask[T any] func(t *Task, s T, items store.IWorkItemStore) error
+type RunTask func(t *Task, items store.IWorkItemStore) error
 
 type Task struct {
 	Id    string

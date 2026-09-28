@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/gocronlock"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	corelock "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-locker"
 	gocron "github.com/go-co-op/gocron/v2"
 	"github.com/rs/zerolog/log"
@@ -27,7 +26,6 @@ type schedulerParams struct {
 	LC     fx.Lifecycle
 	Config []Config
 	Locker corelock.Locker
-	Data   store.IData
 	Jobs   []JobRegistration `group:"batch_jobs"`
 }
 
@@ -54,8 +52,6 @@ func newScheduler(p schedulerParams) (*Scheduler, error) {
 	for _, jr := range p.Jobs {
 		factories[jr.Type] = jr.Factory
 	}
-	s := Services{Data: p.Data}
-
 	for _, jobConfig := range p.Config {
 		if jobConfig.Disabled {
 			continue
@@ -68,7 +64,7 @@ func newScheduler(p schedulerParams) (*Scheduler, error) {
 		}
 		log.Info().Msgf("Building job '%s' - type: %s", jobConfig.Name, jobConfig.Type)
 		jobOptions := makeOptions(jobConfig, locker)
-		j, err := scheduler.NewJob(gocron.CronJob(jobConfig.ScheduledCron, true), runjob(jobConfig.Name, &s, jobConfig), jobOptions...)
+		j, err := scheduler.NewJob(gocron.CronJob(jobConfig.ScheduledCron, true), runjob(jobConfig.Name, jobConfig), jobOptions...)
 		if err != nil {
 			return nil, fmt.Errorf("build job %q: %w", jobConfig.Name, err)
 		}

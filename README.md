@@ -63,7 +63,7 @@ Wira ogni componente **esplicitamente** e lo gate **solo** tramite i suoi modes:
 
 **La funzione `register`** è il gemello di quella di `corekafka.Module`: `batch.Module` la esegue **sincronamente**, con la config già nota. Le `runner.Register[T]` chiamate al suo interno forniscono a fx **una istanza di runner per ogni task attivo** — cioè per ogni voce di `tasks:` referenziata da un job o da un worker — ciascuna con le proprie properties. Un task che nessuno referenzia non viene istanziato: le sue dipendenze non entrano nel grafo e non vengono mai connesse.
 
-`register` è `nil` solo per un'app che non registra task runner: **registrare in un `init()` non è più supportato** (panic — lì la sezione `tasks:` non è nota). I costruttori scritti a mano con `runner.Provide` restano invece registrabili ovunque.
+`register` è `nil` solo per un'app che non registra task runner: **registrare in un `init()` non è più supportato** (panic — lì la sezione `tasks:` non è nota). Non esiste una seconda forma: `runner.Register[T]` (e `runner.RegisterFile[T]` per l'altro contratto) è l'unica, uguale per ogni famiglia di job.
 
 **Restano a carico dell'app:** fornire il driver DB (`coremongo.Module(&cfg.Mongo)` o `coresql.Module(&cfg.Sql, pgdialect.New())`). Il **simplejob NON è coperto** dall'orchestratore: resta wiring separato (vedi la sezione dedicata).
 
@@ -417,7 +417,7 @@ connessione gRPC.
 | **Scheduler** | `scheduler.Scheduler` (gocron) | fa scattare i job al cron, tiene il lock di dedup fra repliche | scheduler modes |
 | **Job / tick** | `scheduler.ClaimingTick` | feed → recupero orfani → claim → *fase di elaborazione* | scheduler modes |
 | **Dispatcher** | `distributedjob.ITaskDispatcher` | consegna un item claimato a chi lo esegue | scheduler modes |
-| **Worker pool** | `worker.Workers[T]` + `worker/grpchandler` | riceve i task via gRPC e li esegue | worker modes |
+| **Worker pool** | `worker.Workers` + `worker/grpchandler` | riceve i task via gRPC e li esegue | worker modes |
 | **Runner** | `store.ITaskRunner` | la business logic | dove gira il dispatcher (local) o il pool (gRPC) |
 
 I modes sono quelli di `batch.WithSchedulerModes` / `batch.WithWorkerModes`: in un processo
@@ -678,7 +678,7 @@ orfani.
 Se il processo worker **muore** a metà lavorazione non succede niente di speciale: l'item resta
 `IN_PROGRESS`, e al tick successivo `RecoverOrphans` lo rimette in gioco incrementandone il `retry`.
 
-### Il worker pool — `worker.Workers[T]`
+### Il worker pool — `worker.Workers`
 
 Il pool esiste **solo** sul lato ricevente gRPC: il dispatch in-process non lo usa (quello ha il suo
 semaforo e le sue goroutine).
@@ -923,7 +923,7 @@ succede sempre la finestra o la cadenza del cron sono sbagliate.
 
 ---
 
-## Pattern consigliato — Module() + runner.Provide()
+## Pattern consigliato — Module() + runner.Register[T]()
 
 Il modo canonico per aggiungere task runner a un'applicazione. Ogni task type è in un file autonomo; il wiring centrale non cambia mai.
 
@@ -983,13 +983,11 @@ func (r *mioTaskRunner) Run(ctx context.Context, item *store.WorkItem) error {
 > (es. `MarkDone` transazionale con l'insert di workitem figli) inietta un `store.IWorkItemStore` via fx nella
 > struct, chiudi tu l'item e ritorna `store.ErrHandled`.
 
-> Un costruttore scritto a mano resta possibile con `runner.Provide(newMioTaskRunner)` (in `init()` o dentro `Register`): in quel caso il runner non riceve le properties del task, che le legge da sé.
-
 ### config.yml
 
 ```yaml
 tasks:
-  - name: "MIO_TASK"          # name omesso = uguale al type
+  - name: "MIO_TASK"          # obbligatorio: è la chiave di routing, anche quando coincide col type
     type: "MIO_TASK"
     properties:
       soglia: 25              # applicative → campi `prop:` del runner
@@ -1262,7 +1260,7 @@ chiamata.
 - `[]worker.Config` — i pool (`workers:`)
 - `*grpctransport.Server` — costruito dal Module stesso da `grpc.server`
 - `store.IWorkItemStore`, `store.IData`
-- `[]*runner.TaskRunner` (gruppo `batch_runners`, popolato da `runner.Register[T]`/`runner.Provide`)
+- `[]*runner.TaskRunner` (gruppo `batch_runners`, popolato da `runner.Register[T]`)
 
 ---
 
@@ -1519,10 +1517,10 @@ In gRPC, `limit` e pool size sono dimensioni ortogonali: lo scheduler può claim
 
 - **L'Invoke sullo `*scheduler.Scheduler`** è obbligatorio per forzarne la costruzione da Fx — lo fa già `scheduler.Module()` internamente (non serve aggiungerlo a mano).
 - **`localdispatcher.Module()` / `grpcdispatcher.Module()`** possono essere registrati in qualunque ordine rispetto allo scheduler: la `scheduler.JobRegistration` confluisce nel value group `batch_jobs`, che fx risolve prima di costruire `newScheduler`.
-- **`runner.Register[T]` va chiamata dentro la funzione `register` passata a `batch.Module`**: è lì che la config è nota. In un `init()` panica. `runner.Provide(constructor)` (costruttore a mano) resta invece registrabile ovunque, ma non riceve le properties del task.
+- **`runner.Register[T]` va chiamata dentro la funzione `register` passata a `batch.Module`**: è lì che la config è nota. In un `init()` panica, e non c'è più una forma che sfugga a quella finestra — `runner.Provide`/`ProvideFile` e `grpchandler.Provide` sono state rimosse.
 - **Ogni task va dichiarato in `tasks:`**: un task type registrato senza voce, o referenziato da un job con un nome inesistente, fa fallire l'avvio.
 - **Un campo esportato senza tag NON è una dipendenza**: nelle struct passate a `Register` è un campo di lavorazione. Le dipendenze vanno taggate `inject:`/`from:`, le properties `prop:`.
-- **`core.In` non va usato nelle struct dei runner**: è un errore al wiring. Il marker lo porta il param object sintetizzato dalla libreria; accettarlo lascerebbe passare struct scritte per la vecchia semantica, con le dipendenze silenziosamente a nil. Resta valido nei param object dei costruttori scritti a mano passati a `core.Provide`/`runner.Provide`.
+- **`core.In` non va usato nelle struct dei runner**: è un errore al wiring. Il marker lo porta il param object sintetizzato dalla libreria; accettarlo lascerebbe passare struct scritte per la vecchia semantica, con le dipendenze silenziosamente a nil. Resta valido nei param object dei costruttori scritti a mano passati a `core.Provide`.
 - **`jobs[].properties` è infrastrutturale, `tasks[].properties` è applicativo**: mettere la config del runner nel blocco del job non la fa arrivare ai campi `prop:`.
 - **Le chiavi delle properties sono case-insensitive**: viper abbassa le chiavi della config, quindi `task` nello YAML arriva come `worktype`. I getter di `core.Properties` e il binding `prop:` lo gestiscono; l'indicizzazione diretta della mappa no.
 - **`gocron.NewTask` deve usare una closure zero-arg** che cattura le dipendenze — non passare interface nil come `...any` o gocron va in panic in reflect.
