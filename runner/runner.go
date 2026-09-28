@@ -30,6 +30,7 @@ import (
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/batchmetrics"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
+	"github.com/rs/zerolog/log"
 )
 
 // Group is the fx group tag used to collect all registered TaskRunners.
@@ -153,7 +154,19 @@ func (r *MuxRunner) Run(ctx context.Context, item *store.WorkItem, items store.I
 //
 // Va chiamata dentro la funzione di registrazione passata a batch.Module: è lì che la config è nota.
 //
-//	func Register() { runner.Register[myRunner]("IMPORT") }
+// modes limita QUESTO task ai core.Mode indicati; vuoto = attivo in ogni mode. È il gate per-task,
+// che sta sotto WithSchedulerModes/WithWorkerModes (che spengono l'intero sottosistema): serve quando
+// un solo YAML alimenta più processi dello stesso deployment e solo alcuni eseguono davvero quel
+// runner, perché senza, in un processo scheduler entrano nel grafo fx anche i runner che solo il
+// worker eseguirà — con tutte le loro dipendenze. Stessa forma di corekafka.RegisterHandler.
+//
+// Un task escluso dal mode NON è un errore di avvio: semplicemente non viene istanziato, con un log
+// Info. Attenzione però al caso in cui un job LOCALE (simplejob, localdispatcher) referenzi in questo
+// processo un task escluso: lì l'assenza del runner si manifesta per item a runtime (MuxRunner.Run →
+// MarkFailed + "no runner registered for task name"), come già oggi accade allo scheduler che
+// dispatcha via gRPC verso un worker in un altro binario.
+//
+//	func Register() { runner.Register[myRunner]("IMPORT", engine.Worker) }
 //
 //	type myRunner struct {
 //	    Svc    myPkg.IService `inject:""`
@@ -163,13 +176,34 @@ func (r *MuxRunner) Run(ctx context.Context, item *store.WorkItem, items store.I
 func Register[T any, PT interface {
 	*T
 	ITaskRunner
-}](taskType string) {
-	for _, tc := range task.Instances(taskType) {
+}](taskType string, modes ...string) {
+	for _, tc := range activeInstances(taskType, modes) {
 		core.ProvideStruct(func(p *T) *TaskRunner {
 			return New(tc.Name, PT(p)).WithMaxRetry(tc.ResolveMaxRetry())
 		},
 			owner(tc.Name, taskType), tc.Properties, Group)
 	}
+}
+
+// activeInstances ritorna le istanze del task type che questo processo deve costruire: quelle attive
+// in config e ammesse dai modes del register.
+//
+// task.Instances è chiamata SEMPRE, anche quando il mode esclude il task, e il gate viene DOPO: è
+// Instances ad alimentare la contabilità di task.check — marca il type come registrato e accumula i
+// type non dichiarati in `tasks:`. Gate-are prima farebbe apparire "type registrato ma non dichiarato"
+// un type registrato e solo non attivo in questo MODE, cioè trasformerebbe un gate in un errore di
+// configurazione. È lo stesso ordine che corekafka applica in provideIfActive: prima la config, poi
+// il mode.
+func activeInstances(taskType string, modes []string) []task.Config {
+	all := task.Instances(taskType)
+	if core.IsMode(modes...) {
+		return all
+	}
+	for _, tc := range all {
+		log.Info().Str("task", tc.Name).Str("type", taskType).Strs("modes", modes).
+			Msg("batch: task non attivo in questo MODE, non istanziato (dipendenze non istanziate)")
+	}
+	return nil
 }
 
 // owner è l'etichetta con cui core.ProvideStruct contestualizza i suoi errori (dipendenza mancante,
@@ -188,6 +222,26 @@ type IFileRunner interface {
 type FileTaskRunner struct {
 	TaskName string
 	Runner   IFileRunner
+	// MaxRetry è il tetto ai ritentativi dell'istanza, con la stessa semantica e la stessa ragione
+	// di TaskRunner.MaxRetry: nil = illimitato. Sta anche qui perché un file runner finisce comunque
+	// nel gruppo batch_runners — s3feed lo avvolge in un *TaskRunner — e senza il campo il tetto si
+	// perdeva nel passaggio, rendendo `max-retry:` efficace per Register e inefficace per
+	// RegisterFile: un knob che vale a metà è peggio di un knob che non vale.
+	MaxRetry *int
+}
+
+// ResolveMaxRetry applica la convenzione dell'assenza: nil = illimitato.
+func (t *FileTaskRunner) ResolveMaxRetry() int {
+	if t == nil || t.MaxRetry == nil {
+		return task.MaxRetryUnlimited
+	}
+	return *t.MaxRetry
+}
+
+// WithMaxRetry fissa il tetto ai ritentativi e restituisce il runner, per comporre con NewFile.
+func (t *FileTaskRunner) WithMaxRetry(n int) *FileTaskRunner {
+	t.MaxRetry = &n
+	return t
 }
 
 // NewFile returns a FileTaskRunner wrapping runner for the given task name.
@@ -199,8 +253,8 @@ func NewFile(taskName string, r IFileRunner) *FileTaskRunner {
 const FileGroup = "batch_file_runners"
 
 // RegisterFile è l'analogo di Register per i runner su file (es. S3): T deve implementare IFileRunner.
-// Vale lo stesso contratto sui tag e la stessa istanziazione per voce della sezione `tasks:` (che va
-// dichiarata anche qui).
+// Vale lo stesso contratto sui tag, la stessa istanziazione per voce della sezione `tasks:` (che va
+// dichiarata anche qui), lo stesso tetto `max-retry:` e la stessa semantica dei modes.
 //
 //	func Register() { runner.RegisterFile[myS3Runner]("S3_IMPORT") }
 //
@@ -211,9 +265,11 @@ const FileGroup = "batch_file_runners"
 func RegisterFile[T any, PT interface {
 	*T
 	IFileRunner
-}](taskType string) {
-	for _, tc := range task.Instances(taskType) {
-		core.ProvideStruct(func(p *T) *FileTaskRunner { return NewFile(tc.Name, PT(p)) },
+}](taskType string, modes ...string) {
+	for _, tc := range activeInstances(taskType, modes) {
+		core.ProvideStruct(func(p *T) *FileTaskRunner {
+			return NewFile(tc.Name, PT(p)).WithMaxRetry(tc.ResolveMaxRetry())
+		},
 			owner(tc.Name, taskType), tc.Properties, FileGroup)
 	}
 }

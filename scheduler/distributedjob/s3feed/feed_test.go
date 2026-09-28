@@ -6,7 +6,9 @@ import (
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/s3client"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/runner"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
 )
 
 // mockService implements a minimal S3 service for testing via the S3Feed.
@@ -152,5 +154,24 @@ func buildWorkItem(taskName, key, service, destPath string) *store.WorkItem {
 			DestPath: destPath,
 		},
 		Status: store.StatusPending,
+	}
+}
+
+// Il tetto ai ritentativi deve sopravvivere all'avvolgimento: è il *TaskRunner a finire nel gruppo
+// batch_runners, quindi è il suo MaxRetry quello che MuxRunner.Run passa a store.ApplyResult. Senza
+// questo passaggio `max-retry:` valeva per Register e non per RegisterFile.
+func TestWrapFileRunners_ConservaMaxRetry(t *testing.T) {
+	wrapped := wrapFileRunners(nil, []*runner.FileTaskRunner{
+		runner.NewFile("s3-in", nil).WithMaxRetry(3),
+		runner.NewFile("s3-bulk", nil),
+	})
+	if len(wrapped) != 2 {
+		t.Fatalf("attesi 2 runner avvolti, ottenuto %d", len(wrapped))
+	}
+	if wrapped[0].TaskName != "s3-in" || wrapped[0].ResolveMaxRetry() != 3 {
+		t.Fatalf("il tetto si è perso nell'avvolgimento: %+v", wrapped[0])
+	}
+	if wrapped[1].ResolveMaxRetry() != task.MaxRetryUnlimited {
+		t.Fatalf("l'assenza deve valere illimitato, ottenuto %d", wrapped[1].ResolveMaxRetry())
 	}
 }

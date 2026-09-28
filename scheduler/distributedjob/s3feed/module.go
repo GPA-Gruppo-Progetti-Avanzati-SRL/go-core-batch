@@ -33,7 +33,9 @@ func provideRegistry(cfg s3.Config) (*s3client.Registry, error) {
 func wrapFileRunners(reg *s3client.Registry, fileRunners []*runner.FileTaskRunner) []*runner.TaskRunner {
 	wrapped := make([]*runner.TaskRunner, len(fileRunners))
 	for i, fr := range fileRunners {
-		wrapped[i] = runner.New(fr.TaskName, newFileRunner(reg, fr.Runner))
+		// Il tetto ai ritentativi viaggia con l'avvolgimento: è il *TaskRunner a finire nel gruppo
+		// batch_runners, quindi è il suo MaxRetry quello che MuxRunner.Run passa a ApplyResult.
+		wrapped[i] = runner.New(fr.TaskName, newFileRunner(reg, fr.Runner)).WithMaxRetry(fr.ResolveMaxRetry())
 	}
 	return wrapped
 }

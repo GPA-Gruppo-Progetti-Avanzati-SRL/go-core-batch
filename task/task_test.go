@@ -172,3 +172,27 @@ func TestApply_ClearsStateAfterRegister(t *testing.T) {
 		t.Fatal("lo stato deve essere azzerato dopo Apply")
 	}
 }
+
+// La voce di `tasks:` deve arrivare al register INTERA. Ricostruirla campo per campo qui dentro è
+// già costato il tetto ai ritentativi: MaxRetry non veniva copiato, quindi ResolveMaxRetry vedeva
+// sempre nil e `max-retry:` non aveva alcun effetto su nessun task.
+func TestInstances_ConservaMaxRetry(t *testing.T) {
+	tre := 3
+	var got []Config
+	Apply(func() { got = Instances("IMPORT") }, ActiveSet{
+		Tasks: []Config{
+			{Name: "import-in", Type: "IMPORT", MaxRetry: &tre},
+			{Name: "import-bulk", Type: "IMPORT"},
+		},
+		Referenced: []string{"import-in", "import-bulk"},
+	})
+	if len(got) != 2 {
+		t.Fatalf("attese 2 istanze, ottenuto %v", names(got))
+	}
+	if got[0].MaxRetry == nil || *got[0].MaxRetry != 3 || got[0].ResolveMaxRetry() != 3 {
+		t.Fatalf("il tetto configurato non è arrivato al register: %+v", got[0])
+	}
+	if got[1].MaxRetry != nil || got[1].ResolveMaxRetry() != MaxRetryUnlimited {
+		t.Fatalf("l'assenza del campo deve valere illimitato: %+v", got[1])
+	}
+}

@@ -77,6 +77,22 @@ Wira ogni componente **esplicitamente** e lo gate **solo** tramite i suoi modes:
 
 `register` è `nil` solo per un'app che non registra task runner: **registrare in un `init()` non è più supportato** (panic — lì la sezione `tasks:` non è nota). Non esiste una seconda forma: `runner.Register[T]` (e `runner.RegisterFile[T]` per l'altro contratto) è l'unica, uguale per ogni famiglia di job.
 
+**Il gate per-task: `runner.Register[T]("IMPORT", engine.Worker)`.** I `core.Mode` in coda limitano
+*quel* runner ai mode indicati (nessuno = ogni mode), ed è la stessa forma di
+`corekafka.RegisterHandler`. Sta **sotto** `WithSchedulerModes`/`WithWorkerModes`, che spengono
+l'intero sottosistema: serve quando un solo YAML alimenta più processi dello stesso deployment e solo
+alcuni eseguono davvero quel runner — senza, in un processo scheduler entrano nel grafo fx anche i
+runner che soltanto il worker eseguirà, con tutte le loro dipendenze. Un task escluso dal mode **non
+è un errore di avvio**: non viene istanziato, con un log Info, esattamente come un task dichiarato e
+non referenziato.
+
+⚠️ Il gate non è verificato al boot contro i `jobs:`. Se un job **locale** (`SingleTask`,
+`localdispatcher`) referenzia in questo processo un task che i modes hanno escluso, l'assenza del
+runner si manifesta **per item a runtime**: `MuxRunner` non trova la route, scrive `MarkFailed` e
+ritorna `no runner registered for task name`. Non è una regressione — è ciò che già accade allo
+scheduler che dispatcha via gRPC verso un worker in un altro binario — ma con i modes diventa una
+configurazione che si può scrivere per sbaglio.
+
 **Restano a carico dell'app:** fornire il driver DB (`coremongo.Module(&cfg.Mongo)` o `coresql.Module(&cfg.Sql, pgdialect.New())`). Il **simplejob NON è coperto** dall'orchestratore: resta wiring separato (vedi la sezione dedicata).
 
 ### Esempio — distribuito (gRPC + Mongo)
@@ -261,6 +277,15 @@ mainframe irraggiungibile — fa riprovare l'item per sempre, a ogni ciclo.
 `RecoverOrphans`: il recupero di un item orfano — tipicamente il riavvio di un pod — **consuma
 un tentativo** anche se il runner non ha mai fallito. Con `max-retry: 2`, tre riavvii
 consecutivi mandano l'item in FAILED senza un solo fallimento applicativo.
+
+⚠️ **`max-retry` ha effetto solo dalla versione corrente.** Fino a prima, `task.Instances`
+ricostruiva la voce di `tasks:` campo per campo e dimenticava `MaxRetry`: il valore veniva letto
+dallo YAML, validato, documentato — e poi buttato, quindi **ogni task ritentava all'infinito**
+qualunque cosa fosse scritto. Ora la voce passa intera. Chi aggiorna deve rileggere i propri
+`max-retry:` come se li scrivesse adesso: un `max-retry: 2` scritto anni fa e mai applicato
+comincia a mandare item in FAILED, e va riletto insieme all'avvertenza qui sopra sugli orfani.
+La stessa lacuna c'era su `runner.RegisterFile` (il `FileTaskRunner` non portava affatto il campo,
+e `s3feed` lo perdeva avvolgendolo): anche lì il tetto ora arriva a destinazione.
 
 ### Nomenclatura: name, non type
 
@@ -825,7 +850,7 @@ go-core-batch/
 │   └── feedjob/                  # Job FeedTask: crea un WorkItem per tick da configurazione (solo feed, nessun runner)
 │
 ├── runner/                       # Registro AGNOSTICO dei task runner, condiviso da tutte le famiglie
-│   └── runner.go                 # ITaskRunner, TaskRunner, MuxRunner, Register[T](), Provide(), RegisterFile()
+│   └── runner.go                 # ITaskRunner, TaskRunner, MuxRunner, Register[T](), RegisterFile[T]()
 │
 ├── s3/                           # Client S3 multi-service (aws-sdk-go-v2)
 │   ├── config.go                 # ServiceConfig, Config

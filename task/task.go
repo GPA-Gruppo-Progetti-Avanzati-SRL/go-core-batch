@@ -152,7 +152,11 @@ func Instances(taskType string) []Config {
 				Msg("batch: task dichiarato ma non referenziato da alcun job/worker: costruzione saltata (dipendenze non istanziate)")
 			continue
 		}
-		out = append(out, Config{Name: name, Type: c.Type, Properties: c.Properties})
+		// La voce passa INTERA. Ricostruirla campo per campo significa dimenticarne uno al primo
+		// campo nuovo, ed era già successo: MaxRetry non veniva copiato, quindi ResolveMaxRetry
+		// vedeva sempre nil e il tetto ai ritentativi di OGNI task valeva illimitato, qualunque
+		// cosa dicesse `max-retry:` nello YAML.
+		out = append(out, c)
 	}
 	return out
 }
