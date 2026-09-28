@@ -163,6 +163,7 @@ func TestClaimingTick_BacklogSoloSeAbilitato(t *testing.T) {
 
 // Due tick nello stesso secondo devono avere jobId DIVERSI: prima l'id era il nome più un
 // timestamp al secondo, e le righe di task_logs di esecuzioni diverse si confondevano.
+// Il timestamp resta nell'id — serve a leggerlo — ma non è da solo a identificarlo.
 func TestNewJobID_UnicoAncheNelloStessoSecondo(t *testing.T) {
 	visti := make(map[string]bool, 100)
 	for range 100 {
@@ -174,5 +175,27 @@ func TestNewJobID_UnicoAncheNelloStessoSecondo(t *testing.T) {
 		if !strings.HasPrefix(id, "job-") {
 			t.Fatalf("jobId %q non porta il nome del job", id)
 		}
+	}
+}
+
+// L'id porta il timestamp dell'esecuzione in chiaro: è ciò che lo rende leggibile nei log
+// e in task_logs senza doverlo decodificare.
+func TestNewJobID_PortaIlTimestampLeggibile(t *testing.T) {
+	id := NewJobID("quadratura-job")
+
+	parti := strings.Split(strings.TrimPrefix(id, "quadratura-job-"), "-")
+	if len(parti) != 2 {
+		t.Fatalf("jobId %q non ha la forma <nome>-<timestamp>-<coda>", id)
+	}
+
+	ts, err := time.ParseInLocation(JobIDTimeLayout, parti[0], time.Local)
+	if err != nil {
+		t.Fatalf("timestamp %q non parsabile con %s: %v", parti[0], JobIDTimeLayout, err)
+	}
+	if d := time.Since(ts); d < -time.Second || d > time.Minute {
+		t.Fatalf("timestamp %s non è quello di adesso (scarto %s)", ts, d)
+	}
+	if len(parti[1]) != 8 {
+		t.Fatalf("coda %q: attesi 8 hex", parti[1])
 	}
 }
