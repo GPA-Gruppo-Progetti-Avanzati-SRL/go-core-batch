@@ -59,7 +59,7 @@ tradurre in record Kafka non produce un `ApplicationError` ma un `MarkFailed` di
 
 | Codice | HTTP | Costante | Origine | Significato |
 |---|---|---|---|---|
-| `BATCH-JOB-PROPS` | 500 | `errs.CodeJobProperties` | `kafkajob` (`destination`, `object`, `topic`, `limit`), `distributedjob` (`task`, `limit`), `feedjob` (`task`, `objectId`), `purgejob` (`status`, `older-than`, `limit`) | property infrastrutturale mancante o non valida in `jobs[].properties` |
+| `BATCH-JOB-PROPS` | 500 | `errs.CodeJobProperties` | `scheduler.Props`, per conto di `kafkajob` (`destination`, `object`, `topic`, `limit`), `distributedjob` (`task`, `limit`), `simplejob` (`task`), `feedjob` (`task`, `objectId`), `purgejob` (`status`, `older-than`, `limit`) | property infrastrutturale mancante o non valida in `jobs[].properties`. Il messaggio nomina job, job type, property e il motivo: `job "import" (type "DistribuiteTask"): property "task" mancante: non si sa quale task eseguire`. Emesso alla COSTRUZIONE del job, non al primo tick. Prima `simplejob` emetteva un `fmt.Errorf` senza codice |
 
 **Quando si manifesta.** La validazione avviene alla **costruzione** del job, non dentro il tick:
 l'errore compare nei log di avvio (`il job fallirà a ogni tick`) ed è poi restituito da ogni

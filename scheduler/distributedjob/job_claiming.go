@@ -6,20 +6,11 @@ import (
 	"time"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/batchmetrics"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 
 	gocron "github.com/go-co-op/gocron/v2"
 	"github.com/rs/zerolog/log"
-)
-
-// Properties infrastrutturali del job.
-const (
-	// PropTask nomina l'istanza di task da eseguire: una voce di `tasks:`.
-	PropTask = "task"
-	// PropLimit è il tetto agli item claimati per tick (backpressure).
-	PropLimit = "limit"
 )
 
 // makeClaimingFactory costruisce la JobFactory di un job claim-based.
@@ -67,24 +58,12 @@ func makeClaimingFactory(dispatcher ITaskDispatcher, items store.IWorkItemStore,
 // risolvi legge e valida le property infrastrutturali del job. Fallisce invece di ripiegare: un
 // job senza `task` non sa cosa eseguire, e uno senza `limit` valido non sa quanto prenderne.
 func risolvi(name string, config scheduler.Config) (taskName string, limit int, err error) {
-	p := config.Properties
-	if !p.Has(PropTask) {
-		return "", 0, errs.Tech(errs.CodeJobProperties).WithMessage(
-			fmt.Sprintf("distributedjob: job %q senza la property %q: non si sa quale task eseguire", name, PropTask))
+	p := scheduler.JobProps(name, config)
+	if taskName, err = p.RequiredString(scheduler.PropTask, "non si sa quale task eseguire"); err != nil {
+		return "", 0, err
 	}
-	taskName = p.GetString(PropTask, "")
-	if taskName == "" {
-		return "", 0, errs.Tech(errs.CodeJobProperties).WithMessage(
-			fmt.Sprintf("distributedjob: job %q: la property %q è vuota", name, PropTask))
-	}
-	if !p.Has(PropLimit) {
-		return "", 0, errs.Tech(errs.CodeJobProperties).WithMessage(
-			fmt.Sprintf("distributedjob: job %q senza la property %q: non si sa quanti item claimare per tick", name, PropLimit))
-	}
-	limit = p.GetInt(PropLimit, 0)
-	if limit <= 0 {
-		return "", 0, errs.Tech(errs.CodeJobProperties).WithMessage(
-			fmt.Sprintf("distributedjob: job %q: la property %q non è un intero positivo: %v", name, PropLimit, p[PropLimit]))
+	if limit, err = p.RequiredPositiveInt(scheduler.PropLimit, "non si sa quanti item claimare per tick"); err != nil {
+		return "", 0, err
 	}
 	return taskName, limit, nil
 }

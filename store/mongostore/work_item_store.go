@@ -5,7 +5,6 @@ import (
 	"errors"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo/mongoutil"
-	"slices"
 	"sync"
 	"time"
 
@@ -43,25 +42,9 @@ func newWorkItemData(ms *mongo.Service) *workItemData {
 	return &workItemData{Service: ms}
 }
 
-// indiciAttesi sono gli indici su cui gira il sottosistema. Non vengono creati in automatico
-// (gestione manuale via EnsureIndexes o migration/ops): il warning serve a rendere l'eventuale
-// assenza una scelta consapevole, non una svista.
-//
-//   - uk_workitem_active — unico parziale: senza, InsertIfNotActive NON deduplica (non c'è
-//     duplicate-key da intercettare) e nascono work item doppi, con rischio di doppia esecuzione;
-//   - ix_workitem_claim / ix_workitem_orphan / ix_workitem_claim_dest — servono le query di
-//     ClaimPending e RecoverOrphans, che ogni job esegue a OGNI tick. Senza, il claim scandisce
-//     la collection: un costo che cresce con lo storico invece che col lavoro da fare, e che
-//     non si vede finché la collection è piccola.
-var indiciAttesi = []string{
-	"uk_workitem_active",
-	"ix_workitem_claim",
-	"ix_workitem_orphan",
-	"ix_workitem_claim_dest",
-}
-
-// warnIfIndexesMissing logga (una sola volta) un warning per ogni indice atteso assente sulla
-// collection work_items.
+// warnIfIndexesMissing legge gli indici della collection e delega a store.WarnMissingIndexes il
+// confronto con quelli attesi: l'elenco e il messaggio sono gli stessi dei due backend, qui resta
+// solo il modo di sapere cosa esiste. Una sola volta per processo (sync.Once).
 func (d *workItemData) warnIfIndexesMissing(ctx context.Context) {
 	d.idxWarnOnce.Do(func() {
 		coll := d.Service.GetCollection(store.CollectionWorkItems, "")
@@ -78,27 +61,13 @@ func (d *workItemData) warnIfIndexesMissing(ctx context.Context) {
 				Msg("go-core-batch: impossibile leggere gli indici di work_items")
 			return
 		}
-		presenti := make(map[string]bool, len(idx))
+		presenti := make([]string, 0, len(idx))
 		for _, ix := range idx {
 			if name, _ := ix["name"].(string); name != "" {
-				presenti[name] = true
+				presenti = append(presenti, name)
 			}
 		}
-		var mancanti []string
-		for _, nome := range indiciAttesi {
-			if !presenti[nome] {
-				mancanti = append(mancanti, nome)
-			}
-		}
-		if len(mancanti) == 0 {
-			return
-		}
-		if slices.Contains(mancanti, "uk_workitem_active") {
-			log.Warn().Str("collection", store.CollectionWorkItems).
-				Msg("go-core-batch: indice partiale unico 'uk_workitem_active' ASSENTE — InsertIfNotActive NON deduplica (rischio work item duplicati / doppia esecuzione)")
-		}
-		log.Warn().Str("collection", store.CollectionWorkItems).Strs("indici", mancanti).
-			Msg("go-core-batch: indici ASSENTI su work_items — il claim di ogni tick scandisce la collection. Crearli via mongostore.EnsureIndexes o migration, oppure confermare che l'assenza è voluta.")
+		store.WarnMissingIndexes(presenti, "mongostore.EnsureIndexes")
 	})
 }
 
@@ -547,20 +516,20 @@ func EnsureIndexes(ctx context.Context, service *mongo.Service) error {
 						bson.M{"status": store.StatusInProgress},
 					},
 				}).
-				SetName("uk_workitem_active"),
+				SetName(store.IndexWorkItemActive),
 		},
 		{
 			Keys: bson.D{
 				{Key: "taskName", Value: 1}, {Key: "status", Value: 1},
 				{Key: "nextRunAt", Value: 1}, {Key: "createTime", Value: 1},
 			},
-			Options: options.Index().SetPartialFilterExpression(attivi).SetName("ix_workitem_claim"),
+			Options: options.Index().SetPartialFilterExpression(attivi).SetName(store.IndexWorkItemClaim),
 		},
 		{
 			Keys: bson.D{
 				{Key: "taskName", Value: 1}, {Key: "status", Value: 1}, {Key: "lockedAt", Value: 1},
 			},
-			Options: options.Index().SetPartialFilterExpression(attivi).SetName("ix_workitem_orphan"),
+			Options: options.Index().SetPartialFilterExpression(attivi).SetName(store.IndexWorkItemOrphan),
 		},
 		{
 			Keys: bson.D{
@@ -568,7 +537,7 @@ func EnsureIndexes(ctx context.Context, service *mongo.Service) error {
 				{Key: "destination", Value: 1}, {Key: "objectType", Value: 1},
 				{Key: "nextRunAt", Value: 1},
 			},
-			Options: options.Index().SetPartialFilterExpression(attivi).SetName("ix_workitem_claim_dest"),
+			Options: options.Index().SetPartialFilterExpression(attivi).SetName(store.IndexWorkItemClaimDest),
 		},
 	})
 	return err

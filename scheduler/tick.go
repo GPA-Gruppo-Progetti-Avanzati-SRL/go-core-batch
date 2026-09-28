@@ -15,10 +15,6 @@ import (
 
 var tickTracer = otel.Tracer("BatchClaimingJob")
 
-// PropBacklogMetrics abilita le gauge di coda su un job claim-based. Di default sono spente:
-// sono una query in più per tick, e la paga chi la vuole.
-const PropBacklogMetrics = "backlog-metrics"
-
 // ClaimingTick descrive un tick claim-based. I campi sono quelli che le tre famiglie di job
 // (distributedjob, kafkajob, simplejob) avevano ciascuna nel proprio preambolo: id
 // dell'esecuzione, context con timeout, span, feed opzionale, ClaimBatch, metriche.

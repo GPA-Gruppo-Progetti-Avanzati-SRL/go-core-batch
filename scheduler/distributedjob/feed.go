@@ -31,13 +31,7 @@ func (f *queryStoreFeed) Feed(ctx context.Context, taskName string, props core.P
 	filter := props.GetString("filter", "")
 	sort := props.GetString("sort", "")
 
-	var ids []string
-	var feedErr *core.ApplicationError
-	if sort != "" {
-		ids, feedErr = f.qs.GetIdsSorted(ctx, collection, filter, sort, limit)
-	} else {
-		ids, feedErr = f.qs.GetIds(ctx, collection, filter, limit)
-	}
+	ids, feedErr := f.qs.GetIds(ctx, collection, filter, sort, limit)
 	if feedErr != nil {
 		return nil, feedErr
 	}

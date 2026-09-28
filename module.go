@@ -107,7 +107,7 @@ func ActiveSet(cfg *Config) task.ActiveSet {
 		if j.Disabled {
 			continue
 		}
-		named := j.Properties.GetString("task", "") // distributedjob e simplejob
+		named := j.Properties.GetString(scheduler.PropTask, "") // distributedjob, simplejob, feedjob
 		if named != "" {
 			add(&referenced, named)
 			continue

@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/batchmetrics"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/kafka"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-kafka/message"
@@ -16,20 +16,21 @@ import (
 
 	gocron "github.com/go-co-op/gocron/v2"
 	"github.com/rs/zerolog/log"
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 const defaultKafkaLimit = 100
 
 // Properties infrastrutturali del job.
+//
+// Il filtro sulla destinazione e il tetto per tick sono scheduler.PropDestination /
+// scheduler.PropLimit: stesse chiavi degli altri job type.
 const (
-	// PropDestination e PropObject sono i filtri di claim: un job per coppia.
-	PropDestination = "destination"
-	PropObject      = "object"
+	// PropObject è il filtro sul WorkItem.ObjectType. ATTENZIONE: il job FeedTask chiama
+	// `objectType` lo stesso campo (feedjob.PropObjectType) — due nomi in YAML per la stessa
+	// colonna, divergenza storica che unificare sarebbe un breaking change di configurazione.
+	PropObject = "object"
 	// PropTopic è il topic su cui pubblicare.
 	PropTopic = "topic"
-	// PropLimit è il tetto agli item claimati per tick.
-	PropLimit = "limit"
 )
 
 type parametri struct {
@@ -92,30 +93,24 @@ func runTick(name string, p parametri, runTimeout, orphanTimeout time.Duration, 
 }
 
 func risolvi(name string, config scheduler.Config) (parametri, error) {
-	p := config.Properties
+	j := scheduler.JobProps(name, config)
 	var out parametri
+	var err error
 	for _, campo := range []struct {
-		prop string
-		dst  *string
+		prop   string
+		perche string
+		dst    *string
 	}{
-		{PropDestination, &out.destination},
-		{PropObject, &out.object},
-		{PropTopic, &out.topic},
+		{scheduler.PropDestination, "non si sa quali item reclamare", &out.destination},
+		{PropObject, "non si sa quali item reclamare", &out.object},
+		{PropTopic, "non si sa su quale topic pubblicare", &out.topic},
 	} {
-		if !p.Has(campo.prop) {
-			return out, errs.Tech(errs.CodeJobProperties).WithMessage(
-				fmt.Sprintf("kafkajob: job %q senza la property %q", name, campo.prop))
-		}
-		*campo.dst = p.GetString(campo.prop, "")
-		if *campo.dst == "" {
-			return out, errs.Tech(errs.CodeJobProperties).WithMessage(
-				fmt.Sprintf("kafkajob: job %q: la property %q è vuota", name, campo.prop))
+		if *campo.dst, err = j.RequiredString(campo.prop, campo.perche); err != nil {
+			return out, err
 		}
 	}
-	out.limit = p.GetInt(PropLimit, defaultKafkaLimit)
-	if out.limit <= 0 {
-		return out, errs.Tech(errs.CodeJobProperties).WithMessage(
-			fmt.Sprintf("kafkajob: job %q: la property %q non è un intero positivo: %v", name, PropLimit, p[PropLimit]))
+	if out.limit, err = j.PositiveInt(scheduler.PropLimit, defaultKafkaLimit); err != nil {
+		return out, err
 	}
 	return out, nil
 }
@@ -223,15 +218,15 @@ func prepareRecords(items []*store.WorkItem) (valid []*store.WorkItem, recs []*m
 // mette ProduceTo dalla property del job, così il topic resta una decisione del job e non si ripete su
 // ogni record.
 func toRecord(item *store.WorkItem) (*message.ProducerRecord, error) {
-	native, ok := normalizePayload(item.Payload)
+	native, ok := store.PayloadMap(item.Payload)
 	if !ok {
 		return nil, fmt.Errorf("payload di tipo non gestito: %T", item.Payload)
 	}
-	messageKey, ok := native["messageKey"]
+	messageKey, ok := native[kafka.KeyMessageKey]
 	if !ok {
 		return nil, errors.New("messageKey mancante")
 	}
-	messageValue, ok := native["messageValue"]
+	messageValue, ok := native[kafka.KeyMessageValue]
 	if !ok {
 		return nil, errors.New("messageValue mancante")
 	}
@@ -244,7 +239,7 @@ func toRecord(item *store.WorkItem) (*message.ProducerRecord, error) {
 		return nil, fmt.Errorf("serializzazione di messageValue: %w", err)
 	}
 	rec := &message.ProducerRecord{Key: key, Value: value}
-	if headersRaw, ok := native["messageHeaders"]; ok {
+	if headersRaw, ok := native[kafka.KeyMessageHeaders]; ok {
 		headers, err := toStringMap(headersRaw)
 		if err != nil {
 			return nil, fmt.Errorf("mappatura di messageHeaders: %w", err)
@@ -256,73 +251,6 @@ func toRecord(item *store.WorkItem) (*message.ProducerRecord, error) {
 		}
 	}
 	return rec, nil
-}
-
-// bsonToNative converte ricorsivamente i tipi bson (D/M/A) in tipi JSON-native
-// (map[string]interface{}, []interface{}), lasciando invariati gli scalari. Il Payload del WI,
-// riletto da Mongo, arriva come bson.D: senza questa conversione json.Marshal(bson.D)
-// produrrebbe un array [{Key,Value},...] invece di un oggetto, e gli header (bson.D) non
-// sarebbero mappabili da toStringMap.
-func bsonToNative(v any) any {
-	switch t := v.(type) {
-	case bson.D:
-		m := make(map[string]any, len(t))
-		for _, e := range t {
-			m[e.Key] = bsonToNative(e.Value)
-		}
-		return m
-	case bson.M:
-		m := make(map[string]any, len(t))
-		for k, val := range t {
-			m[k] = bsonToNative(val)
-		}
-		return m
-	case map[string]any:
-		m := make(map[string]any, len(t))
-		for k, val := range t {
-			m[k] = bsonToNative(val)
-		}
-		return m
-	case bson.A:
-		a := make([]any, len(t))
-		for i, e := range t {
-			a[i] = bsonToNative(e)
-		}
-		return a
-	case []any:
-		a := make([]any, len(t))
-		for i, e := range t {
-			a[i] = bsonToNative(e)
-		}
-		return a
-	default:
-		return v
-	}
-}
-
-// normalizePayload porta il Payload del WI a map[string]any indipendentemente dal
-// backend: Mongo lo rilegge come bson.D, SQL (colonna jsonb) come map[string]any o
-// []byte; se salvato come stringa JSON viene deserializzato. Ritorna (nil,false) se non gestibile.
-func normalizePayload(p any) (map[string]any, bool) {
-	switch v := p.(type) {
-	case bson.D, bson.M, map[string]any:
-		m, ok := bsonToNative(v).(map[string]any)
-		return m, ok
-	case []byte:
-		var m map[string]any
-		if json.Unmarshal(v, &m) != nil {
-			return nil, false
-		}
-		return m, true
-	case string:
-		var m map[string]any
-		if json.Unmarshal([]byte(v), &m) != nil {
-			return nil, false
-		}
-		return m, true
-	default:
-		return nil, false
-	}
 }
 
 func toStringMap(input any) (map[string]string, error) {

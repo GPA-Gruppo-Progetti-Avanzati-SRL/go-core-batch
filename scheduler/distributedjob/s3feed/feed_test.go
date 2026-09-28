@@ -93,43 +93,42 @@ func TestS3Feed_Feed_FiltersAndLimits(t *testing.T) {
 	})
 }
 
-func TestDecodePayload(t *testing.T) {
-	t.Run("direct S3Payload", func(t *testing.T) {
-		input := S3Payload{Service: "main", Key: "file.csv", DestPath: "done/"}
-		var out S3Payload
-		if err := decodePayload(input, &out); err != nil {
-			t.Fatal(err)
-		}
-		if out != input {
-			t.Errorf("got %+v, want %+v", out, input)
-		}
-	})
+// Il payload del job S3 si decodifica con store.DecodePayload, che è il decodificatore di TUTTI
+// i payload dei WorkItem. Qui resta la prova che l'S3Payload sopravvive alle forme in cui i
+// backend lo restituiscono — la copertura generale sta in store/payload_test.go.
+func TestDecodePayload_S3Payload(t *testing.T) {
+	atteso := S3Payload{Service: "main", Key: "inbox/data.csv", DestPath: "processed/"}
 
-	t.Run("pointer S3Payload", func(t *testing.T) {
-		input := &S3Payload{Service: "main", Key: "file.csv", DestPath: "done/"}
-		var out S3Payload
-		if err := decodePayload(input, &out); err != nil {
-			t.Fatal(err)
-		}
-		if out != *input {
-			t.Errorf("got %+v, want %+v", out, *input)
-		}
-	})
-
-	t.Run("map[string]any (from DB deserialization)", func(t *testing.T) {
-		input := map[string]any{
-			"service":  "main",
-			"key":      "inbox/data.csv",
-			"destPath": "processed/",
-		}
-		var out S3Payload
-		if err := decodePayload(input, &out); err != nil {
-			t.Fatal(err)
-		}
-		if out.Service != "main" || out.Key != "inbox/data.csv" || out.DestPath != "processed/" {
-			t.Errorf("unexpected result: %+v", out)
-		}
-	})
+	// La forma con cui il driver Mongo restituisce un documento: una lista ORDINATA di coppie.
+	// Espressa qui per struttura e non come bson.D, che è esattamente il modo in cui
+	// store.DecodePayload la riconosce. Prima il convertitore locale di questo package passava
+	// per json.Marshal — che su una lista produce un array — e il job non decodificava mai il
+	// proprio payload quando il backend era Mongo.
+	type coppia struct {
+		Key   string
+		Value any
+	}
+	casi := map[string]any{
+		"S3Payload diretto":     atteso,
+		"puntatore a S3Payload": &atteso,
+		"map (colonna jsonb)":   map[string]any{"service": "main", "key": "inbox/data.csv", "destPath": "processed/"},
+		"lista di coppie (bson.D di Mongo)": []coppia{
+			{Key: "service", Value: "main"},
+			{Key: "key", Value: "inbox/data.csv"},
+			{Key: "destPath", Value: "processed/"},
+		},
+	}
+	for nome, raw := range casi {
+		t.Run(nome, func(t *testing.T) {
+			var out S3Payload
+			if err := store.DecodePayload(raw, &out); err != nil {
+				t.Fatalf("decodifica fallita: %v", err)
+			}
+			if out != atteso {
+				t.Errorf("got %+v, want %+v", out, atteso)
+			}
+		})
+	}
 }
 
 // helpers to extract testable logic from Feed without needing a real S3 client

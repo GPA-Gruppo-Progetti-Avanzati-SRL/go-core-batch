@@ -45,7 +45,6 @@ package simplejob
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
@@ -62,15 +61,12 @@ import (
 // task eseguire lo dice `properties.task`.
 const JobType = "SingleTask"
 
-// Properties del job.
-const (
-	// PropTask nomina l'istanza di task da eseguire: una voce di `tasks:`. È OBBLIGATORIA e non
-	// ha ripieghi — prima mancando si eseguiva il task omonimo al job type, ed era il punto in
-	// cui i due perimetri si confondevano.
-	PropTask = "task"
-	// PropLimit è letta solo per dire che è ignorata: SingleTask esegue un item per tick.
-	PropLimit = "limit"
-)
+// PropTask e PropLimit sono scheduler.PropTask / scheduler.PropLimit: sono le stesse chiavi dello
+// stesso YAML che leggono distributedjob e feedjob.
+//
+//   - `task` è OBBLIGATORIA e non ha ripieghi: prima, mancando, si eseguiva il task omonimo al job
+//     type, ed era il punto in cui i due perimetri si confondevano;
+//   - `limit` è letta solo per dire che è IGNORATA: SingleTask esegue un item per tick.
 
 // newJobRegistration trasforma i runner raccolti dal gruppo batch_runners in UNA JobRegistration
 // per il job type SingleTask, con le istanze indicizzate per nome.
@@ -107,9 +103,9 @@ func makeFactory(items store.IWorkItemStore, instances map[string]*runner.TaskRu
 			// funzionare deve vedersi all'avvio, quando c'è ancora qualcuno che guarda.
 			log.Error().Err(resolveErr).Msgf("[%s] il job fallirà a ogni tick", name)
 		}
-		if config.Properties.Has(PropLimit) {
+		if config.Properties.Has(scheduler.PropLimit) {
 			log.Warn().Msgf("[%s] la property %q è ignorata: %s esegue un item per tick; "+
-				"per lavorarne molti si usa DistribuiteTask", name, PropLimit, JobType)
+				"per lavorarne molti si usa DistribuiteTask", name, scheduler.PropLimit, JobType)
 		}
 		// Convenzione unica (scheduler.Config.ResolveTimeouts): LockTimeout governa sia il
 		// timeout del context di run sia l'età di orphan usata da RecoverOrphans.
@@ -128,14 +124,14 @@ func makeFactory(items store.IWorkItemStore, instances map[string]*runner.TaskRu
 // c'era — il task omonimo al `type` del job — è esattamente ciò che confondeva i due perimetri,
 // e faceva sì che un refuso in `properties.task` eseguisse silenziosamente qualcos'altro.
 func risolvi(name string, instances map[string]*runner.TaskRunner, config scheduler.Config) (string, *runner.TaskRunner, error) {
-	taskName := config.Properties.GetString(PropTask, "")
-	if taskName == "" {
-		return "", nil, fmt.Errorf("simplejob: job %q di type %q senza la property %q: non si sa quale task eseguire",
-			name, JobType, PropTask)
+	p := scheduler.JobProps(name, config)
+	taskName, err := p.RequiredString(scheduler.PropTask, "non si sa quale task eseguire")
+	if err != nil {
+		return "", nil, err
 	}
 	tr, ok := instances[taskName]
 	if !ok {
-		return "", nil, fmt.Errorf("simplejob: job %q: nessun task %q fra le istanze registrate", name, taskName)
+		return "", nil, p.Invalid("nessun task %q fra le istanze registrate", taskName)
 	}
 	return taskName, tr, nil
 }

@@ -857,6 +857,12 @@ per scadenza; il recupero orfani una per `(task_name, status, locked_at)`. Senza
 corrispondenti quelle query scandiscono la collection intera — un costo che cresce con lo
 **storico** invece che col lavoro da fare, e che non si vede finché la collection è piccola.
 
+I nomi degli indici stanno in **un posto solo** (`store.ExpectedIndexes`, con le costanti
+`store.IndexWorkItem*`): hanno quattro lettori — le due `EnsureIndexes` che li creano e le due
+verifiche di avvio che ne segnalano l'assenza — e prima erano quattro elenchi separati. Il
+confronto e il messaggio di warning sono anch'essi condivisi (`store.WarnMissingIndexes`): al
+backend resta il solo modo di sapere quali indici esistono (`Indexes().List` contro `pg_indexes`).
+
 `EnsureIndexes` (mongo e sql) li crea tutti:
 
 | Indice | Serve a | Senza |
@@ -1125,6 +1131,27 @@ scheduler:
 Il blocco `properties:` di un job configura il **job type** e lo legge il framework. La configurazione
 **applicativa** del runner sta invece in `tasks[].properties` (vedi "Configurazione dei task").
 
+**Le property le legge `scheduler.Props`**, che applica una regola sola — presente, non vuota, del
+tipo e del segno giusti — e produce errori (codice `BATCH-JOB-PROPS`) che nominano job, job type,
+property e il *motivo per cui serve*: `job "import" (type "DistribuiteTask"): property "task"
+mancante: non si sa quale task eseguire`. La validazione avviene alla **costruzione** del job, non
+al primo tick: un refuso in YAML si vede all'avvio, quando c'è ancora qualcuno che guarda.
+
+Esisteva riscritta in ognuno dei cinque job type, e le cinque copie erano già divergite: simplejob
+ritornava un errore senza codice, feedjob validava dentro il tick, e lo stesso `limit` era
+obbligatorio in un job, con default 100 in un altro e 1000 in un terzo. **I default restano al
+chiamante** — quelli sì che sono specifici — ma una property scritta e non convertibile è sempre un
+errore e non ricade mai sul default.
+
+Le chiavi comuni a più job type sono dichiarate una volta sola (`scheduler.PropTask`,
+`PropLimit`, `PropDestination`, `PropBacklogMetrics`); restano locali al proprio package quelle che
+un solo job type conosce (`older-than`, `task-logs`, `topic`, `objectId`, `payload`, …).
+
+> **Divergenza nota, non toccata perché è di configurazione:** il filtro sul `WorkItem.ObjectType`
+> si chiama `object` nella voce di un `NotificationKafka` e `objectType` in quella di un
+> `FeedTask`. Sono la stessa colonna con due nomi in YAML; unificarli cambierebbe le config
+> esistenti.
+
 | Campo | Tipo | Descrizione |
 |---|---|---|
 | `name` | string | Nome univoco del job |
@@ -1198,6 +1225,16 @@ PENDING. Vedi "Configurazione dei task — sezione `tasks:`".
 ---
 
 ## IQueryStore — SQL vs MongoDB
+
+Un metodo solo: `GetIds(ctx, collection, filter, sort string, limit int)`. C'erano `GetIds` e
+`GetIdsSorted`, ma la prima era letteralmente la seconda con `sort` vuoto — due implementazioni
+identiche per backend — e l'unico chiamante ramificava su `sort != ""` per scegliere quale
+chiamare, cioè rifaceva a mano ciò che l'alias già faceva.
+
+La grammatica di `sort` (`colonna` o `colonna:desc`, separate da virgola) è **una sola**:
+`distributedjob.ParseSort` la interpreta per entrambi, e ai backend resta cosa farne — un `bson.D`
+o un `ORDER BY` con l'identificatore validato. Era parsata due volte, e nulla garantiva che
+significasse la stessa cosa passando da Mongo a SQL.
 
 ```go
 // SQL (distributedjob/sqlstore) — filter = WHERE clause raw, sort = "col:asc"
@@ -1412,10 +1449,27 @@ deduplica si comporta come prima: finché l'item è PENDING o IN_PROGRESS non ne
 ## Interfacce chiave
 
 ```go
-// store.ITaskRunner — interfaccia unica condivisa da simplejob e distributedjob
-// (runner.ITaskRunner e simplejob.ITaskRunner sono alias di questa).
+// store.ITaskRunner — interfaccia unica condivisa da simplejob, distributedjob e worker pool
+// (runner.ITaskRunner ne è l'alias; simplejob.ITaskRunner è stato rimosso).
 type ITaskRunner interface {
     Run(ctx context.Context, item *WorkItem) error
+}
+
+// store.PayloadMap / store.DecodePayload — il Payload di un WorkItem è `any`, e la forma in cui
+// torna indietro dipende da chi l'ha riletto: Mongo restituisce un documento come bson.D (lista
+// ORDINATA di coppie) o bson.M, una colonna jsonb come map[string]any o []byte, e chi l'ha appena
+// costruito ce l'ha ancora come struct. Normalizzarlo è del WorkItem, non dei suoi consumatori:
+// prima kafkajob e s3feed avevano un convertitore per uno, e quello di s3feed passava per
+// json.Marshal — che su una lista di coppie produce un ARRAY — quindi il job
+// DistribuiteTaskByS3File non decodificava il proprio payload sul backend Mongo.
+func PayloadMap(p any) (map[string]any, bool)   // → documento
+func DecodePayload(raw any, out any) error      // → struct dell'applicazione
+
+// store.TaskLogWriter — le cinque Set* di IData sono la stessa riga con uno stato diverso: le
+// porta questa struct, che i backend incorporano passando la sola scrittura fisica.
+type TaskLogWriter struct {
+    Level  TaskLogLevel
+    Insert func(ctx context.Context, tl *TaskLog)
 }
 
 // store.ApplyResult — finalizza il workitem dal return del runner

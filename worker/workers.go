@@ -6,16 +6,11 @@ import (
 	"runtime/pprof"
 	"sync"
 
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/batchmetrics"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/lifecycle"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"github.com/rs/zerolog/log"
 	"go.uber.org/fx"
-)
-
-// Etichette pprof delle goroutine del pool: a bassa cardinalità (nome del worker e
-// tipo di task), così i profili e i traceback restano raggruppabili.
-const (
-	LabelWorker   = "batch_worker"
-	LabelTaskName = "batch_task_name"
 )
 
 type Workers struct {
@@ -75,7 +70,7 @@ func NewWorkers(lc fx.Lifecycle, workersConfig []Config, data store.IData, servi
 			for k, channel := range w.TaskChannel {
 				// pprof.Do etichetta la goroutine del worker: da Go 1.27 la label
 				// compare anche nei traceback, oltre che nei profili.
-				go pprof.Do(context.Background(), pprof.Labels(LabelWorker, k), func(context.Context) {
+				go pprof.Do(context.Background(), pprof.Labels(batchmetrics.LabelWorker, k), func(context.Context) {
 					w.loop(k, channel, services, data, items)
 				})
 			}
@@ -89,16 +84,8 @@ func NewWorkers(lc fx.Lifecycle, workersConfig []Config, data store.IData, servi
 			log.Info().Msg("Stopping worker pool")
 			close(w.StopChannel)
 			// Poi si attende il drain delle task IN VOLO, fino al deadline del context di stop
-			// di fx — stesso contratto del localdispatcher. Oltre il deadline le residue sono
-			// abbandonate: i loro item restano IN_PROGRESS e li recupera RecoverOrphans.
-			done := make(chan struct{})
-			go func() { w.wg.Wait(); close(done) }()
-			select {
-			case <-done:
-				log.Info().Msg("worker pool: tutte le task in volo drenate")
-			case <-ctx.Done():
-				log.Warn().Msg("worker pool: drain scaduto, task residue abbandonate (saranno recuperate come orfani)")
-			}
+			// di fx — stesso contratto del localdispatcher, ed è la stessa funzione.
+			lifecycle.Drain(ctx, &w.wg, "worker pool")
 			return nil
 		},
 	})
@@ -132,7 +119,7 @@ func (w *Workers) loop(k string, channel chan *Task, services ITaskService, batc
 			// Il set di label è esplicito (worker + tipo di task): pprof.Do lo
 			// sostituisce a quello ereditato dalla goroutine del worker.
 			w.wg.Go(func() {
-				pprof.Do(context.Background(), pprof.Labels(LabelWorker, k, LabelTaskName, ch.TaskName), func(context.Context) {
+				pprof.Do(context.Background(), pprof.Labels(batchmetrics.LabelWorker, k, batchmetrics.LabelTaskName, ch.TaskName), func(context.Context) {
 					Run(semaphore, ch, services, batchData, items)
 				})
 			})

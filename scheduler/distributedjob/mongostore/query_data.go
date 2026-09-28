@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo/mongoutil"
-	"strings"
 	"time"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
@@ -50,11 +49,7 @@ func newQueryData(ms *coremongo.Service) *queryData {
 
 var _ distributedjob.IQueryStore = (*queryData)(nil)
 
-func (q *queryData) GetIds(ctx context.Context, collection, filter string, limit int) ([]string, *core.ApplicationError) {
-	return q.GetIdsSorted(ctx, collection, filter, "", limit)
-}
-
-func (q *queryData) GetIdsSorted(ctx context.Context, collection, filter, sort string, limit int) ([]string, *core.ApplicationError) {
+func (q *queryData) GetIds(ctx context.Context, collection, filter, sort string, limit int) ([]string, *core.ApplicationError) {
 	coll := q.Service.GetCollection(collection, "")
 
 	var query bson.M
@@ -71,16 +66,14 @@ func (q *queryData) GetIdsSorted(ctx context.Context, collection, filter, sort s
 	if limit > 0 {
 		opts.SetLimit(int64(limit))
 	}
-	if sort != "" {
-		sortDoc := bson.D{}
-		for part := range strings.SplitSeq(sort, ",") {
-			fields := strings.SplitN(strings.TrimSpace(part), ":", 2)
-			col := fields[0]
+	if campi := distributedjob.ParseSort(sort); len(campi) > 0 {
+		sortDoc := make(bson.D, 0, len(campi))
+		for _, c := range campi {
 			dir := 1
-			if len(fields) == 2 && strings.ToLower(fields[1]) == "desc" {
+			if c.Desc {
 				dir = -1
 			}
-			sortDoc = append(sortDoc, bson.E{Key: col, Value: dir})
+			sortDoc = append(sortDoc, bson.E{Key: c.Column, Value: dir})
 		}
 		opts.SetSort(sortDoc)
 	}
@@ -89,7 +82,7 @@ func (q *queryData) GetIdsSorted(ctx context.Context, collection, filter, sort s
 	if err != nil {
 		return nil, errs.Tech(errs.CodeQueryCur).WithCause(err)
 	}
-	defer mongoutil.CloseCursor(ctx, cursor, "GetIdsSorted")
+	defer mongoutil.CloseCursor(ctx, cursor, "GetIds")
 
 	var ids []string
 	for cursor.Next(ctx) {

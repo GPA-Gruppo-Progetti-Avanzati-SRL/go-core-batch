@@ -2,11 +2,13 @@ package kafkajob
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/kafka"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-kafka/message"
@@ -240,5 +242,35 @@ func TestNotificationJobRun_PayloadRottoIsolato(t *testing.T) {
 	}
 	if len(st.done["tok-1"]) != 1 || st.done["tok-1"][0] != "buono" {
 		t.Fatalf("MarkDone = %#v, atteso il solo buono", st.done)
+	}
+}
+
+// Le chiavi con cui questo job rilegge il payload DEVONO essere i tag json della kafka.Message che
+// l'applicazione costruisce. Sono due dichiarazioni dello stesso contratto in due package — la
+// struct sta in `kafka`, il lettore qui — e senza questo test un rename dei tag passerebbe la
+// compilazione e romperebbe la produzione: il job non troverebbe più i campi e marcherebbe FALLITI
+// tutti gli item, uno per uno, come payload non utilizzabili.
+func TestChiaviDelPayload_CoincidonoCoiTagDiMessage(t *testing.T) {
+	atteso := map[string]string{
+		"MessageKey":    kafka.KeyMessageKey,
+		"MessageValue":  kafka.KeyMessageValue,
+		"MessageHeader": kafka.KeyMessageHeaders,
+	}
+	tipo := reflect.TypeFor[kafka.Message]()
+	if tipo.NumField() != len(atteso) {
+		t.Fatalf("kafka.Message ha %d campi, le costanti ne coprono %d: aggiornare entrambi",
+			tipo.NumField(), len(atteso))
+	}
+	for i := range tipo.NumField() {
+		f := tipo.Field(i)
+		chiave, previsto := atteso[f.Name]
+		if !previsto {
+			t.Fatalf("campo %q di kafka.Message senza costante corrispondente", f.Name)
+		}
+		tag, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if tag != chiave {
+			t.Errorf("campo %s: tag json %q, costante %q — il job leggerebbe una chiave che non esiste",
+				f.Name, tag, chiave)
+		}
 	}
 }

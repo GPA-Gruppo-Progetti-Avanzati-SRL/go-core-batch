@@ -48,11 +48,7 @@ func newQueryDataSQL(db *bun.DB) *queryDataSQL {
 
 var _ distributedjob.IQueryStore = (*queryDataSQL)(nil)
 
-func (q *queryDataSQL) GetIds(ctx context.Context, table, filter string, limit int) ([]string, *core.ApplicationError) {
-	return q.GetIdsSorted(ctx, table, filter, "", limit)
-}
-
-func (q *queryDataSQL) GetIdsSorted(ctx context.Context, table, filter, sort string, limit int) ([]string, *core.ApplicationError) {
+func (q *queryDataSQL) GetIds(ctx context.Context, table, filter, sort string, limit int) ([]string, *core.ApplicationError) {
 	if err := validateIdent("table", table, true); err != nil {
 		return nil, err
 	}
@@ -63,19 +59,15 @@ func (q *queryDataSQL) GetIdsSorted(ctx context.Context, table, filter, sort str
 		// (deve provenire dalle Properties del job, mai da input esterno). Vedi IQueryStore.
 		query = query.Where(filter)
 	}
-	if sort != "" {
-		for part := range strings.SplitSeq(sort, ",") {
-			fields := strings.SplitN(strings.TrimSpace(part), ":", 2)
-			col := strings.TrimSpace(fields[0])
-			if err := validateIdent("sort column", col, false); err != nil {
-				return nil, err
-			}
-			dir := "ASC"
-			if len(fields) == 2 && strings.ToLower(strings.TrimSpace(fields[1])) == "desc" {
-				dir = "DESC"
-			}
-			query = query.OrderExpr("? "+dir, bun.Ident(col))
+	for _, c := range distributedjob.ParseSort(sort) {
+		if err := validateIdent("sort column", c.Column, false); err != nil {
+			return nil, err
 		}
+		dir := "ASC"
+		if c.Desc {
+			dir = "DESC"
+		}
+		query = query.OrderExpr("? "+dir, bun.Ident(c.Column))
 	}
 	if limit > 0 {
 		query = query.Limit(limit)

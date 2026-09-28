@@ -2,7 +2,6 @@ package s3feed
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
@@ -22,7 +21,7 @@ type fileRunner struct {
 
 func (r *fileRunner) Run(ctx context.Context, item *store.WorkItem) error {
 	var payload S3Payload
-	if err := decodePayload(item.Payload, &payload); err != nil {
+	if err := store.DecodePayload(item.Payload, &payload); err != nil {
 		return fmt.Errorf("s3feed runner: decode payload for %q: %w", item.Id, err)
 	}
 
@@ -71,30 +70,6 @@ func (r *fileRunner) Run(ctx context.Context, item *store.WorkItem) error {
 	}
 
 	return nil
-}
-
-// decodePayload converts the WorkItem.Payload (any) into an S3Payload.
-func decodePayload(raw any, out *S3Payload) error {
-	switch v := raw.(type) {
-	case S3Payload:
-		*out = v
-		return nil
-	case *S3Payload:
-		*out = *v
-		return nil
-	case map[string]any:
-		b, err := json.Marshal(v)
-		if err != nil {
-			return err
-		}
-		return json.Unmarshal(b, out)
-	default:
-		b, err := json.Marshal(v)
-		if err != nil {
-			return fmt.Errorf("unsupported payload type %T", raw)
-		}
-		return json.Unmarshal(b, out)
-	}
 }
 
 // newFileRunner creates a fileRunner that wraps the given IFileRunner with S3 lifecycle.

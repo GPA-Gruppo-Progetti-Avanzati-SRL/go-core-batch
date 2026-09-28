@@ -13,6 +13,8 @@ import (
 	"time"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/batchmetrics"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/lifecycle"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/runner"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob"
@@ -20,9 +22,6 @@ import (
 	"github.com/rs/zerolog/log"
 	"go.uber.org/fx"
 )
-
-// LabelTaskName è l'etichetta pprof applicata alle goroutine delle task in-process.
-const LabelTaskName = "batch_task_name"
 
 const (
 	// minMaxConcurrent è il pavimento del cap di concorrenza: sotto questa soglia non si scende
@@ -67,18 +66,10 @@ func New(lc fx.Lifecycle, jobs []scheduler.Config, mux *runner.MuxRunner, items 
 	}
 	lc.Append(fx.Hook{
 		OnStop: func(ctx context.Context) error {
-			// Niente nuovi dispatch, poi attendi il drain delle task in volo fino al deadline
-			// del context di stop di fx. Oltre, le task residue vengono abbandonate: i loro item
-			// restano IN_PROGRESS e verranno recuperati come orfani al riavvio.
+			// Niente nuovi dispatch, poi il drain delle task in volo fino al deadline del
+			// context di stop di fx — stesso contratto del worker pool, ed è la stessa funzione.
 			d.stopping.Store(true)
-			done := make(chan struct{})
-			go func() { d.wg.Wait(); close(done) }()
-			select {
-			case <-done:
-				log.Info().Msg("localdispatcher: tutte le task in volo drenate")
-			case <-ctx.Done():
-				log.Warn().Msg("localdispatcher: drain scaduto, task residue abbandonate (saranno recuperate come orfani)")
-			}
+			lifecycle.Drain(ctx, &d.wg, "localdispatcher")
 			return nil
 		},
 	})
@@ -93,7 +84,7 @@ func capacita(jobs []scheduler.Config) int {
 		if j.Disabled {
 			continue
 		}
-		if n := j.Properties.GetInt(distributedjob.PropLimit, 0); n > 0 {
+		if n := j.Properties.GetInt(scheduler.PropLimit, 0); n > 0 {
 			somma += n
 		}
 	}
@@ -126,7 +117,7 @@ func (d *LocalDispatcher) DispatchTask(ctx context.Context, req distributedjob.D
 	taskCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	// Etichetta la goroutine col tipo di task (bassa cardinalità): da Go 1.27 la label
 	// compare anche nei traceback, oltre che nel profilo goroutineleak.
-	labeled := pprof.WithLabels(taskCtx, pprof.Labels(LabelTaskName, req.TaskName))
+	labeled := pprof.WithLabels(taskCtx, pprof.Labels(batchmetrics.LabelTaskName, req.TaskName))
 	d.wg.Go(func() {
 		defer cancel()
 		defer func() { <-d.sem }()

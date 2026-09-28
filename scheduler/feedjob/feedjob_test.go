@@ -44,11 +44,11 @@ func TestCreaIlWorkItem(t *testing.T) {
 	payload := map[string]any{"modalita": "completa", "tentativi": 3}
 
 	err := run("feed-test", st, config(core.Properties{
-		PropTask:        "import-anagrafiche",
-		PropObjectId:    "ANAGRAFICHE",
-		PropObjectType:  "anagrafica",
-		PropDestination: "milano",
-		PropPayload:     payload,
+		scheduler.PropTask:        "import-anagrafiche",
+		PropObjectId:              "ANAGRAFICHE",
+		PropObjectType:            "anagrafica",
+		scheduler.PropDestination: "milano",
+		PropPayload:               payload,
 	}))
 	if err != nil {
 		t.Fatalf("errore inatteso: %v", err)
@@ -92,8 +92,8 @@ func TestSenzaPayload(t *testing.T) {
 	st := &storeFake{}
 
 	if err := run("feed-test", st, config(core.Properties{
-		PropTask:     "import-anagrafiche",
-		PropObjectId: "ANAGRAFICHE",
+		scheduler.PropTask: "import-anagrafiche",
+		PropObjectId:       "ANAGRAFICHE",
 	})); err != nil {
 		t.Fatalf("errore inatteso: %v", err)
 	}
@@ -127,9 +127,9 @@ func TestPropertyConChiaviAbbassate(t *testing.T) {
 func TestPropertyObbligatorieMancanti(t *testing.T) {
 	for nome, props := range map[string]core.Properties{
 		"senza task":     {PropObjectId: "ANAGRAFICHE"},
-		"senza objectId": {PropTask: "import-anagrafiche"},
-		"task vuoto":     {PropTask: "", PropObjectId: "ANAGRAFICHE"},
-		"objectId vuoto": {PropTask: "import-anagrafiche", PropObjectId: ""},
+		"senza objectId": {scheduler.PropTask: "import-anagrafiche"},
+		"task vuoto":     {scheduler.PropTask: "", PropObjectId: "ANAGRAFICHE"},
+		"objectId vuoto": {scheduler.PropTask: "import-anagrafiche", PropObjectId: ""},
 	} {
 		t.Run(nome, func(t *testing.T) {
 			st := &storeFake{}
@@ -137,7 +137,7 @@ func TestPropertyObbligatorieMancanti(t *testing.T) {
 			if err == nil {
 				t.Fatal("atteso un errore")
 			}
-			atteso := PropTask
+			atteso := scheduler.PropTask
 			if strings.Contains(nome, "objectId") {
 				atteso = PropObjectId
 			}
@@ -158,8 +158,8 @@ func TestItemGiaAttivo(t *testing.T) {
 	st := &storeFake{created: &zero}
 
 	if err := run("feed-test", st, config(core.Properties{
-		PropTask:     "import-anagrafiche",
-		PropObjectId: "ANAGRAFICHE",
+		scheduler.PropTask: "import-anagrafiche",
+		PropObjectId:       "ANAGRAFICHE",
 	})); err != nil {
 		t.Fatalf("un item già attivo non è un errore: %v", err)
 	}
@@ -171,8 +171,8 @@ func TestStoreInErrore(t *testing.T) {
 	st := &storeFake{err: core.TechnicalError().WithMessage("mongo giù")}
 
 	err := run("feed-test", st, config(core.Properties{
-		PropTask:     "import-anagrafiche",
-		PropObjectId: "ANAGRAFICHE",
+		scheduler.PropTask: "import-anagrafiche",
+		PropObjectId:       "ANAGRAFICHE",
 	}))
 	if err == nil {
 		t.Fatal("atteso un errore")
@@ -193,7 +193,7 @@ func TestRegister(t *testing.T) {
 		t.Fatal("factory nil")
 	}
 	if task := reg.Factory("feed-test", config(core.Properties{
-		PropTask: "import-anagrafiche", PropObjectId: "ANAGRAFICHE",
+		scheduler.PropTask: "import-anagrafiche", PropObjectId: "ANAGRAFICHE",
 	})); task == nil {
 		t.Error("la factory deve costruire una gocron.Task")
 	}

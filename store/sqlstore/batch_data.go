@@ -14,11 +14,12 @@ import (
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 )
 
-// batchDataSQL implements store.IData using a SQL database via bun.
+// batchDataSQL implements store.IData using a SQL database via bun. Le cinque Set* per riga
+// singola arrivano da store.TaskLogWriter — sono identiche per ogni backend, cambia solo la
+// scrittura — mentre la scrittura in blocco e la retention sono di qui.
 type batchDataSQL struct {
+	store.TaskLogWriter
 	Sql *coresql.Service
-	// Level dice quali righe scrivere. Lo zero value è "tutte", cioè la condotta storica.
-	Level store.TaskLogLevel
 }
 
 // batchDataSQLParams: il livello è OPZIONALE perché il wiring manuale (senza batch.Module) non
@@ -30,37 +31,15 @@ type batchDataSQLParams struct {
 }
 
 func newBatchDataSQL(p batchDataSQLParams) *batchDataSQL {
-	return &batchDataSQL{Sql: p.Sql, Level: p.Level}
+	d := &batchDataSQL{Sql: p.Sql}
+	d.TaskLogWriter = store.TaskLogWriter{Level: p.Level, Insert: d.insertTask}
+	return d
 }
 
 var _ store.IData = (*batchDataSQL)(nil)
 
-func (d *batchDataSQL) SetTaskStart(ctx context.Context, taskid, jobid, typeTask, objectid string) {
-	d.insertTask(ctx, taskid, jobid, typeTask, objectid, store.TaskLogStart, "")
-}
-
-func (d *batchDataSQL) SetTaskDone(ctx context.Context, taskid, jobid, typeTask, objectid string) {
-	d.insertTask(ctx, taskid, jobid, typeTask, objectid, store.TaskLogDone, "")
-}
-
-func (d *batchDataSQL) SetTaskInError(ctx context.Context, taskid, jobid, typeTask, objectid, errMsg string) {
-	d.insertTask(ctx, taskid, jobid, typeTask, objectid, store.TaskLogError, errMsg)
-}
-
-func (d *batchDataSQL) SetTaskAssigned(ctx context.Context, taskid, jobid, typeTask, objectid string) {
-	d.insertTask(ctx, taskid, jobid, typeTask, objectid, store.TaskLogAssigned, "")
-}
-
-func (d *batchDataSQL) SetTaskAssignationKO(ctx context.Context, taskid, jobid, typeTask, objectid, errMsg string) {
-	d.insertTask(ctx, taskid, jobid, typeTask, objectid, store.TaskLogAssignedKO, errMsg)
-}
-
-func (d *batchDataSQL) insertTask(ctx context.Context, taskid, jobId, typeTask, objectid, status, errMsg string) {
-	if !d.Level.Records(status) {
-		return
-	}
-	obj := store.NewTaskLog(taskid, jobId, typeTask, objectid, status, errMsg)
-	if err := d.Sql.InsertOne(ctx, obj); err != nil {
+func (d *batchDataSQL) insertTask(ctx context.Context, tl *store.TaskLog) {
+	if err := d.Sql.InsertOne(ctx, tl); err != nil {
 		log.Error().Err(err).Msgf("Impossibile inserire task log: %s", err.Message)
 	}
 }

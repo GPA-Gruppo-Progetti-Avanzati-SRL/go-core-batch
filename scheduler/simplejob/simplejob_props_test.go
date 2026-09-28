@@ -131,7 +131,7 @@ func TestRisolvi_NienteRipieghi(t *testing.T) {
 	instances := map[string]*runner.TaskRunner{"import-in": runner.New("import-in", &importRunner{})}
 
 	t.Run("task noto", func(t *testing.T) {
-		nome, tr, err := risolvi("j", instances, cfg(core.Properties{PropTask: "import-in"}))
+		nome, tr, err := risolvi("j", instances, cfg(core.Properties{scheduler.PropTask: "import-in"}))
 		if err != nil || nome != "import-in" || tr == nil {
 			t.Fatalf("nome=%q tr=%v err=%v", nome, tr, err)
 		}
@@ -139,8 +139,8 @@ func TestRisolvi_NienteRipieghi(t *testing.T) {
 
 	t.Run("property mancante", func(t *testing.T) {
 		_, _, err := risolvi("j", instances, cfg(core.Properties{}))
-		if err == nil || !strings.Contains(err.Error(), PropTask) {
-			t.Fatalf("atteso un errore che nomini %q: %v", PropTask, err)
+		if err == nil || !strings.Contains(err.Error(), scheduler.PropTask) {
+			t.Fatalf("atteso un errore che nomini %q: %v", scheduler.PropTask, err)
 		}
 	})
 
@@ -154,7 +154,7 @@ func TestRisolvi_NienteRipieghi(t *testing.T) {
 	})
 
 	t.Run("task sconosciuto", func(t *testing.T) {
-		_, _, err := risolvi("j", instances, cfg(core.Properties{PropTask: "boh"}))
+		_, _, err := risolvi("j", instances, cfg(core.Properties{scheduler.PropTask: "boh"}))
 		if err == nil || !strings.Contains(err.Error(), "boh") {
 			t.Fatalf("atteso un errore che nomini il task: %v", err)
 		}

@@ -4,15 +4,9 @@ import (
 	"context"
 	"runtime/pprof"
 
-	"github.com/go-co-op/gocron/v2"
-)
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/batchmetrics"
 
-// Etichette pprof applicate alle goroutine del framework. Sono a bassa cardinalità
-// (nome e tipo del job, non gli id di esecuzione) perché il profilo raggruppa per
-// set di label.
-const (
-	LabelJob     = "batch_job"
-	LabelJobType = "batch_job_type"
+	"github.com/go-co-op/gocron/v2"
 )
 
 // LabeledTask costruisce la gocron.Task di un job type applicando le pprof label
@@ -29,7 +23,7 @@ const (
 func LabeledTask(name, jobType string, fn func() error) gocron.Task {
 	return gocron.NewTask(func() error {
 		var err error
-		pprof.Do(context.Background(), pprof.Labels(LabelJob, name, LabelJobType, jobType), func(context.Context) {
+		pprof.Do(context.Background(), pprof.Labels(batchmetrics.LabelJob, name, batchmetrics.LabelJobType, jobType), func(context.Context) {
 			err = fn()
 		})
 		return err

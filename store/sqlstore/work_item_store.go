@@ -3,7 +3,6 @@ package sqlstore
 import (
 	"context"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -44,23 +43,9 @@ func newWorkItemDataSQL(sqlService *coresql.Service) *workItemDataSQL {
 
 var _ store.IWorkItemStore = (*workItemDataSQL)(nil)
 
-// indiciAttesi sono gli indici su cui gira il sottosistema. Non vengono creati in automatico
-// (gestione manuale via EnsureIndexes o migration/ops): il warning rende l'eventuale assenza una
-// scelta consapevole, non una svista.
-//
-//   - uk_workitem_active — unico parziale: senza, InsertIfNotActive (ON CONFLICT DO NOTHING) NON
-//     deduplica e nascono work item doppi, con rischio di doppia esecuzione;
-//   - ix_workitem_claim / ix_workitem_orphan / ix_workitem_claim_dest — servono le query di
-//     ClaimPending e RecoverOrphans, eseguite da ogni job a OGNI tick. Senza, il claim fa una
-//     sequential scan: un costo che cresce con lo storico invece che col lavoro da fare.
-var indiciAttesi = []string{
-	"uk_workitem_active",
-	"ix_workitem_claim",
-	"ix_workitem_orphan",
-	"ix_workitem_claim_dest",
-}
-
-// warnIfIndexesMissing logga (una sola volta) gli indici attesi che non esistono.
+// warnIfIndexesMissing legge gli indici della tabella e delega a store.WarnMissingIndexes il
+// confronto con quelli attesi: l'elenco e il messaggio sono gli stessi dei due backend, qui resta
+// solo il modo di sapere cosa esiste. Una sola volta per processo (sync.Once).
 func (d *workItemDataSQL) warnIfIndexesMissing(ctx context.Context) {
 	d.idxWarnOnce.Do(func() {
 		var presenti []string
@@ -70,20 +55,7 @@ func (d *workItemDataSQL) warnIfIndexesMissing(ctx context.Context) {
 			log.Warn().Err(err).Msg("go-core-batch: impossibile verificare gli indici di work_items")
 			return
 		}
-		var mancanti []string
-		for _, nome := range indiciAttesi {
-			if !slices.Contains(presenti, nome) {
-				mancanti = append(mancanti, nome)
-			}
-		}
-		if len(mancanti) == 0 {
-			return
-		}
-		if slices.Contains(mancanti, "uk_workitem_active") {
-			log.Warn().Msg("go-core-batch: indice partiale unico 'uk_workitem_active' ASSENTE su work_items — InsertIfNotActive NON deduplica (rischio work item duplicati / doppia esecuzione)")
-		}
-		log.Warn().Strs("indici", mancanti).
-			Msg("go-core-batch: indici ASSENTI su work_items — il claim di ogni tick fa una sequential scan. Crearli via sqlstore.EnsureIndexes o migration, oppure confermare che l'assenza è voluta.")
+		store.WarnMissingIndexes(presenti, "sqlstore.EnsureIndexes")
 	})
 }
 
@@ -369,13 +341,20 @@ func (d *workItemDataSQL) Backlog(ctx context.Context, taskName, destination, ob
 }
 
 func (d *workItemDataSQL) List(ctx context.Context, taskName, status string, paging *page.Paging, sort page.SortRequest) ([]*store.WorkItem, *core.ApplicationError) {
-	q := d.DB.NewSelect().TableExpr(store.TableWorkItems).Where("task_name = ?", taskName)
-	if status != "" {
-		q = q.Where("status = ?", status)
+	// Il filtro si esprime una volta sola: la COUNT e la SELECT paginata devono guardare le
+	// stesse righe per costruzione. Erano due catene di Where scritte a mano — la prima mutata
+	// da ColumnExpr("COUNT(*)") e poi buttata, la seconda ricostruita da zero — quindi due
+	// posti in cui aggiungere un filtro, e uno da cui dimenticarlo.
+	filtrata := func() *bun.SelectQuery {
+		q := d.DB.NewSelect().TableExpr(store.TableWorkItems).Where("task_name = ?", taskName)
+		if status != "" {
+			q = q.Where("status = ?", status)
+		}
+		return q
 	}
 
 	var total int64
-	if err := q.ColumnExpr("COUNT(*)").Scan(ctx, &total); err != nil {
+	if err := filtrata().ColumnExpr("COUNT(*)").Scan(ctx, &total); err != nil {
 		return nil, errs.Tech(errs.CodeList).WithCause(err)
 	}
 	paging.SetTotalItems(total)
@@ -389,12 +368,7 @@ func (d *workItemDataSQL) List(ctx context.Context, taskName, status string, pag
 	if expr := strings.TrimPrefix(coresql.SortToSQL(sort), "ORDER BY "); expr != "" {
 		orderExpr = expr
 	}
-
-	q = d.DB.NewSelect().TableExpr(store.TableWorkItems).Where("task_name = ?", taskName).
-		OrderExpr(orderExpr)
-	if status != "" {
-		q = q.Where("status = ?", status)
-	}
+	q := filtrata().OrderExpr(orderExpr)
 	if offset >= 0 {
 		q = q.Offset(offset).Limit(paging.PageSize)
 	}
@@ -427,7 +401,14 @@ func EnsureIndexes(ctx context.Context, db *bun.DB) error {
 	`); err != nil {
 		return err
 	}
-	_, err := db.ExecContext(ctx, `
+	_, err := db.ExecContext(ctx, ensureIndexesDDL)
+	return err
+}
+
+// ensureIndexesDDL è il DDL degli indici, estratto in una costante perché ha due lettori:
+// EnsureIndexes che lo esegue e un test che verifica che crei tutti gli store.ExpectedIndexes —
+// cioè esattamente quelli che la verifica di avvio pretende di trovare.
+const ensureIndexesDDL = `
 		CREATE UNIQUE INDEX IF NOT EXISTS uk_workitem_active
 		ON work_items (task_name, object_id)
 		WHERE status IN ('PENDING', 'IN_PROGRESS');
@@ -443,6 +424,4 @@ func EnsureIndexes(ctx context.Context, db *bun.DB) error {
 		CREATE INDEX IF NOT EXISTS ix_workitem_claim_dest
 		ON work_items (task_name, status, destination, object_type, next_run_at)
 		WHERE status IN ('PENDING', 'IN_PROGRESS');
-	`)
-	return err
-}
+	`

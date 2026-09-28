@@ -48,7 +48,6 @@ import (
 	"uuid"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 
@@ -61,19 +60,20 @@ const JobType = "FeedTask"
 
 // Properties del job. Sono INFRASTRUTTURALI — le legge il framework, non il runner — come
 // quelle di ogni altro job type.
+//
+// `task` (su quale istanza accodare) e `destination` sono scheduler.PropTask /
+// scheduler.PropDestination: stesse chiavi, stesso YAML, una sola dichiarazione. Che il task
+// esista lo verifica già il wiring (task.check): è un riferimento esplicito come quello di
+// distributedjob e simplejob, e un nome sbagliato ferma l'avvio.
 const (
-	// PropTask è il nome dell'istanza di task su cui accodare, cioè una voce di `tasks:`.
-	// Che esista lo verifica già il wiring (task.check): è un riferimento esplicito come
-	// quello di distributedjob e simplejob, e un nome sbagliato ferma l'avvio.
-	PropTask = "task"
 	// PropObjectId è il WorkItem.ObjectId: identifica COSA accodare ed è la chiave su cui
 	// l'indice unico parziale impedisce il duplicato.
 	PropObjectId = "objectId"
-	// PropObjectType è il WorkItem.ObjectType, facoltativo.
+	// PropObjectType è il WorkItem.ObjectType, facoltativo. ATTENZIONE: il job
+	// NotificationKafka chiama `object` lo stesso filtro (kafkajob.PropObject) — due nomi in
+	// YAML per la stessa colonna, divergenza storica che unificare sarebbe un breaking change
+	// di configurazione.
 	PropObjectType = "objectType"
-	// PropDestination è il WorkItem.Destination, facoltativo: lo usano i consumatori che
-	// filtrano per destinazione (il claiming lo accetta come filtro).
-	PropDestination = "destination"
 	// PropPayload è il payload applicativo del work item, facoltativo. Copiato così com'è.
 	PropPayload = "payload"
 )
@@ -99,25 +99,19 @@ func makeFactory(items store.IWorkItemStore) scheduler.JobFactory {
 }
 
 func run(name string, items store.IWorkItemStore, config scheduler.Config) error {
-	p := config.Properties
+	p := scheduler.JobProps(name, config)
 
 	// Le due property obbligatorie si verificano PRIMA di toccare lo store: un errore di
 	// configurazione deve dire quale property manca, non presentarsi come un guasto del
 	// database. Vale anche quando lo store è irraggiungibile, che è il caso in cui la
 	// confusione costa di più.
-	if !p.Has(PropTask) {
-		return errs.Tech(errs.CodeJobProperties).
-			WithMessage("feedjob: property '" + PropTask + "' mancante: è il task su cui accodare")
+	taskName, err := p.RequiredString(scheduler.PropTask, "è il task su cui accodare")
+	if err != nil {
+		return err
 	}
-	taskName := p.GetString(PropTask, "")
-	if !p.Has(PropObjectId) {
-		return errs.Tech(errs.CodeJobProperties).
-			WithMessage("feedjob: property '" + PropObjectId + "' mancante: è l'oggetto da accodare")
-	}
-	objectId := p.GetString(PropObjectId, "")
-	if taskName == "" || objectId == "" {
-		return errs.Tech(errs.CodeJobProperties).
-			WithMessage("feedjob: '" + PropTask + "' e '" + PropObjectId + "' non possono essere vuote")
+	objectId, err := p.RequiredString(PropObjectId, "è l'oggetto da accodare")
+	if err != nil {
+		return err
 	}
 
 	// Convenzione unica (scheduler.Config.ResolveTimeouts): il tick di un feed è una insert,
@@ -131,13 +125,13 @@ func run(name string, items store.IWorkItemStore, config scheduler.Config) error
 		Id:          uuid.NewV7().String(),
 		TaskName:    taskName,
 		ObjectId:    objectId,
-		ObjectType:  p.GetString(PropObjectType, ""),
-		Destination: p.GetString(PropDestination, ""),
+		ObjectType:  p.String(PropObjectType, ""),
+		Destination: p.String(scheduler.PropDestination, ""),
 		Status:      store.StatusPending,
 		CreateTime:  now,
 		NextRunAt:   &now,
 	}
-	if v, ok := valoreGrezzo(p, PropPayload); ok {
+	if v, ok := valoreGrezzo(config.Properties, PropPayload); ok {
 		item.Payload = v
 	}
 

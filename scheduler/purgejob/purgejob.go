@@ -33,10 +33,8 @@ package purgejob
 
 import (
 	"context"
-	"fmt"
 	"time"
 
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 
@@ -55,8 +53,6 @@ const (
 	// PropOlderThan è l'età minima (durata) oltre la quale un item è cancellabile, misurata
 	// sull'update_time. Obbligatoria.
 	PropOlderThan = "older-than"
-	// PropLimit è il tetto di cancellazioni per tick.
-	PropLimit = "limit"
 	// PropTaskLogs, se true, cancella anche le righe di task_logs più vecchie di older-than.
 	PropTaskLogs = "task-logs"
 )
@@ -101,32 +97,19 @@ func makeFactory(items store.IWorkItemStore, data store.IData) scheduler.JobFact
 }
 
 func risolvi(name string, config scheduler.Config) (parametri, error) {
-	p := config.Properties
+	j := scheduler.JobProps(name, config)
 	var out parametri
-	if !p.Has(PropStatus) {
-		return out, errs.Tech(errs.CodeJobProperties).WithMessage(
-			fmt.Sprintf("purgejob: job %q senza la property %q: non si sa quali item cancellare", name, PropStatus))
+	var err error
+	if out.status, err = j.RequiredString(PropStatus, "non si sa quali item cancellare"); err != nil {
+		return out, err
 	}
-	out.status = p.GetString(PropStatus, "")
-	if out.status == "" {
-		return out, errs.Tech(errs.CodeJobProperties).WithMessage(
-			fmt.Sprintf("purgejob: job %q: la property %q è vuota", name, PropStatus))
+	if out.olderThan, err = j.RequiredPositiveDuration(PropOlderThan, "non si sa da quanto un item sia cancellabile"); err != nil {
+		return out, err
 	}
-	if !p.Has(PropOlderThan) {
-		return out, errs.Tech(errs.CodeJobProperties).WithMessage(
-			fmt.Sprintf("purgejob: job %q senza la property %q: non si sa da quanto un item sia cancellabile", name, PropOlderThan))
+	if out.limit, err = j.PositiveInt(scheduler.PropLimit, defaultLimit); err != nil {
+		return out, err
 	}
-	out.olderThan = p.GetDuration(PropOlderThan, 0)
-	if out.olderThan <= 0 {
-		return out, errs.Tech(errs.CodeJobProperties).WithMessage(
-			fmt.Sprintf("purgejob: job %q: la property %q non è una durata positiva: %v", name, PropOlderThan, p[PropOlderThan]))
-	}
-	out.limit = p.GetInt(PropLimit, defaultLimit)
-	if out.limit <= 0 {
-		return out, errs.Tech(errs.CodeJobProperties).WithMessage(
-			fmt.Sprintf("purgejob: job %q: la property %q non è un intero positivo: %v", name, PropLimit, p[PropLimit]))
-	}
-	out.taskLogs = p.GetBool(PropTaskLogs, false)
+	out.taskLogs = j.Bool(PropTaskLogs, false)
 	return out, nil
 }
 
