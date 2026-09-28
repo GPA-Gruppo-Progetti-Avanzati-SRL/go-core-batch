@@ -1,6 +1,6 @@
 // Package grpcdispatcher provides a gRPC-based ITaskDispatcher for distributed deployments.
 // Import this package only when the scheduler dispatches tasks to remote worker processes.
-// Single-instance deployments use *worker.Workers[T] directly via worker.DispatchTask.
+// Un deployment a processo singolo usa localdispatcher, che esegue in-process senza gRPC.
 package grpcdispatcher
 
 import (

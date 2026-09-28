@@ -30,9 +30,10 @@ type DispatchRequest struct {
 	Timeout time.Duration
 }
 
-// ITaskDispatcher routes a task to its executor.
-// Local mode: LocalDispatcher (o *worker.Workers[T]) lo implementa in-process.
-// Distributed mode: GrpcDispatcher lo implementa (client gRPC, processo separato).
+// ITaskDispatcher instrada una task verso chi la esegue. Le implementazioni sono due, e
+// nessun'altra: localdispatcher.LocalDispatcher (in-process, goroutine + semaforo) e
+// grpcdispatcher.GrpcDispatcher (client gRPC verso un processo worker). Il worker pool
+// (worker.Workers) NON è un dispatcher: sta dall'altra parte del filo, dietro grpchandler.
 type ITaskDispatcher interface {
 	DispatchTask(ctx context.Context, req DispatchRequest) error
 }

@@ -317,6 +317,9 @@ Le properties sono risolte **al boot**: un valore non convertibile o un `validat
 
 Cinque famiglie di job, ciascuna un modulo Fx self-contained che registra la propria `scheduler.JobRegistration` nel value group `batch_jobs` (via `scheduler.ProvideJob`). Condividono lo scheduler (gocron + **distributed job lock** pluggable, applicato a *ogni* job) e lo store `work_items`.
 
+Il dettaglio di come una lavorazione arriva dal cron al runner — scheduler, tick, dispatcher,
+worker pool — sta in **[Anatomia dell'esecuzione](#anatomia-dellesecuzione--scheduler-job-dispatcher-worker)**.
+
 Tre CONSUMANO workitem, una li PRODUCE e una li CANCELLA: `feedjob` e `purgejob` sono le due che non hanno runner, e si compongono con qualunque delle altre.
 
 | Famiglia | Job type / registrazione | Quando usarla |
@@ -365,12 +368,12 @@ flowchart TD
     MERGE([merge orphans + fresh]) --> DISPATCH
 
     subgraph DISPATCH["Fase 3 — Dispatch per ogni item"]
-        D{MuxRunner\nrouting per taskType}
-        D -- in-process --> LOCAL
-        D -- gRPC --> REMOTE
+        D{ITaskDispatcher}
+        D -- "in-process\n(localdispatcher)" --> LOCAL
+        D -- "gRPC\n(grpcdispatcher)" --> REMOTE
 
         subgraph LOCAL["LocalDispatcher"]
-            LS[IData.SetTaskStart] --> RUN["GetById → ITaskRunner.Run(ctx, item)\n→ store.ApplyResult(return)"]
+            LS[IData.SetTaskStart] --> RUN["MuxRunner: ITaskRunner.Run(ctx, item)\nl'item arriva INTERO dal claim\n→ store.ApplyResult(return)"]
             RUN -- "nil → MarkDone → DONE" --> LD[IData.SetTaskDone]
             RUN -- "store.ErrHandled → invariato\n(lifecycle gestito dal runner)" --> LD
             RUN -- "store.Retry → MarkPending\nnext_run_at=now+d · retry++ → PENDING" --> LP[IData.SetTaskInError]
@@ -378,7 +381,7 @@ flowchart TD
         end
 
         subgraph REMOTE["Worker remoto (gRPC)"]
-            WS[IData.SetTaskStart] --> WRUN["GetById → ITaskRunner.Run(ctx, item)\n→ store.ApplyResult(return)"]
+            WS[IData.SetTaskStart] --> WRUN["GetById(ObjectId): sul filo passa il solo Id\n→ ITaskRunner.Run(ctx, item)\n→ store.ApplyResult(return)"]
             WRUN -- "nil / ErrHandled → DONE" --> WD[IData.SetTaskDone]
             WRUN -- "store.Retry → MarkPending → PENDING" --> WP[IData.SetTaskInError]
             WRUN -- "err → MarkFailed → FAILED" --> WE[IData.SetTaskInError]
@@ -399,6 +402,337 @@ flowchart TD
 > Per un `MarkDone` **transazionale** (es. chiudere il corrente + inserire workitem figli in un'unica TX) il
 > runner inietta un `store.IWorkItemStore` via fx nella propria struct e ritorna `store.ErrHandled`, così il
 > framework non applica alcun `Mark*`.
+
+---
+
+## Anatomia dell'esecuzione — scheduler, job, dispatcher, worker
+
+Fra il cron che scatta e la business logic che gira ci sono cinque ruoli distinti. Tenerli
+separati è ciò che permette di cambiare **dove** un task viene eseguito senza toccarlo: un runner
+non sa se lo esegue il tick, una goroutine dello stesso processo o un worker dall'altra parte di una
+connessione gRPC.
+
+| Ruolo | Tipo | Che cosa fa | In quale processo |
+|---|---|---|---|
+| **Scheduler** | `scheduler.Scheduler` (gocron) | fa scattare i job al cron, tiene il lock di dedup fra repliche | scheduler modes |
+| **Job / tick** | `scheduler.ClaimingTick` | feed → recupero orfani → claim → *fase di elaborazione* | scheduler modes |
+| **Dispatcher** | `distributedjob.ITaskDispatcher` | consegna un item claimato a chi lo esegue | scheduler modes |
+| **Worker pool** | `worker.Workers[T]` + `worker/grpchandler` | riceve i task via gRPC e li esegue | worker modes |
+| **Runner** | `store.ITaskRunner` | la business logic | dove gira il dispatcher (local) o il pool (gRPC) |
+
+I modes sono quelli di `batch.WithSchedulerModes` / `batch.WithWorkerModes`: in un processo
+`MODE=API` non si costruisce né l'uno né l'altro, e i runner non vengono istanziati affatto (solo lo
+store resta wirato, così l'API può accodare workitem).
+
+### Le tre topologie
+
+```mermaid
+flowchart LR
+    subgraph T1["① SingleTask — un processo, niente dispatcher"]
+        S1[Scheduler] --> K1["tick: claim di 1 item"] --> R1["Runner eseguito\nDENTRO il tick"]
+    end
+    subgraph T2["② DistribuiteTask + localdispatcher — un processo"]
+        S2[Scheduler] --> K2["tick: claim di N item"] --> D2[LocalDispatcher] --> R2["Runner\nin goroutine"]
+    end
+    subgraph T3["③ DistribuiteTask + grpcdispatcher — due processi"]
+        S3[Scheduler] --> K3["tick: claim di N item"] --> D3[GrpcDispatcher]
+        D3 -. gRPC .-> W3["Worker pool"]
+        W3 --> R3[Runner]
+    end
+```
+
+Passare da ① a ② a ③ è una questione di `jobs[].type` e di quale `Module` si wira. Il runner —
+`Run(ctx, item) error` — è lo stesso, e si registra sempre con `runner.Register[T]` nel gruppo
+`batch_runners`: quel gruppo è letto dal `MuxRunner` (percorso in-process), dal bridge del worker
+gRPC e da `simplejob`, perché **registrare un task non dice da chi verrà eseguito**.
+
+---
+
+### Lo scheduler
+
+`newScheduler` costruisce gocron e **istanzia tutti i job all'avvio**, non al primo tick:
+
+- un `jobs[].type` che nessun modulo ha registrato **ferma l'avvio** (`job %q: type %q non
+  registrato`) — un'app non deve partire con dei job silenziosamente mancanti;
+- anche le property infrastrutturali del job sono risolte lì (`distributedjob.risolvi`,
+  `simplejob.risolvi`): un refuso in `properties.task` si vede all'avvio, quando c'è ancora
+  qualcuno che guarda, e poi a ogni tick come errore del job;
+- le `JobFactory` arrivano dal value group fx `batch_jobs`, quindi **l'ordine di registrazione dei
+  moduli è indifferente**: fx risolve tutti i contributori prima di costruire lo scheduler.
+
+L'espressione cron è parsata con `gocron.CronJob(expr, true)`: il campo dei **secondi** è abilitato,
+quindi sono ammesse sei posizioni (`*/5 * * * * *` = ogni 5 secondi) oltre alle cinque classiche.
+
+Due lock, entrambi da `corelock.Locker` via `scheduler/gocronlock`:
+
+| Opzione gocron | Effetto |
+|---|---|
+| `WithDistributedLocker` (scheduler) + `WithDistributedJobLocker` (ogni job) | fra **repliche**: a un dato tick un solo processo esegue quel job |
+| `WithSingletonMode(LimitModeReschedule)` — solo con `singleton: true` | dentro **un** processo: un tick non parte se il precedente dello stesso job non è finito |
+
+Il primo è un'ottimizzazione di dispatch-dedup, **non** il meccanismo di correttezza: quello è il
+claiming sul DB (vedi *Lock distribuito — ottimizzazione, non correttezza*).
+
+### Il tick — `scheduler.ClaimingTick`
+
+Il preambolo è uno solo per tutte le famiglie claim-based; cambia solo `Process`.
+
+```
+NewJobID(name)                  → id dell'esecuzione, in ogni log e in ogni riga di task_logs
+context.WithTimeout(RunTimeout) → il tetto dell'INTERO tick
+span OTel                       → jobName / jobType / jobId / taskName
+  Feed(ctx, jobID)              → opzionale: InsertIfNotActive da query DB o listing S3
+  store.ClaimBatch(...)         → RecoverOrphans (best-effort) + ClaimPending(limit)
+  Backlog                       → opzionale: gauge pending + età del più vecchio
+  Process(ctx, jobID, batch)    → LA SOLA PARTE SPECIFICA DELLA FAMIGLIA
+```
+
+Due finezze del claim che si notano solo quando servono: un errore del **recupero orfani** non
+ferma il tick, mentre un errore di `ClaimPending` sì — a meno che degli orfani siano già stati
+recuperati, nel qual caso si lavorano quelli, perché sono già `IN_PROGRESS` e lasciarli lì
+costerebbe un altro giro di orphan timeout. Il **backlog** si misura *dopo* il claim: ciò che resta
+è l'arretrato che questo tick non ha preso, che è esattamente il numero su cui si costruisce un
+alert.
+
+**`lock-timeout` governa due cose insieme** (`Config.ResolveTimeouts`): il timeout del context del
+tick (default 30s) e l'età oltre la quale un `IN_PROGRESS` è considerato orfano (default 10m).
+Sono lo stesso valore di proposito — l'orphan timeout è il tempo oltre il quale *un altro tick*
+ri-claima l'item, quindi è anche il tempo oltre il quale l'esecuzione in corso non deve più esistere.
+
+---
+
+### `SingleTask` — un item per tick, dentro il tick
+
+`simplejob` è la famiglia senza dispatcher: claima **un** item e lo esegue in linea, nella
+goroutine del tick.
+
+```yaml
+tasks:
+  - name: "hello-world"
+    type: "HelloWorld"
+    properties: { saluto: "ciao" }
+jobs:
+  - name: "hello-world"
+    type: "SingleTask"          # è un JOB type: quale task eseguire lo dice properties.task
+    cron: "*/5 * * * * *"
+    lock-timeout: 2m            # deadline dell'esecuzione E soglia di orphan
+    properties:
+      task: "hello-world"       # OBBLIGATORIA, nessun ripiego
+```
+
+- `properties.task` **non ha fallback**: prima, mancando, si eseguiva il task omonimo al job type,
+  ed era il punto in cui «cosa so fare» e «come lo eseguo» si confondevano — un refuso eseguiva in
+  silenzio qualcos'altro. Oggi è un errore.
+- `properties.limit` è letta **solo per avvisare che è ignorata**: un item per tick è ciò che il
+  nome promette. Prima il default era 100 e gli item venivano lavorati in serie dentro lo stesso
+  tick — un batch nascosto, sotto un unico `lock-timeout` valido per tutti insieme.
+- Il deadline del runner **è** quello del tick: un `Run` più lungo di `lock-timeout` riceve un
+  context cancellato.
+- **Non scrive `task_logs`** (nessun dispatch da tracciare, nessun processo remoto da correlare);
+  emette però le metriche di task (`ObserveTask`) e quelle di job (`JobProcessed`).
+
+Quando usarla: volumi bassi, lavorazioni che non vale la pena distribuire, oppure un job che
+"fa una cosa" a un'ora. Chi ha volumi usa `DistribuiteTask`.
+
+### `DistribuiteTask` — claim di molti, e consegna a qualcun altro
+
+`distributedjob` claima fino a `limit` item per tick e ne consegna **uno per uno** al dispatcher,
+senza attendere l'esito: la fase di elaborazione del tick è solo l'assegnazione.
+
+```yaml
+jobs:
+  - name: "import"
+    type: "DistribuiteTask"     # oppure DistribuiteTaskByQuery / DistribuiteTaskByS3File
+    cron: "0 * * * * *"
+    lock-timeout: 15m
+    properties:
+      task:  "import"           # OBBLIGATORIA — una voce di `tasks:`
+      limit: 100                # OBBLIGATORIA — quanti item per tick
+```
+
+Per ogni item: `taskId = <jobId>-task-<n>`, `DispatchTask(...)`, metrica
+`batch_task_assigned_total` e una riga di `task_logs` `ASSIGNED` (o `ASSIGNED_KO`). Le righe sono
+**accumulate e scritte in una sola `InsertTaskLogs`** a fine ciclo: erano un'insert sincrona per
+item, dentro il tick e quindi dentro il lock del job — con `limit: 100`, cento round-trip prima che
+il tick potesse chiudere.
+
+**Dispatch rifiutato ≠ item fallito.** Se `DispatchTask` ritorna errore (semaforo in-process
+esaurito, canale del worker pieno, worker irraggiungibile) il job chiama `IWorkItemStore.Release`:
+l'item torna `PENDING` con `next_run_at = now` e **`retry` invariato**, perché un tentativo che non
+è avvenuto non è un tentativo. Senza, resterebbe `IN_PROGRESS` fino all'orphan timeout e il
+recupero gli consumerebbe un ritentativo mai usato — con `max-retry` configurato, una saturazione
+temporanea esauriva il budget di item mai eseguiti.
+
+Il job **non** emette `batch_job_items_processed_total`: il dispatch è asincrono e l'esito non
+torna indietro. Il livello job è coperto da `batch_task_assigned_total`, che è *assegnazione* e non
+esecuzione; l'esito lo emette chi esegue.
+
+---
+
+### Il dispatch in-process — `localdispatcher`
+
+```go
+batch.Module(&cfg.Batch, Register,
+    batch.WithSchedulerModes(engine.Batch),
+    batch.WithStore(storemongo.Module),
+    batch.WithModule(localdispatcher.Module),   // niente gRPC, niente worker pool
+)
+```
+
+`LocalDispatcher.DispatchTask` **ritorna subito**: lancia una goroutine e ne traccia il ciclo di
+vita. Quattro cose che vale la pena sapere:
+
+1. **Il WorkItem non viene riletto.** `ClaimPending`/`RecoverOrphans` ritornano i record completi,
+   quindi la `DispatchRequest` porta l'`*store.WorkItem` intero fino al `MuxRunner`. La `GetById`
+   che c'era qui era una query per item buttata.
+2. **Il cap di concorrenza è derivato dalla config**: la somma dei `limit` dei job attivi, con un
+   pavimento di 100. Così il dispatcher assorbe per costruzione un giro completo di ogni job. Con
+   una costante, un `limit` più alto del cap faceva fallire sistematicamente una parte dei dispatch
+   a ogni tick — una configurazione che non poteva funzionare, senza che niente lo dicesse. Il
+   semaforo è **non bloccante**: a slot esauriti ritorna errore, e il job rilascia l'item.
+3. **La task è scollegata dal context del tick** (`context.WithoutCancel`) e riceve un deadline
+   proprio, che è `req.Timeout`, cioè **l'orphan timeout del job**. Non è una costante: oltre quella
+   soglia l'item viene ri-claimato da un altro tick, e lasciar proseguire la task significherebbe
+   averne due che lavorano lo stesso item. Il fencing token impedisce al perdente di *finalizzare*,
+   non di aver già prodotto i suoi effetti.
+4. **Su `OnStop` smette di accettare e drena** le task in volo fino al deadline del context di stop
+   di fx. Le residue vengono abbandonate: i loro item restano `IN_PROGRESS` e li recupera
+   `RecoverOrphans`.
+
+Il routing è del `MuxRunner`, per `item.TaskName`. Un nome senza runner registrato **non diventa un
+orphan-loop**: l'item viene subito `MarkFailed`, perché riprovare all'infinito un task che questo
+processo non sa eseguire non porta da nessuna parte. `MuxRunner.Run` è anche il punto che applica
+`store.ApplyResult` ed emette `ObserveTask` per questo percorso; le righe di `task_logs`
+(`SetTaskStart` / `SetTaskDone` / `SetTaskInError`) le scrive il dispatcher attorno.
+
+### Il dispatch via gRPC — `grpcdispatcher` + `worker/grpchandler`
+
+Due processi, lo **stesso database**: il worker chiude il lifecycle degli item che lo scheduler ha
+claimato, quindi deve vedere lo stesso `work_items`.
+
+```go
+// main.go — uno solo per i due ruoli: a decidere quale si costruisce è MODE
+batch.Module(&cfg.Batch, Register,
+    batch.WithSchedulerModes(engine.Scheduler),
+    batch.WithWorkerModes(engine.Worker),
+    batch.WithStore(storemongo.Module),
+    batch.WithModule(grpcdispatcher.Module),        // client gRPC
+    batch.WithWorkerModule(grpchandler.Module),     // server gRPC + worker pool
+)
+```
+
+Lo stesso binario serve i due ruoli: a decidere è `MODE`. `Register` è la stessa funzione e gira in
+entrambi i processi (è gate-ata sull'unione di scheduler e worker modes: in un `MODE=API` non gira
+affatto). L'insieme dei task istanziati è quello dei **referenziati** — dalla property `task` di un
+job o dalle `tasks` di un pool — ed è calcolato sull'**intera config**, non per ruolo: un task citato
+solo da `workers:` viene istanziato anche nel processo scheduler, e viceversa. Quel filtro serve a
+tenere fuori dal grafo i task dichiarati e mai usati, con le loro dipendenze; a decidere *chi esegue
+cosa* sono i modes e il routing del pool.
+
+**Sul filo passa il solo `Id`.** Il proto porta `JobId`, `TaskId`, `TaskName`, `ObjectId`: non il
+WorkItem, che il bridge lato worker ricarica con `GetById`. È l'unico percorso in cui la rilettura è
+necessaria, e resta.
+
+> **Divergenza nota fra i due percorsi**: `DispatchRequest.Timeout` **non attraversa il filo** — il
+> proto non ha un campo per portarlo. La task in-process ha come deadline l'orphan timeout del job;
+> quella sul worker non ha deadline, e il suo tetto è il processo che la ospita. Se l'orphan timeout
+> del job è più corto della lavorazione, sul percorso gRPC l'item viene ri-claimato mentre il worker
+> lavora ancora: il fencing token impedisce al perdente di finalizzare, ma i due effetti sono già
+> stati prodotti entrambi. Dimensionare `lock-timeout` sulla durata reale del task.
+
+Il percorso completo di un task, lato worker:
+
+```mermaid
+sequenceDiagram
+    participant J as Job (scheduler)
+    participant G as GrpcDispatcher
+    participant R as Router (worker)
+    participant C as canale del pool
+    participant W as worker.Run
+    participant DB as work_items
+    J->>G: DispatchTask(JobId, TaskId, TaskName, Item)
+    G->>R: gRPC DistribuiteTask(… ObjectId …)
+    R->>R: task type noto? canale esistente?
+    alt canale pieno o task ignoto
+        R-->>G: errore
+        G-->>J: errore → items.Release (retry invariato)
+    else accettato
+        R->>C: send non bloccante
+        R-->>G: OK + hostname
+        C->>W: il loop del pool preleva e lancia
+        W->>DB: GetById(ObjectId) → item intero
+        W->>W: ITaskRunner.Run(ctx, item)
+        W->>DB: store.ApplyResult → MarkDone / MarkPending / MarkFailed
+        W->>DB: task_logs DONE o ERROR
+    end
+```
+
+`worker.Run` è **l'unico punto** che finalizza il lifecycle sul percorso gRPC: applica
+`store.ApplyResult` con il token del claim e il `MaxRetry` dell'istanza di task, poi scrive la riga
+di `task_log` e le metriche. Un **task name sconosciuto** viene rifiutato già dal Router,
+prima di entrare in coda (errore al chiamante → `Release` lato scheduler); se uno ci finisce
+comunque, `worker.Run` lo tratta come un errore normale — recupera l'item con una `GetById` apposta
+e lo porta a `MarkFailed` — invece di lasciarlo `IN_PROGRESS` a ripresentarsi a ogni recupero
+orfani.
+
+Se il processo worker **muore** a metà lavorazione non succede niente di speciale: l'item resta
+`IN_PROGRESS`, e al tick successivo `RecoverOrphans` lo rimette in gioco incrementandone il `retry`.
+
+### Il worker pool — `worker.Workers[T]`
+
+Il pool esiste **solo** sul lato ricevente gRPC: il dispatch in-process non lo usa (quello ha il suo
+semaforo e le sue goroutine).
+
+```yaml
+workers:
+  - name: "import"        # nome del pool
+    size: 8               # capacità del canale E tetto di concorrenza
+    tasks: ["import", "import-massivo"]   # i NOMI delle istanze di `tasks:` servite dal pool
+  - name: "Default"       # pool di ripiego per i task non instradati altrove
+    size: 2
+    tasks: []
+```
+
+- `tasks` è anche ciò che rende un task **referenziato**, quindi istanziato: un task che nessun job
+  e nessun pool nomina resta dichiarato in `tasks:` ma non entra nel grafo, e le sue dipendenze
+  nemmeno. Il set è quello dell'intera config, non del singolo processo.
+- Un task il cui nome non compare in nessun pool finisce sul pool `"Default"`; se non esiste, il
+  dispatch viene rifiutato con `no worker channel for task type`.
+- `size` vale **due volte**: è la capacità del canale bufferizzato (quanti task possono attendere) e
+  la capacità del semaforo (quanti possono girare insieme). Un `size` minore di 1 viene corretto a 1
+  con un Warn.
+- La `send` sul canale è **non bloccante**: canale pieno = errore al chiamante = `Release`
+  dell'item lato scheduler. È la stessa back-pressure del semaforo in-process.
+- Su `OnStop` il pool chiude `StopChannel` e **drena le task in volo** fino al deadline dell'hook.
+  I canali dei task **non** vengono chiusi di proposito: i produttori (il Router gRPC) possono
+  ancora starci scrivendo, e una send su canale chiuso panica.
+- Le goroutine portano le label pprof `batch_worker` e `batch_task_name`, che da Go 1.27 compaiono
+  anche nei traceback.
+- Il pool **non installa un handler di segnale**: i segnali sono dell'applicazione (`core.Run`/fx) e
+  l'arresto arriva come `OnStop`. Un `signal.Notify` di libreria faceva uscire i worker *prima* di
+  `OnStop`, troncando a metà le task già partite.
+
+---
+
+### Chi fa cosa — riepilogo
+
+| | `SingleTask` | `DistribuiteTask` + local | `DistribuiteTask` + gRPC |
+|---|---|---|---|
+| Claim | tick | tick | tick (processo scheduler) |
+| Item per tick | 1 | fino a `limit` | fino a `limit` |
+| Dove gira il runner | dentro il tick | goroutine del dispatcher | goroutine del worker pool |
+| Rilettura del WorkItem | no | no | **sì** (sul filo passa il solo `Id`) |
+| Chi applica `ApplyResult` | `simplejob.esegui` | `runner.MuxRunner.Run` | `worker.Run` |
+| Righe di `task_logs` | nessuna | `ASSIGNED` + `DONE`/`ERROR` | `ASSIGNED` + `DONE`/`ERROR` |
+| Deadline dell'esecuzione | `lock-timeout` (context del tick) | orphan timeout, dalla `DispatchRequest` | nessuno dal filo: lo dà il processo worker |
+| Concorrenza | 1 | Σ dei `limit`, pavimento 100 | `size` del pool, × N processi |
+| Se non c'è capienza | non si presenta | `Release` dell'item | `Release` dell'item |
+| Scaling | — | verticale | orizzontale |
+| Dipendenze trascinate | nessuna | nessuna | `google.golang.org/grpc` |
+
+Il livello di dettaglio delle righe `DONE`/`ERROR` è governato da `batch.task-log`
+(`all` default | `errors` | `off`): sul percorso distribuito si scrivono tre righe per item, e su
+volumi alti è il primo posto dove guardare quando `task_logs` cresce.
 
 ---
 
@@ -880,46 +1214,55 @@ fx.Annotate(djmongostore.NewQueryDataMongo, fx.As(new(distributedjob.IQueryStore
 
 ## Worker distribuito (gRPC)
 
-Due processi separati: il **scheduler** dispatcha via gRPC, il **worker** riceve ed esegue.
-I runner si registrano con `runner.Provide()` identicamente al caso local — solo `Module()` cambia.
+> Il funzionamento è descritto in **[Anatomia dell'esecuzione](#anatomia-dellesecuzione--scheduler-job-dispatcher-worker)**
+> (dispatch via gRPC, worker pool, chi finalizza il lifecycle). Qui c'è solo il wiring.
 
-### Scheduler side (scheduler process)
-
-```go
-// app/batch/batch.go nel processo scheduler
-import "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/grpcdispatcher"
-
-func init() {
-    grpcdispatcher.Module()  // registra GrpcDispatcher — nessun runner locale
-}
-```
-
-### Worker side (worker process)
+Due ruoli — **scheduler** che dispatcha e **worker** che esegue — di norma serviti dallo **stesso
+binario**, con `MODE` a decidere quale dei due si costruisce:
 
 ```go
-// app/batch/batch.go nel processo worker
-import "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/worker/grpchandler"
+// main.go
+batch.Module(&svc.Batch, Register,
+    batch.WithSchedulerModes(engine.Scheduler),
+    batch.WithWorkerModes(engine.Worker),
+    batch.WithStore(storemongo.Module),           // obbligatorio, wirato in ogni mode
+    batch.WithModule(grpcdispatcher.Module),      // lato scheduler: client gRPC
+    batch.WithWorkerModule(grpchandler.Module),   // lato worker: server gRPC + pool
+)
 
-func init() {
-    grpchandler.Module()  // avvia gRPC server + worker pool con i runner registrati
-}
-
-// app/batch/miotask.go — identico al caso local
-func init() {
-    runner.Provide(newMioTaskRunner)
-}
+// Register è la STESSA funzione per i due ruoli: un task si registra una volta sola.
+func Register() { runner.Register[importRunner]("IMPORT") }
 ```
 
-Il worker deve connettersi allo stesso DB del scheduler per `IWorkItemStore` (`MarkDone`/`MarkFailed`).
+`Register` gira in entrambi i ruoli e istanzia i task **referenziati** dall'intera config — la
+property `task` di un job o le `tasks` di un pool. Un task dichiarato in `tasks:` che nessuno
+referenzia non entra nel grafo, e le sue dipendenze nemmeno; uno referenziato viene istanziato in
+tutti i processi in cui il batch è attivo, e a decidere chi lo esegue sono i modes e il routing del
+pool.
 
-### grpchandler.Module() — dipendenze Fx richieste
+I due processi devono vedere **lo stesso database**: è il worker a chiudere il lifecycle
+(`MarkDone`/`MarkFailed`) degli item che lo scheduler ha claimato.
 
-`grpchandler.Module()` richiede via Fx:
-- `store.IWorkItemStore`
-- `store.IData`
-- `*batchgrpc.Server`
-- `[]worker.Config` — pool sizes per task type (dalla config applicazione)
-- `[]*runner.TaskRunner` (gruppo `batch_runners`, popolato da `runner.Provide()`)
+```yaml
+grpc:
+  server: { port: 50051 }                        # letto nel processo worker
+  client: { target: "worker-svc:50051" }         # letto nel processo scheduler
+workers:
+  - name: "import"
+    size: 8
+    tasks: ["import"]
+```
+
+### Dipendenze fx di `grpchandler.Module()`
+
+Modes-only: i config non sono parametri, li inietta fx — `batch.Module` li fornisce con
+`core.Supply` della Config unificata, e nel wiring manuale li fornisce l'app **prima** della
+chiamata.
+
+- `[]worker.Config` — i pool (`workers:`)
+- `*grpctransport.Server` — costruito dal Module stesso da `grpc.server`
+- `store.IWorkItemStore`, `store.IData`
+- `[]*runner.TaskRunner` (gruppo `batch_runners`, popolato da `runner.Register[T]`/`runner.Provide`)
 
 ---
 
@@ -1148,7 +1491,7 @@ type IData interface {
 | **Concorrenza** | cap **derivato dalla config**: somma dei `limit` dei job attivi (pavimento 100) | `limit` item dispatchati, concorrenza controllata dal pool size |
 | **Scaling** | verticale (un processo) | orizzontale (N worker process × M goroutine) |
 | **Config pool** | non necessaria — il cap si dimensiona da sé sui `limit` | `[]worker.Config` per task type |
-| **Deadline della task** | l'orphan timeout del job (`lock-timeout`) | governato dal processo worker |
+| **Deadline della task** | l'orphan timeout del job (`lock-timeout`), portato dalla `DispatchRequest` | nessuno: `DispatchRequest.Timeout` **non attraversa il filo** (il proto non ha il campo) |
 | **Se il dispatch è rifiutato** | `Release` dell'item: PENDING subito, `retry` invariato | idem |
 
 In locale il cap di concorrenza è **derivato dalla config**: la somma dei `limit` dei job attivi,
@@ -1162,6 +1505,11 @@ Il **deadline** della task in-process è l'orphan timeout del job, non una costa
 soglia l'item viene ri-claimato da un altro tick, e lasciar proseguire la task qui significherebbe
 averne due che lavorano lo stesso item. Il fencing token impedisce al perdente di *finalizzare*,
 ma non di aver già prodotto i suoi effetti.
+
+Sul percorso gRPC quel deadline **non c'è**: se `lock-timeout` è più corto della lavorazione,
+l'item viene ri-claimato mentre il worker sta ancora lavorando. Il fencing token impedisce al
+perdente di *finalizzare*, ma i due effetti sono già stati prodotti entrambi — quindi `lock-timeout`
+va dimensionato sulla durata reale del task.
 
 In gRPC, `limit` e pool size sono dimensioni ortogonali: lo scheduler può claimare 100 item per tick mentre ogni worker process esegue al massimo M task in concorrenza, e si possono avere N worker process in parallelo.
 
