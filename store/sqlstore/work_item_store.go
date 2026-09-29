@@ -17,18 +17,10 @@ import (
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 )
 
-type workItemFilter struct {
-	Id          string   `col:"id"          op:"="  omitempty:"true"`
-	IdIn        []string `col:"id"          op:"IN" omitempty:"true"`
-	TaskName    string   `col:"task_name"   op:"="  omitempty:"true"`
-	Status      string   `col:"status"      op:"="  omitempty:"true"`
-	Destination string   `col:"destination" op:"="  omitempty:"true"`
-	ObjectType  string   `col:"object_type" op:"="  omitempty:"true"`
-}
-
-func (f workItemFilter) GetFilterTableName(ctx context.Context) string {
-	return store.TableWorkItems
-}
+// NOTA: qui c'era un `workItemFilter` gemello di quello di mongostore, e non aveva alcun lettore:
+// in questo backend ogni query costruisce il proprio WHERE con bun, compresa List. Restava in vita
+// perché dichiarava i filtri su destination/object_type, che nessuno passava; spariti quelli, è
+// sparito anche lui.
 
 // workItemDataSQL implements store.IWorkItemStore using a SQL database via bun.
 type workItemDataSQL struct {
@@ -62,7 +54,7 @@ func (d *workItemDataSQL) warnIfIndexesMissing(ctx context.Context) {
 // ClaimPending atomically selects up to limit PENDING items of taskName,
 // marks them IN_PROGRESS with locked_at = now, and returns the full records.
 // Uses SELECT FOR UPDATE SKIP LOCKED — safe across multiple replicas.
-func (d *workItemDataSQL) ClaimPending(ctx context.Context, taskName, destination, objectType string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemDataSQL) ClaimPending(ctx context.Context, taskName string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
 	// La verifica sta anche qui, e non solo su InsertIfNotActive: gli indici del claim servono a
 	// OGNI job, compresi quelli claim-only (DistribuiteTask, NotificationKafka) che un feed non
 	// ce l'hanno e quindi non passerebbero mai di là. È sync.Once: una sola lettura per processo.
@@ -75,14 +67,6 @@ func (d *workItemDataSQL) ClaimPending(ctx context.Context, taskName, destinatio
 		q := `SELECT * FROM work_items WHERE task_name = ? AND status = ?
 			  AND (next_run_at IS NULL OR next_run_at <= NOW())`
 		args := []any{taskName, store.StatusPending}
-		if destination != "" {
-			q += ` AND destination = ?`
-			args = append(args, destination)
-		}
-		if objectType != "" {
-			q += ` AND object_type = ?`
-			args = append(args, objectType)
-		}
 		q += ` ORDER BY next_run_at ASC NULLS FIRST, create_time ASC LIMIT ? FOR UPDATE SKIP LOCKED`
 		args = append(args, limit)
 		if err := tx.NewRaw(q, args...).Scan(ctx, &items); err != nil {
@@ -119,7 +103,7 @@ func (d *workItemDataSQL) ClaimPending(ctx context.Context, taskName, destinatio
 // refreshing locked_at to now and incrementing retry. Returns the items for
 // immediate processing — no reset to PENDING, no waiting for the next tick.
 // Uses a CTE with FOR UPDATE SKIP LOCKED so it is safe across replicas.
-func (d *workItemDataSQL) RecoverOrphans(ctx context.Context, taskName, destination, objectType string, maxAge time.Duration, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemDataSQL) RecoverOrphans(ctx context.Context, taskName string, maxAge time.Duration, limit int) ([]*store.WorkItem, *core.ApplicationError) {
 	cutoff := time.Now().Add(-maxAge)
 	now := time.Now()
 
@@ -128,14 +112,6 @@ func (d *workItemDataSQL) RecoverOrphans(ctx context.Context, taskName, destinat
 
 	where := `task_name = ? AND status = ? AND locked_at < ?`
 	args := []any{taskName, store.StatusInProgress, cutoff}
-	if destination != "" {
-		where += ` AND destination = ?`
-		args = append(args, destination)
-	}
-	if objectType != "" {
-		where += ` AND object_type = ?`
-		args = append(args, objectType)
-	}
 	args = append(args, limit, now, token, host, now)
 
 	var items []*store.WorkItem
@@ -203,6 +179,10 @@ func (d *workItemDataSQL) MarkFailed(ctx context.Context, id, token, reason stri
 	return nil
 }
 
+// L'`error` di un fallimento precedente viene AZZERATO: un item che torna PENDING è un item vivo,
+// e lasciargli addosso il motivo per cui l'ultimo tentativo non era riuscito fa leggere come
+// fallito qualcosa che è solo in attesa. Il motivo resta nella riga di task_logs.
+//
 // Release riporta a PENDING un item claimato ma mai eseguito (dispatch fallito), fenced dal
 // token e idempotente. È MarkPending meno l'incremento di retry: il tentativo non è avvenuto,
 // quindi non va contato. next_run_at = now, così il tick successivo lo riprende subito.
@@ -213,6 +193,7 @@ func (d *workItemDataSQL) Release(ctx context.Context, id, token string) *core.A
 		Set("locked_at = NULL").
 		Set("update_time = ?", now).
 		Set("next_run_at = ?", now).
+		Set("error = NULL").
 		Where("id = ? AND status = ? AND lock_token = ?", id, store.StatusInProgress, token).
 		Exec(ctx)
 	if err != nil {
@@ -225,6 +206,10 @@ func (d *workItemDataSQL) Release(ctx context.Context, id, token string) *core.A
 }
 
 // MarkPending resets a single IN_PROGRESS item back to PENDING for retry, fenced dal token (idempotente).
+//
+// L'`error` di un fallimento precedente viene AZZERATO: un item che torna PENDING è un item vivo,
+// e lasciargli addosso il motivo per cui l'ultimo tentativo non era riuscito fa leggere come
+// fallito qualcosa che è solo in attesa. Il motivo resta nella riga di task_logs.
 func (d *workItemDataSQL) MarkPending(ctx context.Context, id, token string, after time.Duration) *core.ApplicationError {
 	now := time.Now()
 	nextRunAt := now.Add(after)
@@ -235,6 +220,7 @@ func (d *workItemDataSQL) MarkPending(ctx context.Context, id, token string, aft
 		Set("executed_by = ?", store.Hostname()).
 		Set("retry = retry + 1").
 		Set("next_run_at = ?", nextRunAt).
+		Set("error = NULL").
 		Where("id = ? AND status = ? AND lock_token = ?", id, store.StatusInProgress, token).
 		Exec(ctx)
 	if err != nil {
@@ -317,17 +303,9 @@ func (d *workItemDataSQL) Purge(ctx context.Context, status string, olderThan ti
 }
 
 // Backlog conta i PENDING in attesa e ritorna la data di creazione del più vecchio.
-func (d *workItemDataSQL) Backlog(ctx context.Context, taskName, destination, objectType string) (int, time.Time, *core.ApplicationError) {
+func (d *workItemDataSQL) Backlog(ctx context.Context, taskName string) (int, time.Time, *core.ApplicationError) {
 	where := "task_name = ? AND status = ?"
 	args := []any{taskName, store.StatusPending}
-	if destination != "" {
-		where += " AND destination = ?"
-		args = append(args, destination)
-	}
-	if objectType != "" {
-		where += " AND object_type = ?"
-		args = append(args, objectType)
-	}
 	var row struct {
 		N      int        `bun:"n"`
 		Oldest *time.Time `bun:"oldest"`
@@ -391,10 +369,12 @@ func (d *workItemDataSQL) List(ctx context.Context, taskName, status string, pag
 //     (diverso da locked_by, che è di chi ha claimato, quando il dispatch passa per gRPC);
 //   - uk_workitem_active, unico parziale, che impedisce l'inserimento concorrente di item attivi
 //     duplicati per lo stesso (task_name, object_id);
-//   - ix_workitem_claim / ix_workitem_orphan / ix_workitem_claim_dest, che servono le query di
-//     claim e recupero orfani eseguite da ogni job a ogni tick. Sono parziali sugli stati attivi:
-//     gli item DONE/FAILED non vengono mai claimati, quindi tenerli fuori mantiene l'indice della
-//     dimensione del LAVORO e non dello storico.
+//   - ix_workitem_claim / ix_workitem_orphan, che servono le query di claim e recupero orfani
+//     eseguite da ogni job a ogni tick. Sono parziali sugli stati ATTIVI: gli item DONE/FAILED non
+//     vengono mai claimati, quindi tenerli fuori mantiene l'indice della dimensione del LAVORO e
+//     non dello storico;
+//   - ix_workitem_purge, che serve la query del job PurgeWorkItems ed è parziale sugli stati
+//     TERMINALI per la ragione speculare: la retention lavora solo lì.
 //
 // È Postgres-specifico (come il resto delle utility DDL del modulo). Su MySQL/SQLite le colonne
 // e gli indici vanno creati manualmente via migration.
@@ -431,7 +411,7 @@ const ensureIndexesDDL = `
 		ON work_items (task_name, status, locked_at)
 		WHERE status IN ('PENDING', 'IN_PROGRESS');
 
-		CREATE INDEX IF NOT EXISTS ix_workitem_claim_dest
-		ON work_items (task_name, status, destination, object_type, next_run_at)
-		WHERE status IN ('PENDING', 'IN_PROGRESS');
+		CREATE INDEX IF NOT EXISTS ix_workitem_purge
+		ON work_items (status, update_time)
+		WHERE status IN ('DONE', 'FAILED');
 	`

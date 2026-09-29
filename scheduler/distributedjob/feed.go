@@ -43,7 +43,6 @@ func (f *queryStoreFeed) Feed(ctx context.Context, taskName string, props core.P
 			Id:         uuid.NewV7().String(),
 			TaskName:   taskName,
 			ObjectId:   id,
-			ObjectType: props.GetString("objectType", ""),
 			Status:     store.StatusPending,
 			CreateTime: now,
 			NextRunAt:  &now,

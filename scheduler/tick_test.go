@@ -20,7 +20,7 @@ type fakeStore struct {
 	backlogHits int
 }
 
-func (f *fakeStore) ClaimPending(context.Context, string, string, string, int) ([]*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) ClaimPending(context.Context, string, int) ([]*store.WorkItem, *core.ApplicationError) {
 	if f.claimErr != nil {
 		return nil, f.claimErr
 	}
@@ -28,12 +28,12 @@ func (f *fakeStore) ClaimPending(context.Context, string, string, string, int) (
 	f.claim = nil
 	return out, nil
 }
-func (f *fakeStore) RecoverOrphans(context.Context, string, string, string, time.Duration, int) ([]*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) RecoverOrphans(context.Context, string, time.Duration, int) ([]*store.WorkItem, *core.ApplicationError) {
 	out := f.orphans
 	f.orphans = nil
 	return out, nil
 }
-func (f *fakeStore) Backlog(context.Context, string, string, string) (int, time.Time, *core.ApplicationError) {
+func (f *fakeStore) Backlog(context.Context, string) (int, time.Time, *core.ApplicationError) {
 	f.backlogHits++
 	return f.backlogN, f.backlogOld, nil
 }

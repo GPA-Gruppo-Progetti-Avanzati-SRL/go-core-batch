@@ -26,7 +26,6 @@
 //	    properties:
 //	      task: import-anagrafiche     # dove accodare (deve esistere in `tasks:`)
 //	      objectId: ANAGRAFICHE        # cosa accodare
-//	      objectType: anagrafica       # facoltativo
 //	      payload:                     # facoltativo
 //	        modalita: completa
 //
@@ -61,19 +60,13 @@ const JobType = "FeedTask"
 // Properties del job. Sono INFRASTRUTTURALI — le legge il framework, non il runner — come
 // quelle di ogni altro job type.
 //
-// `task` (su quale istanza accodare) e `destination` sono scheduler.PropTask /
-// scheduler.PropDestination: stesse chiavi, stesso YAML, una sola dichiarazione. Che il task
-// esista lo verifica già il wiring (task.check): è un riferimento esplicito come quello di
-// distributedjob e simplejob, e un nome sbagliato ferma l'avvio.
+// `task` (su quale istanza accodare) è scheduler.PropTask: stessa chiave, stesso YAML, una sola
+// dichiarazione. Che il task esista lo verifica già il wiring (task.check): è un riferimento
+// esplicito come quello di distributedjob e simplejob, e un nome sbagliato ferma l'avvio.
 const (
 	// PropObjectId è il WorkItem.ObjectId: identifica COSA accodare ed è la chiave su cui
 	// l'indice unico parziale impedisce il duplicato.
 	PropObjectId = "objectId"
-	// PropObjectType è il WorkItem.ObjectType, facoltativo. ATTENZIONE: il job
-	// NotificationKafka chiama `object` lo stesso filtro (kafkajob.PropObject) — due nomi in
-	// YAML per la stessa colonna, divergenza storica che unificare sarebbe un breaking change
-	// di configurazione.
-	PropObjectType = "objectType"
 	// PropPayload è il payload applicativo del work item, facoltativo. Copiato così com'è.
 	PropPayload = "payload"
 )
@@ -122,14 +115,12 @@ func run(name string, items store.IWorkItemStore, config scheduler.Config) error
 
 	now := time.Now()
 	item := &store.WorkItem{
-		Id:          uuid.NewV7().String(),
-		TaskName:    taskName,
-		ObjectId:    objectId,
-		ObjectType:  p.String(PropObjectType, ""),
-		Destination: p.String(scheduler.PropDestination, ""),
-		Status:      store.StatusPending,
-		CreateTime:  now,
-		NextRunAt:   &now,
+		Id:         uuid.NewV7().String(),
+		TaskName:   taskName,
+		ObjectId:   objectId,
+		Status:     store.StatusPending,
+		CreateTime: now,
+		NextRunAt:  &now,
 	}
 	if v, ok := valoreGrezzo(config.Properties, PropPayload); ok {
 		item.Payload = v

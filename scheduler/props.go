@@ -14,20 +14,19 @@ import (
 // come stringa nuda. Tre costanti per una chiave sono tre posti da cui può divergere.
 //
 // Restano locali al proprio package le property che un solo job type conosce (`older-than`,
-// `task-logs`, `topic`, `objectId`, `payload`, …).
+// `task-logs`, `topic`, `stream`, `objectId`, `payload`, …).
 //
-// NOTA su una divergenza VOLUTA che questa unificazione non tocca, perché cambierebbe la config:
-// il filtro sul WorkItem.ObjectType si chiama `object` nella voce di un NotificationKafka
-// (kafkajob.PropObject) e `objectType` in quella di un FeedTask (feedjob.PropObjectType). Sono la
-// stessa colonna con due nomi in YAML; unificarli è un breaking change di configurazione, non di
-// codice.
+// NOTA: qui c'erano anche `destination` e `objectType`, i due filtri di claim facoltativi che solo
+// NotificationKafka valorizzava — e che quel job chiamava `object` mentre FeedTask li chiamava
+// `objectType`, due nomi in YAML per la stessa colonna. Sono spariti insieme ai campi
+// WorkItem.Destination/ObjectType: la coda si nomina col solo `task` (per NotificationKafka,
+// `stream`), che è anche ciò su cui la deduplica di InsertIfNotActive si basa.
 const (
-	// PropTask nomina l'istanza di task su cui il job lavora: una voce di `tasks:`.
+	// PropTask nomina l'istanza di task su cui il job lavora: una voce di `tasks:`. È anche il
+	// WorkItem.TaskName degli item che il job claima.
 	PropTask = "task"
 	// PropLimit è il tetto al lavoro che un tick prende in carico.
 	PropLimit = "limit"
-	// PropDestination è il filtro sul WorkItem.Destination.
-	PropDestination = "destination"
 	// PropBacklogMetrics abilita le gauge di coda su un job claim-based. Di default sono spente:
 	// sono una query in più per tick, e la paga chi la vuole.
 	PropBacklogMetrics = "backlog-metrics"

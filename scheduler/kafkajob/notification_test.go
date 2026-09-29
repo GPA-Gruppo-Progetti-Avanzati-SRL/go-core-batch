@@ -11,6 +11,7 @@ import (
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/kafka"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-kafka/message"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
@@ -51,7 +52,7 @@ func TestPrepareRecordsBsonPayload(t *testing.T) {
 	}
 
 	for _, item := range []*store.WorkItem{mongoItem, sqlItem} {
-		valid, recs, invalid := prepareRecords([]*store.WorkItem{item})
+		valid, recs, invalid := prepareRecords([]*store.WorkItem{item}, "notifiche.topic")
 		if len(valid) != 1 || len(recs) != 1 || len(invalid) != 0 {
 			t.Fatalf("[%s] atteso 1 record: valid=%d recs=%d invalid=%d (payload scartato?)", item.Id, len(valid), len(recs), len(invalid))
 		}
@@ -99,7 +100,7 @@ func TestPrepareRecords_UnPayloadRottoNonAffondaGliAltri(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			valid, recs, invalid := prepareRecords([]*store.WorkItem{tc.item, buono})
+			valid, recs, invalid := prepareRecords([]*store.WorkItem{tc.item, buono}, "notifiche.topic")
 			if len(recs) != 1 || len(valid) != 1 || valid[0].Id != "ok" {
 				t.Fatalf("l'item valido non è passato: valid=%v recs=%d", valid, len(recs))
 			}
@@ -137,13 +138,21 @@ type fakeStore struct {
 	done    map[string][]string // token -> ids, per verificare il raggruppamento
 	pending []string
 	failed  []string
+	reasons map[string]string // id -> motivo passato a MarkFailed
+	// claimedTask/recoveredTask registrano la CODA su cui il job ha claimato: è il binding fra
+	// `properties.stream` e WorkItem.TaskName, che prima nessun test guardava perché il fake
+	// scartava i propri argomenti.
+	claimedTask   string
+	recoveredTask string
 }
 
-func (f *fakeStore) RecoverOrphans(context.Context, string, string, string, time.Duration, int) ([]*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) RecoverOrphans(_ context.Context, taskName string, _ time.Duration, _ int) ([]*store.WorkItem, *core.ApplicationError) {
+	f.recoveredTask = taskName
 	return nil, nil
 }
 
-func (f *fakeStore) ClaimPending(context.Context, string, string, string, int) ([]*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) ClaimPending(_ context.Context, taskName string, _ int) ([]*store.WorkItem, *core.ApplicationError) {
+	f.claimedTask = taskName
 	return f.claim, nil
 }
 
@@ -155,8 +164,12 @@ func (f *fakeStore) MarkDone(_ context.Context, ids []string, token string) *cor
 	return nil
 }
 
-func (f *fakeStore) MarkFailed(_ context.Context, id, _, _ string) *core.ApplicationError {
+func (f *fakeStore) MarkFailed(_ context.Context, id, _, reason string) *core.ApplicationError {
 	f.failed = append(f.failed, id)
+	if f.reasons == nil {
+		f.reasons = map[string]string{}
+	}
+	f.reasons[id] = reason
 	return nil
 }
 
@@ -169,9 +182,8 @@ func notificaConfig() scheduler.Config {
 	return scheduler.Config{
 		Type: JobType,
 		Properties: core.Properties{
-			"destination": "edwh",
-			"object":      "ricarica",
-			"topic":       "notifiche.topic",
+			"stream": "notifiche-edwh",
+			"topic":  "notifiche.topic",
 		},
 	}
 }
@@ -255,6 +267,7 @@ func TestChiaviDelPayload_CoincidonoCoiTagDiMessage(t *testing.T) {
 		"MessageKey":    kafka.KeyMessageKey,
 		"MessageValue":  kafka.KeyMessageValue,
 		"MessageHeader": kafka.KeyMessageHeaders,
+		"Topic":         kafka.KeyTopic,
 	}
 	tipo := reflect.TypeFor[kafka.Message]()
 	if tipo.NumField() != len(atteso) {
@@ -272,5 +285,163 @@ func TestChiaviDelPayload_CoincidonoCoiTagDiMessage(t *testing.T) {
 			t.Errorf("campo %s: tag json %q, costante %q — il job leggerebbe una chiave che non esiste",
 				f.Name, tag, chiave)
 		}
+	}
+}
+
+// Il claim gira sulla CODA nominata da `properties.stream`, non sul job type. È il binding che
+// rende la deduplica per-flusso: uk_workitem_active è unico su (task_name, object_id), quindi
+// finché task_name era la costante "NotificationKafka" due flussi diversi sullo stesso objectId
+// collidevano e InsertIfNotActive scartava il secondo in silenzio.
+func TestNotificationJobRun_ClaimaLaCodaDelloStream(t *testing.T) {
+	st := &fakeStore{claim: []*store.WorkItem{wi("a", "tok-1", payload("a"))}}
+	if err := notificationJobRun("notifica", &fakeProducer{}, st, notificaConfig()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if st.claimedTask != "notifiche-edwh" || st.recoveredTask != "notifiche-edwh" {
+		t.Errorf("claim su %q / recover su %q, atteso %q — il job non sta usando properties.stream",
+			st.claimedTask, st.recoveredTask, "notifiche-edwh")
+	}
+	if st.claimedTask == JobType {
+		t.Errorf("il claim usa ancora il job type come coda")
+	}
+}
+
+// `stream` è obbligatoria: senza, il job non sa quale coda drenare e non c'è default sensato —
+// il vecchio default implicito (il job type) è esattamente ciò che collassava i flussi.
+func TestRisolvi_StreamObbligatoria(t *testing.T) {
+	_, err := risolvi("notifica", scheduler.Config{
+		Type:       JobType,
+		Properties: core.Properties{"topic": "notifiche.topic"},
+	})
+	if err == nil || !strings.Contains(err.Error(), PropStream) {
+		t.Fatalf("errore = %v, atteso un messaggio che nomini %q", err, PropStream)
+	}
+}
+
+// Il topic dell'item VINCE sul default del job: è ciò che permette a un solo job di drenare un
+// flusso verso topic diversi. ProduceTo stampa il default sui soli record che non ne portano uno.
+func TestToRecord_IlTopicDellItemVinceSulDefault(t *testing.T) {
+	conProprio := map[string]any{
+		"messageKey": "k", "messageValue": map[string]any{"a": 1}, "topic": "topic.suo",
+	}
+	rec, err := toRecord(wi("x", "tok", conProprio), "topic.default")
+	if err != nil {
+		t.Fatalf("toRecord: %v", err)
+	}
+	if rec.Topic != "topic.suo" {
+		t.Errorf("topic = %q, atteso quello dell'item", rec.Topic)
+	}
+
+	// Senza topic sull'item il record resta senza: lo stampa ProduceTo dal default del job.
+	rec, err = toRecord(wi("y", "tok", payload("y")), "topic.default")
+	if err != nil {
+		t.Fatalf("toRecord: %v", err)
+	}
+	if rec.Topic != "" {
+		t.Errorf("topic = %q, atteso vuoto (lo mette ProduceTo)", rec.Topic)
+	}
+}
+
+// Nessun topic da nessuna delle due parti = nessuna destinazione. È un difetto deterministico di
+// QUEL payload, quindi l'item fallisce da solo e gli altri del batch passano — non una Produce su
+// topic vuoto, che sarebbe un errore di tutto il tick.
+func TestPublishBatch_SenzaTopicLItemFallisceDaSolo(t *testing.T) {
+	senzaTopic := wi("orfano", "tok-1", payload("orfano"))
+	conTopic := wi("buono", "tok-1", map[string]any{
+		"messageKey": "k", "messageValue": map[string]any{"a": 1}, "topic": "topic.suo",
+	})
+	st := &fakeStore{claim: []*store.WorkItem{senzaTopic, conTopic}}
+	prod := &fakeProducer{}
+
+	cfg := scheduler.Config{Type: JobType, Properties: core.Properties{"stream": "notifiche-edwh"}}
+	if err := notificationJobRun("notifica", prod, st, cfg); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(st.failed) != 1 || st.failed[0] != "orfano" {
+		t.Fatalf("falliti = %v, atteso il solo item senza topic", st.failed)
+	}
+	if len(prod.sent) != 1 || prod.sent[0].Topic != "topic.suo" {
+		t.Fatalf("prodotti %d record, atteso il solo item col proprio topic", len(prod.sent))
+	}
+}
+
+// Il tetto ai ritentativi si applica al batch APPENA CLAIMATO, che è l'unico punto in cui copre
+// anche il percorso degli orfani: RecoverOrphans incrementa `retry` senza passare dal job, quindi
+// un item la cui produzione non riesce mai veniva ri-claimato per sempre, occupando uno slot del
+// `limit` a ogni tick.
+func TestPublishBatch_MaxRetryEsaurito(t *testing.T) {
+	esaurito := wi("vecchio", "tok-1", payload("vecchio"))
+	esaurito.Retry = 3
+	sotto := wi("giovane", "tok-1", payload("giovane"))
+	sotto.Retry = 2
+	st := &fakeStore{claim: []*store.WorkItem{esaurito, sotto}}
+	prod := &fakeProducer{}
+
+	cfg := notificaConfig()
+	cfg.Properties[PropMaxRetry] = 3
+	if err := notificationJobRun("notifica", prod, st, cfg); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(st.failed) != 1 || st.failed[0] != "vecchio" {
+		t.Fatalf("falliti = %v, atteso il solo item oltre il tetto", st.failed)
+	}
+	if !strings.Contains(st.reasons["vecchio"], "max-retry") {
+		t.Errorf("motivo = %q, deve nominare il tetto", st.reasons["vecchio"])
+	}
+	if len(prod.sent) != 1 || len(st.done["tok-1"]) != 1 || st.done["tok-1"][0] != "giovane" {
+		t.Fatalf("pubblicati %d record, done=%v — atteso il solo item entro il tetto", len(prod.sent), st.done)
+	}
+}
+
+// Assente = illimitato, che è la condotta storica e quella di task.Config.MaxRetry: chi aggiorna
+// la libreria senza toccare la config non deve vedere item andare in FAILED.
+func TestPublishBatch_SenzaMaxRetryNessunTetto(t *testing.T) {
+	vecchio := wi("vecchio", "tok-1", payload("vecchio"))
+	vecchio.Retry = 99
+	st := &fakeStore{claim: []*store.WorkItem{vecchio}}
+	prod := &fakeProducer{}
+
+	if err := notificationJobRun("notifica", prod, st, notificaConfig()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(st.failed) != 0 || len(prod.sent) != 1 {
+		t.Fatalf("falliti = %v, prodotti = %d — senza la property il tetto non esiste", st.failed, len(prod.sent))
+	}
+}
+
+// Un max-retry scritto male deve fermare l'avvio, non ricadere in silenzio sull'illimitato: è la
+// stessa regola di `limit` (scheduler.Props.PositiveInt).
+func TestRisolvi_MaxRetryNonValido(t *testing.T) {
+	cfg := notificaConfig()
+	cfg.Properties[PropMaxRetry] = "tre"
+	if _, err := risolvi("notifica", cfg); err == nil || !strings.Contains(err.Error(), PropMaxRetry) {
+		t.Fatalf("errore = %v, atteso un messaggio che nomini %q", err, PropMaxRetry)
+	}
+}
+
+// -1 è la scrittura ESPLICITA dell'illimitato, la stessa di task.Config.MaxRetry: rifiutarla
+// sarebbe una trappola per chi copia la convenzione dalla sezione `tasks:`.
+func TestRisolvi_MaxRetryMenoUnoEIllimitato(t *testing.T) {
+	cfg := notificaConfig()
+	cfg.Properties[PropMaxRetry] = -1
+	p, err := risolvi("notifica", cfg)
+	if err != nil {
+		t.Fatalf("risolvi: %v", err)
+	}
+	if p.maxRetry != task.MaxRetryUnlimited {
+		t.Errorf("maxRetry = %d, atteso %d", p.maxRetry, task.MaxRetryUnlimited)
+	}
+}
+
+// max-retry: 0 significa "nessun ritentativo", non "assente": il primo fallimento è definitivo.
+func TestRisolvi_MaxRetryZeroNonEAssente(t *testing.T) {
+	cfg := notificaConfig()
+	cfg.Properties[PropMaxRetry] = 0
+	p, err := risolvi("notifica", cfg)
+	if err != nil {
+		t.Fatalf("risolvi: %v", err)
+	}
+	if p.maxRetry != 0 {
+		t.Errorf("maxRetry = %d, atteso 0", p.maxRetry)
 	}
 }

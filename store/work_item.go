@@ -16,21 +16,32 @@ const (
 
 // WorkItem is the generic unit-of-work document.
 // Implements both mongo.ICollection and coresql.IRecord so either backend can persist it.
-// Job-specific data goes in Payload; Destination is a routing hint (e.g. Kafka topic, worker type).
+//
+// I dati specifici del lavoro stanno in Payload. L'UNICA chiave di instradamento è TaskName: ci
+// filtra il claiming, ci instrada il MuxRunner, ci si distingue una coda dall'altra e ci si
+// deduplica insieme a ObjectId. Non ce ne sono altre — c'erano Destination e ObjectType, due
+// filtri di claim facoltativi che nessun runner, dispatcher o worker leggeva mai: esistevano solo
+// perché il job NotificationKafka sprecava il proprio TaskName su una costante, e sono spariti
+// quando quel job ha cominciato a nominare il flusso che drena.
 type WorkItem struct {
 	Id string `bson:"_id"                       bun:"id,pk"`
-	// TaskName è il NOME dell'istanza di task che deve eseguire l'item — la voce di `tasks:`
-	// referenziata dal job (`properties.task`) o elencata da un worker pool (`workers[].tasks`).
-	// Non è un "tipo": ci filtra il claiming (ClaimPending/RecoverOrphans) e ci instrada il
-	// MuxRunner via TaskRunner.TaskName.
-	TaskName    string     `bson:"taskName"                  bun:"task_name"`
-	ObjectId    string     `bson:"objectId"                  bun:"object_id"`
-	ObjectType  string     `bson:"objectType"                bun:"object_type"`
-	Destination string     `bson:"destination"               bun:"destination"`
-	Payload     any        `bson:"payload"                   bun:"payload,type:jsonb"`
-	Status      string     `bson:"status"                    bun:"status"`
-	CreateTime  time.Time  `bson:"createTime"                bun:"create_time"`
-	UpdateTime  *time.Time `bson:"updateTime,omitempty"      bun:"update_time,nullzero"`
+	// TaskName è il nome della CODA a cui l'item appartiene, cioè ciò che un job claima. Per i job
+	// che eseguono un runner è il NOME dell'istanza di task — la voce di `tasks:` referenziata dal
+	// job (`properties.task`) o elencata da un worker pool (`workers[].tasks`) — e ci instrada il
+	// MuxRunner via TaskRunner.TaskName; per NotificationKafka, che un runner non ce l'ha, è il
+	// nome del flusso di notifiche (`properties.stream`).
+	//
+	// Non è un "tipo": ci filtra il claiming (ClaimPending/RecoverOrphans) e, con ObjectId, è la
+	// chiave dell'indice unico che deduplica gli accodamenti.
+	TaskName string `bson:"taskName"                  bun:"task_name"`
+	// ObjectId identifica l'OGGETTO di dominio su cui si lavora, ed è la seconda metà della chiave
+	// di deduplica: uk_workitem_active è unico su (task_name, object_id) per i soli stati attivi,
+	// quindi InsertIfNotActive non accoda un secondo item finché il primo non è finito.
+	ObjectId   string     `bson:"objectId"                  bun:"object_id"`
+	Payload    any        `bson:"payload"                   bun:"payload,type:jsonb"`
+	Status     string     `bson:"status"                    bun:"status"`
+	CreateTime time.Time  `bson:"createTime"                bun:"create_time"`
+	UpdateTime *time.Time `bson:"updateTime,omitempty"      bun:"update_time,nullzero"`
 	// LockedAt è l'istante del claim, ed è IL SEGNALE che l'item è in carico a qualcuno: i Mark* e
 	// Release lo azzerano, ed è l'unico dei tre campi di lock che azzerano. Un item è "sotto lock"
 	// quando Status è IN_PROGRESS e LockedAt non è nullo — non quando LockedBy è valorizzato.

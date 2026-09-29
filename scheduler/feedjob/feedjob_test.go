@@ -44,11 +44,9 @@ func TestCreaIlWorkItem(t *testing.T) {
 	payload := map[string]any{"modalita": "completa", "tentativi": 3}
 
 	err := run("feed-test", st, config(core.Properties{
-		scheduler.PropTask:        "import-anagrafiche",
-		PropObjectId:              "ANAGRAFICHE",
-		PropObjectType:            "anagrafica",
-		scheduler.PropDestination: "milano",
-		PropPayload:               payload,
+		scheduler.PropTask: "import-anagrafiche",
+		PropObjectId:       "ANAGRAFICHE",
+		PropPayload:        payload,
 	}))
 	if err != nil {
 		t.Fatalf("errore inatteso: %v", err)
@@ -60,9 +58,6 @@ func TestCreaIlWorkItem(t *testing.T) {
 	wi := st.inserted[0]
 	if wi.TaskName != "import-anagrafiche" || wi.ObjectId != "ANAGRAFICHE" {
 		t.Errorf("task %q, objectId %q", wi.TaskName, wi.ObjectId)
-	}
-	if wi.ObjectType != "anagrafica" || wi.Destination != "milano" {
-		t.Errorf("objectType %q, destination %q", wi.ObjectType, wi.Destination)
 	}
 	if wi.Status != store.StatusPending {
 		t.Errorf("stato = %q, atteso %q", wi.Status, store.StatusPending)
@@ -108,16 +103,15 @@ func TestPropertyConChiaviAbbassate(t *testing.T) {
 	st := &storeFake{}
 
 	if err := run("feed-test", st, config(core.Properties{
-		"task":       "import-anagrafiche",
-		"objectid":   "ANAGRAFICHE",
-		"objecttype": "anagrafica",
-		"payload":    map[string]any{"modalita": "completa"},
+		"task":     "import-anagrafiche",
+		"objectid": "ANAGRAFICHE",
+		"payload":  map[string]any{"modalita": "completa"},
 	})); err != nil {
 		t.Fatalf("errore inatteso: %v", err)
 	}
 
 	wi := st.inserted[0]
-	if wi.ObjectId != "ANAGRAFICHE" || wi.ObjectType != "anagrafica" || wi.Payload == nil {
+	if wi.ObjectId != "ANAGRAFICHE" || wi.Payload == nil {
 		t.Errorf("work item = %+v", wi)
 	}
 }

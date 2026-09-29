@@ -37,9 +37,12 @@ func TestActiveSet_ExplicitReferences(t *testing.T) {
 
 // Un job type del framework non nomina alcun task: finisce fra i dedotti, non fra gli espliciti,
 // altrimenti l'avvio fallirebbe pretendendo una voce `tasks:` di nome NotificationKafka.
+//
+// È l'invariante per cui NotificationKafka nomina la propria coda con `stream` e non con `task`:
+// `task` è un riferimento ESPLICITO, e una notifica un runner da dichiarare non ce l'ha.
 func TestActiveSet_FrameworkJobTypeIsNotAnExplicitReference(t *testing.T) {
 	a := ActiveSet(&Config{JobsConfig: []scheduler.Config{
-		job("NotificationKafka", core.Properties{"topic": "eventi", "destination": "BACHECA"}),
+		job("NotificationKafka", core.Properties{"topic": "eventi", "stream": "notifiche-bacheca"}),
 	}})
 	if len(a.Referenced) != 0 {
 		t.Fatalf("un job type del framework non è un riferimento esplicito: %v", a.Referenced)

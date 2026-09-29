@@ -24,7 +24,7 @@ type metricsStore struct {
 
 // ClaimPending rispetta il limit, perché è ciò che il test deve poter osservare: SingleTask ne
 // chiede UNO per tick, e un fake che li consegnasse tutti nasconderebbe una regressione.
-func (s *metricsStore) ClaimPending(_ context.Context, _, _, _ string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+func (s *metricsStore) ClaimPending(_ context.Context, _ string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
 	if limit > len(s.pending) {
 		limit = len(s.pending)
 	}
@@ -32,7 +32,7 @@ func (s *metricsStore) ClaimPending(_ context.Context, _, _, _ string, limit int
 	s.pending = s.pending[limit:]
 	return out, nil
 }
-func (s *metricsStore) RecoverOrphans(context.Context, string, string, string, time.Duration, int) ([]*store.WorkItem, *core.ApplicationError) {
+func (s *metricsStore) RecoverOrphans(context.Context, string, time.Duration, int) ([]*store.WorkItem, *core.ApplicationError) {
 	return nil, nil
 }
 func (s *metricsStore) MarkDone(context.Context, []string, string) *core.ApplicationError { return nil }
@@ -49,7 +49,7 @@ func (s *metricsStore) Release(context.Context, string, string) *core.Applicatio
 func (s *metricsStore) Purge(context.Context, string, time.Time, int) (int, *core.ApplicationError) {
 	return 0, nil
 }
-func (s *metricsStore) Backlog(context.Context, string, string, string) (int, time.Time, *core.ApplicationError) {
+func (s *metricsStore) Backlog(context.Context, string) (int, time.Time, *core.ApplicationError) {
 	return 0, time.Time{}, nil
 }
 func (s *metricsStore) Insert(context.Context, []*store.WorkItem) *core.ApplicationError { return nil }

@@ -45,13 +45,13 @@ func (f *fakeStore) Release(context.Context, string, string) *core.ApplicationEr
 func (f *fakeStore) Purge(context.Context, string, time.Time, int) (int, *core.ApplicationError) {
 	return 0, nil
 }
-func (f *fakeStore) Backlog(context.Context, string, string, string) (int, time.Time, *core.ApplicationError) {
+func (f *fakeStore) Backlog(context.Context, string) (int, time.Time, *core.ApplicationError) {
 	return 0, time.Time{}, nil
 }
-func (f *fakeStore) ClaimPending(context.Context, string, string, string, int) ([]*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) ClaimPending(context.Context, string, int) ([]*store.WorkItem, *core.ApplicationError) {
 	return nil, nil
 }
-func (f *fakeStore) RecoverOrphans(context.Context, string, string, string, time.Duration, int) ([]*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) RecoverOrphans(context.Context, string, time.Duration, int) ([]*store.WorkItem, *core.ApplicationError) {
 	return nil, nil
 }
 func (f *fakeStore) Insert(context.Context, []*store.WorkItem) *core.ApplicationError { return nil }

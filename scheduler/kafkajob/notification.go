@@ -11,6 +11,7 @@ import (
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/kafka"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-kafka/message"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-kafka/producer"
 
@@ -20,24 +21,42 @@ import (
 
 const defaultKafkaLimit = 100
 
-// Properties infrastrutturali del job.
-//
-// Il filtro sulla destinazione e il tetto per tick sono scheduler.PropDestination /
-// scheduler.PropLimit: stesse chiavi degli altri job type.
+// Properties infrastrutturali del job. Il tetto per tick è scheduler.PropLimit: stessa chiave
+// degli altri job type.
 const (
-	// PropObject è il filtro sul WorkItem.ObjectType. ATTENZIONE: il job FeedTask chiama
-	// `objectType` lo stesso campo (feedjob.PropObjectType) — due nomi in YAML per la stessa
-	// colonna, divergenza storica che unificare sarebbe un breaking change di configurazione.
-	PropObject = "object"
-	// PropTopic è il topic su cui pubblicare.
+	// PropStream nomina il FLUSSO di notifiche che questo job drena, e finisce in
+	// WorkItem.TaskName: è la coda che il claim filtra e, insieme a ObjectId, la chiave su cui
+	// l'indice unico parziale deduplica gli accodamenti.
+	//
+	// Non si chiama `task` di proposito. `task` è un riferimento ESPLICITO a una voce di `tasks:`
+	// (batch.ActiveSet lo mette in Referenced, e task.check pretende che esista), mentre una
+	// notifica non ha un runner da configurare: pretenderne la dichiarazione sarebbe un falso
+	// positivo. Con `stream` il job type resta fra gli Implied, che non sono validati.
+	//
+	// Prima il claim girava su TaskName = "NotificationKafka", uguale per OGNI notifica dell'app:
+	// per distinguere i flussi servivano due filtri in più (`destination` e `object`, spariti con
+	// questa property) e la deduplica finiva in un namespace unico — due flussi diversi sullo
+	// stesso objectId collidevano, e InsertIfNotActive scartava il secondo in silenzio.
+	PropStream = "stream"
+	// PropTopic è il topic di DEFAULT su cui pubblicare: vale per i record che non ne portano uno
+	// proprio (kafka.Message.Topic). È facoltativa, ma se manca ogni item deve nominare il suo,
+	// altrimenti quel singolo item è un payload inutilizzabile.
 	PropTopic = "topic"
+	// PropMaxRetry è il tetto ai ritentativi di un item, con la stessa convenzione di
+	// task.Config.MaxRetry: assente = illimitato, che è la condotta storica.
+	//
+	// Serve perché su questo percorso store.ApplyResult non passa mai — kafkajob chiama i Mark*
+	// da sé — quindi WorkItem.Retry veniva incrementato (da MarkPending e da RecoverOrphans) e
+	// non letto da nessuno: una notifica irrecuperabile ritentava per sempre e occupava uno slot
+	// del `limit` a ogni tick, rubando capacità a quelle sane.
+	PropMaxRetry = "max-retry"
 )
 
 type parametri struct {
-	destination string
-	object      string
-	topic       string
-	limit       int
+	stream   string
+	topic    string
+	limit    int
+	maxRetry int
 }
 
 func makeNotificationJobFactory(prod producer.IProducer, items store.IWorkItemStore) scheduler.JobFactory {
@@ -79,15 +98,13 @@ func runTick(name string, p parametri, runTimeout, orphanTimeout time.Duration, 
 	return scheduler.ClaimingTick{
 		JobName:       name,
 		JobType:       JobType,
-		TaskName:      JobType,
-		Destination:   p.destination,
-		ObjectType:    p.object,
+		TaskName:      p.stream,
 		Limit:         p.limit,
 		RunTimeout:    runTimeout,
 		OrphanTimeout: orphanTimeout,
 		Backlog:       backlog,
 		Process: func(ctx context.Context, jobID string, batch []*store.WorkItem) error {
-			return publishBatch(ctx, name, jobID, p.topic, batch, prod, items)
+			return publishBatch(ctx, name, jobID, p, batch, prod, items)
 		},
 	}.Run(items)
 }
@@ -96,34 +113,64 @@ func risolvi(name string, config scheduler.Config) (parametri, error) {
 	j := scheduler.JobProps(name, config)
 	var out parametri
 	var err error
-	for _, campo := range []struct {
-		prop   string
-		perche string
-		dst    *string
-	}{
-		{scheduler.PropDestination, "non si sa quali item reclamare", &out.destination},
-		{PropObject, "non si sa quali item reclamare", &out.object},
-		{PropTopic, "non si sa su quale topic pubblicare", &out.topic},
-	} {
-		if *campo.dst, err = j.RequiredString(campo.prop, campo.perche); err != nil {
-			return out, err
-		}
+	if out.stream, err = j.RequiredString(PropStream, "non si sa quale flusso di notifiche reclamare"); err != nil {
+		return out, err
 	}
+	// Il topic è FACOLTATIVO: è il default dei record che non ne portano uno. Se manca, ogni item
+	// deve nominare il proprio — e se non lo fa è quel singolo item a fallire, non l'avvio.
+	out.topic = j.String(PropTopic, "")
 	if out.limit, err = j.PositiveInt(scheduler.PropLimit, defaultKafkaLimit); err != nil {
+		return out, err
+	}
+	if out.maxRetry, err = risolviMaxRetry(j, config); err != nil {
 		return out, err
 	}
 	return out, nil
 }
 
+// risolviMaxRetry legge il tetto con la convenzione di task.Config.MaxRetry: assente o -1 =
+// illimitato, >= 0 = il tetto (0 = nessun ritentativo).
+//
+// Un valore NON convertibile non può ricadere sul default, perché il default è l'illimitato: un
+// refuso spegnerebbe in silenzio proprio il controllo che si stava cercando di accendere. GetInt
+// ritorna il default sia quando la chiave è assente sia quando il valore non si converte, e i due
+// casi si distinguono solo interrogandola con due default diversi.
+func risolviMaxRetry(j scheduler.Props, config scheduler.Config) (int, error) {
+	if !j.Has(PropMaxRetry) {
+		return task.MaxRetryUnlimited, nil
+	}
+	if a, b := config.Properties.GetInt(PropMaxRetry, 0), config.Properties.GetInt(PropMaxRetry, 1); a != b {
+		return 0, j.Invalid("la property %q non è un intero: %v (ometterla, o -1, significa illimitato)",
+			PropMaxRetry, config.Properties[PropMaxRetry])
+	}
+	n := config.Properties.GetInt(PropMaxRetry, task.MaxRetryUnlimited)
+	if n < task.MaxRetryUnlimited {
+		return 0, j.Invalid("la property %q non può essere < -1: %v (-1 = illimitato)", PropMaxRetry, n)
+	}
+	return n, nil
+}
+
 // publishBatch è la fase di elaborazione di questa famiglia: traduce gli item in record e li
 // pubblica in blocco sul topic.
-func publishBatch(ctx context.Context, name, jobId, topic string, all []*store.WorkItem,
+func publishBatch(ctx context.Context, name, jobId string, p parametri, all []*store.WorkItem,
 	prod producer.IProducer, items store.IWorkItemStore) error {
 
 	// Inizio della fase di elaborazione: è la finestra che le istogrammi misurano.
 	itemsStart := time.Now()
 
-	valid, recs, invalid := prepareRecords(all)
+	// Il tetto si applica PRIMA di pubblicare, e sul batch appena claimato: è l'unico punto in cui
+	// copre anche il percorso degli orfani, che incrementa `retry` senza passare da qui. Un item
+	// oltre il tetto è finalizzato e non pubblicato — altrimenti resterebbe a occupare uno slot
+	// del `limit` a ogni tick, per sempre.
+	all, esauriti := separaEsauriti(all, p.maxRetry)
+	for _, item := range esauriti {
+		motivo := fmt.Sprintf("max-retry %d esaurito (retry=%d)", p.maxRetry, item.Retry)
+		if errMark := items.MarkFailed(ctx, item.Id, item.LockToken, motivo); errMark != nil {
+			log.Error().Err(errMark).Msgf("[%s] MarkFailed fallito per l'item %s", jobId, item.Id)
+		}
+	}
+
+	valid, recs, invalid := prepareRecords(all, p.topic)
 	// Gli item con payload inutilizzabile sono marcati falliti UNO PER UNO (fenced dal token) e non
 	// fanno cadere il tick: un payload malformato è un errore deterministico di quel singolo item, e
 	// ritornare un errore per l'intero batch lascerebbe in IN_PROGRESS anche gli item buoni, fino al
@@ -133,15 +180,15 @@ func publishBatch(ctx context.Context, name, jobId, topic string, all []*store.W
 			log.Error().Err(errMark).Msgf("[%s] MarkFailed fallito per l'item %s", jobId, item.Id)
 		}
 	}
-	// Gli invalidi sono item finalizzati come falliti, quindi vanno contati in OGNI esito del tick e
-	// non solo quando sono tutti invalidi: altrimenti un tick misto ne perderebbe la traccia, e
-	// batch_job_items_claimed_total non tornerebbe con la somma dei processed.
-	observeItems(name, len(invalid), store.OutcomeFailed, itemsStart)
+	// Invalidi ed esauriti sono item finalizzati come falliti, quindi vanno contati in OGNI esito
+	// del tick e non solo quando sono tutti tali: altrimenti un tick misto ne perderebbe la
+	// traccia, e batch_job_items_claimed_total non tornerebbe con la somma dei processed.
+	observeItems(name, len(invalid)+len(esauriti), store.OutcomeFailed, itemsStart)
 	if len(recs) == 0 {
 		return nil
 	}
 
-	if errProduce := prod.ProduceTo(ctx, topic, recs); errProduce != nil {
+	if errProduce := prod.ProduceTo(ctx, p.topic, recs); errProduce != nil {
 		log.Error().Err(errProduce).Msgf("[%s] Kafka produce failed — resetting %d items to PENDING", jobId, len(valid))
 		// Errore transiente: gli item claimati tornano PENDING e il tick successivo li riprende.
 		// Il delay è 0 — quando riprovare lo decide il cron del job, non il producer: l'errore che
@@ -171,8 +218,28 @@ func publishBatch(ctx context.Context, name, jobId, topic string, all []*store.W
 
 	observeItems(name, len(valid), store.OutcomeDone, itemsStart)
 
-	log.Info().Msgf("[%s] sent %d message(s) to topic %s", jobId, len(valid), topic)
+	log.Info().Msgf("[%s] sent %d message(s) (topic di default %q)", jobId, len(valid), p.topic)
 	return nil
+}
+
+// separaEsauriti divide il batch fra gli item ancora entro il tetto dei ritentativi e quelli che
+// l'hanno superato. maxRetry negativo (task.MaxRetryUnlimited) disattiva il tetto, che è la
+// condotta di chi non scrive la property.
+//
+// Il confronto è `>=` come in store.ApplyResult: `max-retry: N` concede N ritentativi, cioè N+1
+// esecuzioni in tutto.
+func separaEsauriti(all []*store.WorkItem, maxRetry int) (vivi, esauriti []*store.WorkItem) {
+	if maxRetry < 0 {
+		return all, nil
+	}
+	for _, item := range all {
+		if item.Retry >= maxRetry {
+			esauriti = append(esauriti, item)
+			continue
+		}
+		vivi = append(vivi, item)
+	}
+	return vivi, esauriti
 }
 
 // observeItems emette le metriche di task e di job per n item che hanno condiviso lo stesso
@@ -199,9 +266,9 @@ func observeItems(job string, n int, outcome store.Outcome, start time.Time) {
 //
 // La chiave è JSON-encoded, non la stringa nuda: è il formato storico di questo job, e cambiarlo
 // cambierebbe il partizionamento di tutti i topic già in esercizio.
-func prepareRecords(items []*store.WorkItem) (valid []*store.WorkItem, recs []*message.ProducerRecord, invalid []*store.WorkItem) {
+func prepareRecords(items []*store.WorkItem, defaultTopic string) (valid []*store.WorkItem, recs []*message.ProducerRecord, invalid []*store.WorkItem) {
 	for _, item := range items {
-		rec, err := toRecord(item)
+		rec, err := toRecord(item, defaultTopic)
 		if err != nil {
 			log.Error().Err(err).Msgf("Payload non utilizzabile per work item %s", item.Id)
 			invalid = append(invalid, item)
@@ -214,10 +281,13 @@ func prepareRecords(items []*store.WorkItem) (valid []*store.WorkItem, recs []*m
 	return valid, recs, invalid
 }
 
-// toRecord traduce il payload di un WorkItem nel record da produrre. Il topic NON è impostato qui: lo
-// mette ProduceTo dalla property del job, così il topic resta una decisione del job e non si ripete su
-// ogni record.
-func toRecord(item *store.WorkItem) (*message.ProducerRecord, error) {
+// toRecord traduce il payload di un WorkItem nel record da produrre.
+//
+// Il topic lo porta il record solo se l'item lo nomina (kafka.KeyTopic); altrimenti resta vuoto e
+// lo stampa ProduceTo dalla property del job, che sovrascrive i soli record senza topic. Con
+// entrambi assenti non c'è destinazione, e l'item è inutilizzabile come lo sarebbe senza chiave:
+// meglio un MarkFailed che nomina il difetto di una Produce su topic vuoto.
+func toRecord(item *store.WorkItem, defaultTopic string) (*message.ProducerRecord, error) {
 	native, ok := store.PayloadMap(item.Payload)
 	if !ok {
 		return nil, fmt.Errorf("payload di tipo non gestito: %T", item.Payload)
@@ -239,6 +309,16 @@ func toRecord(item *store.WorkItem) (*message.ProducerRecord, error) {
 		return nil, fmt.Errorf("serializzazione di messageValue: %w", err)
 	}
 	rec := &message.ProducerRecord{Key: key, Value: value}
+	if topicRaw, ok := native[kafka.KeyTopic]; ok {
+		topic, ok := topicRaw.(string)
+		if !ok {
+			return nil, fmt.Errorf("topic di tipo non gestito: %T", topicRaw)
+		}
+		rec.Topic = topic
+	}
+	if rec.Topic == "" && defaultTopic == "" {
+		return nil, fmt.Errorf("nessun topic: l'item non ne porta uno e il job non ha la property %q", PropTopic)
+	}
 	if headersRaw, ok := native[kafka.KeyMessageHeaders]; ok {
 		headers, err := toStringMap(headersRaw)
 		if err != nil {

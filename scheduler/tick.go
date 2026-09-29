@@ -28,11 +28,8 @@ type ClaimingTick struct {
 	JobName string
 	// JobType è il `type` della voce di `jobs:`, usato come attributo dello span.
 	JobType string
-	// TaskName, Destination, ObjectType sono i filtri del claim. Gli ultimi due sono
-	// facoltativi (stringa vuota = nessun filtro).
-	TaskName    string
-	Destination string
-	ObjectType  string
+	// TaskName è la coda su cui il job lavora, ed è il solo filtro del claim.
+	TaskName string
 	// Limit è il tetto agli item claimati per tick (backpressure).
 	Limit int
 	// RunTimeout e OrphanTimeout vengono da Config.ResolveTimeouts.
@@ -71,7 +68,7 @@ func (t ClaimingTick) Run(items store.IWorkItemStore) error {
 	}
 
 	batch, orphans, fresh, appErr := store.ClaimBatch(
-		spanCtx, items, jobID, t.TaskName, t.Destination, t.ObjectType, t.OrphanTimeout, t.Limit)
+		spanCtx, items, jobID, t.TaskName, t.OrphanTimeout, t.Limit)
 	if appErr != nil && len(batch) == 0 {
 		span.RecordError(appErr)
 		span.SetStatus(codes.Error, "claim failed")
@@ -85,7 +82,7 @@ func (t ClaimingTick) Run(items store.IWorkItemStore) error {
 	// La coda si misura DOPO il claim: quel che resta è ciò che questo tick non ha preso, che è
 	// esattamente l'arretrato di cui si vuole l'allarme.
 	if t.Backlog {
-		if pending, oldest, errB := items.Backlog(spanCtx, t.TaskName, t.Destination, t.ObjectType); errB != nil {
+		if pending, oldest, errB := items.Backlog(spanCtx, t.TaskName); errB != nil {
 			log.Warn().Err(errB).Msgf("[%s] lettura del backlog fallita", jobID)
 		} else {
 			batchmetrics.ObserveBacklog(t.JobName, t.TaskName, pending, oldest)

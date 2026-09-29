@@ -49,13 +49,13 @@ func (fakeStore) Release(context.Context, string, string) *core.ApplicationError
 func (fakeStore) Purge(context.Context, string, time.Time, int) (int, *core.ApplicationError) {
 	return 0, nil
 }
-func (fakeStore) Backlog(context.Context, string, string, string) (int, time.Time, *core.ApplicationError) {
+func (fakeStore) Backlog(context.Context, string) (int, time.Time, *core.ApplicationError) {
 	return 0, time.Time{}, nil
 }
-func (fakeStore) ClaimPending(context.Context, string, string, string, int) ([]*store.WorkItem, *core.ApplicationError) {
+func (fakeStore) ClaimPending(context.Context, string, int) ([]*store.WorkItem, *core.ApplicationError) {
 	return nil, nil
 }
-func (fakeStore) RecoverOrphans(context.Context, string, string, string, time.Duration, int) ([]*store.WorkItem, *core.ApplicationError) {
+func (fakeStore) RecoverOrphans(context.Context, string, time.Duration, int) ([]*store.WorkItem, *core.ApplicationError) {
 	return nil, nil
 }
 func (fakeStore) Insert(context.Context, []*store.WorkItem) *core.ApplicationError { return nil }

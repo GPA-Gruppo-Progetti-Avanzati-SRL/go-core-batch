@@ -212,7 +212,59 @@ Warn al boot. In entrambi i casi il contratto del framework resta **at-least-onc
 è nella transazione, quindi un suo fallimento dopo il commit fa ripubblicare al tick successivo.
 
 Il producer **non è iniettabile in un task runner**: per mandare una notifica si crea un WorkItem
-`NotificationKafka` (outbox), che il job drena — non si pubblica inline.
+(outbox), che il job drena — non si pubblica inline.
+
+#### Accodare una notifica
+
+```yaml
+jobs:
+  - name: notifiche-bacheca
+    type: NotificationKafka
+    cron: "*/10 * * * * *"
+    singleton: true
+    properties:
+      stream:    notifiche-bacheca   # la CODA: è il WorkItem.TaskName degli item accodati
+      topic:     eventi.bacheca      # topic di DEFAULT, facoltativo
+      limit:     200
+      max-retry: 5                   # facoltativo; assente o -1 = illimitato
+```
+
+```go
+import "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/kafka"
+
+wi := kafka.NewWorkItem("notifiche-bacheca", ricorrenza.Id, kafka.Message{
+    MessageKey:    ricorrenza.Id,
+    MessageValue:  evento,                             // struct, mappa: va sul record come JSON
+    MessageHeader: map[string]string{"tipo": "RICORRENZA"},
+    // Topic: "eventi.altro",                          // facoltativo: vince sul default del job
+})
+
+// Dentro la transazione del dato di dominio (outbox vero e proprio):
+appErr := items.Insert(ctx, []*store.WorkItem{wi})
+// Oppure, per non accodare una seconda notifica finché la prima non è partita:
+inserted, appErr := items.InsertIfNotActive(ctx, []*store.WorkItem{wi})
+```
+
+Il primo argomento è il `stream` del job che drenerà l'item, il secondo l'`objectId`: insieme sono
+la chiave su cui `InsertIfNotActive` deduplica (indice unico parziale `uk_workitem_active`), quindi
+**due flussi diversi possono avere un item attivo per lo stesso oggetto** — cosa che prima non era
+possibile, perché il claim girava su un `TaskName` costante per tutte le notifiche.
+
+`NewWorkItem` esiste perché il contratto era finora solo documentato: `Status`, `CreateTime`,
+`NextRunAt` e soprattutto `TaskName` non sono facoltativi, e un item senza `TaskName` non viene
+claimato da nessuno — in silenzio.
+
+Il **topic** può stare sul singolo messaggio (`kafka.Message.Topic`): se c'è vince, altrimenti si
+usa `properties.topic` del job. Un job può così drenare un flusso verso topic diversi invece di
+moltiplicarsi per moltiplicare le destinazioni. Se mancano entrambi, quel singolo item è marcato
+`FAILED` come un payload senza `messageKey`: il tick prosegue con gli altri.
+
+Il **tetto ai ritentativi** è `properties.max-retry`, con la convenzione di `tasks[].max-retry`
+(assente o `-1` = illimitato). Serve perché su questo percorso `store.ApplyResult` non passa mai —
+il job chiama i `Mark*` da sé — quindi `WorkItem.Retry` veniva incrementato da `MarkPending` e da
+`RecoverOrphans` e non letto da nessuno: una notifica irrecuperabile ritentava per sempre e
+occupava uno slot del `limit` a ogni tick, rubando capacità a quelle sane. Il controllo è applicato
+sul batch **appena claimato**, che è l'unico punto in cui copre anche il percorso degli orfani.
 
 > I singoli `*.Module()` (`localdispatcher`, `grpcdispatcher`, `queryfeed`, `s3feed`, `kafkajob`, `mongostore`/`sqlstore`, `grpchandler`, `scheduler`, …) **restano validi** per il wiring manuale: sono il livello sotto l'orchestratore, documentato nelle sezioni seguenti. Essendo modes-only, lì il config va fornito prima con `core.Supply` (es. `core.Supply(&cfg.Client); grpcdispatcher.Module()`). `batch.Module` non fa che comporli in un'unica chiamata gate-ata per mode.
 
@@ -324,6 +376,46 @@ ALTER TABLE task_log   RENAME COLUMN type TO task_name;
 
 Senza la migrazione il claiming filtra su un campo che non esiste: nessun errore, semplicemente
 nessun item trovato.
+
+### Breaking — via `Destination` e `ObjectType` dal `WorkItem`
+
+`store.WorkItem` non ha più i campi `Destination`/`ObjectType`, e `ClaimPending`, `RecoverOrphans`,
+`Backlog` e `store.ClaimBatch` non ne prendono più i due parametri. Erano due filtri di claim
+**facoltativi che solo `NotificationKafka` valorizzava**, e che nessun runner, dispatcher o worker
+ha mai letto per decidere alcunché: gli servivano perché quel job claimava su
+`TaskName = "NotificationKafka"`, la stessa costante per ogni notifica dell'applicazione.
+
+Ora il job nomina la propria coda con `properties.stream`, che finisce in `WorkItem.TaskName` come
+per ogni altra famiglia. Oltre a togliere due campi, **ripara la deduplica**: `uk_workitem_active`
+è unico su `(task_name, object_id)`, quindi finché `task_name` era costante due flussi diversi
+sullo stesso `objectId` collidevano e `InsertIfNotActive` **scartava il secondo in silenzio**.
+
+Migrazione YAML — su una voce `NotificationKafka`:
+
+```yaml
+    properties:
+      destination: BACHECA        # ← via
+      object:      RICORRENZA     # ← via
+      stream:      notifiche-bacheca   # ← il nome della coda, che va anche nei WorkItem accodati
+```
+
+E su un `FeedTask`: `destination:` e `objectType:` non hanno più destinatario (venivano scritti sul
+work item e letti solo dal job Kafka).
+
+Dati: le colonne non vanno droppate — la libreria non possiede la tabella, smette semplicemente di
+scriverle. Va invece rimosso l'indice che le serviva, e creato quello della retention:
+
+```js
+db.<collezione_work_items>.dropIndex("ix_workitem_claim_dest")   // EnsureIndexes crea ix_workitem_purge
+```
+
+```sql
+DROP INDEX IF EXISTS ix_workitem_claim_dest;   -- EnsureIndexes crea ix_workitem_purge
+```
+
+Gli item `NotificationKafka` già accodati portano `taskName: "NotificationKafka"`: o si lascia uno
+`stream: NotificationKafka` finché la coda si svuota, oppure si rinominano
+(`updateMany({taskName: "NotificationKafka"}, {$set: {taskName: "<stream>"}})`).
 
 Il **nome** del task è la chiave di tutto il percorso: è il `WorkItem.TaskName` creato dal job, quello su cui il claiming filtra e quello con cui il worker instrada al runner. Va sempre scritto: non c'è fallback sul `type`.
 
@@ -869,7 +961,7 @@ go-core-batch/
 ├── worker/                       # Worker pool per task distribuiti via gRPC
 │   └── grpchandler/              # Router gRPC → worker pool + Module() + Provide()
 ├── grpc/                         # Client/Server gRPC
-└── kafka/                        # kafka.Message: la forma del payload di un WorkItem NotificationKafka
+└── kafka/                        # kafka.Message + NewWorkItem: il contratto di accodamento di una notifica
 ```
 
 ---
@@ -966,11 +1058,14 @@ backend resta il solo modo di sapere quali indici esistono (`Indexes().List` con
 | `uk_workitem_active` — unico parziale su `(task_name, object_id)` per gli stati attivi | la deduplica di `InsertIfNotActive` | nessun duplicate-key da intercettare: **il dedup salta in silenzio** e nascono workitem doppi |
 | `ix_workitem_claim` — `(task_name, status, next_run_at, create_time)` | `ClaimPending` | collection scan a ogni tick di ogni job |
 | `ix_workitem_orphan` — `(task_name, status, locked_at)` | `RecoverOrphans` | idem |
-| `ix_workitem_claim_dest` — `(task_name, status, destination, object_type, next_run_at)` | il claim filtrato per destinazione (`NotificationKafka`) | idem |
+| `ix_workitem_purge` — `(status, update_time)`, parziale sugli stati **terminali** | la query del job `PurgeWorkItems` | la retention scandisce a ogni tick tutto lo storico, cioè la parte di collection che il job esiste per rimpicciolire |
 
 I tre indici del claim sono **parziali sugli stati attivi**: gli item `DONE`/`FAILED` non vengono
 mai claimati, quindi tenerli fuori mantiene l'indice della dimensione del *lavoro* e non dello
-storico.
+storico. Quello della retention è parziale sugli stati **terminali**, per la ragione speculare: la
+purge lavora solo lì. Al posto di `ix_workitem_purge` c'era `ix_workitem_claim_dest`, che serviva
+il claim filtrato per `destination`: è sparito coi due campi, e lo slot è andato all'unica query
+del sottosistema che non aveva un indice.
 
 La libreria **non li crea da sola** (gestione via `EnsureIndexes` allo startup, o migration/ops),
 ma alla **prima operazione sullo store** — il primo claim o il primo insert, quindi entro il primo
@@ -1157,7 +1252,6 @@ scheduler:
       collection: "orders"
       filter:     "status = 'READY'"
       sort:       "created_at:asc"
-      objectType: "Order"
 ```
 
 ### Con feed S3 — DistribuiteTaskByS3File
@@ -1241,13 +1335,13 @@ chiamante** — quelli sì che sono specifici — ma una property scritta e non 
 errore e non ricade mai sul default.
 
 Le chiavi comuni a più job type sono dichiarate una volta sola (`scheduler.PropTask`,
-`PropLimit`, `PropDestination`, `PropBacklogMetrics`); restano locali al proprio package quelle che
-un solo job type conosce (`older-than`, `task-logs`, `topic`, `objectId`, `payload`, …).
+`PropLimit`, `PropBacklogMetrics`); restano locali al proprio package quelle che un solo job type
+conosce (`older-than`, `task-logs`, `topic`, `stream`, `max-retry`, `objectId`, `payload`, …).
 
-> **Divergenza nota, non toccata perché è di configurazione:** il filtro sul `WorkItem.ObjectType`
-> si chiama `object` nella voce di un `NotificationKafka` e `objectType` in quella di un
-> `FeedTask`. Sono la stessa colonna con due nomi in YAML; unificarli cambierebbe le config
-> esistenti.
+> Qui c'erano anche `destination` e `objectType` — la stessa colonna che `NotificationKafka`
+> chiamava `object` e `FeedTask` `objectType`, due nomi in YAML per un filtro che nessuno leggeva
+> per decidere. Sono spariti coi campi corrispondenti del `WorkItem`: la coda si nomina col solo
+> `task` (`stream` per `NotificationKafka`).
 
 | Campo | Tipo | Descrizione |
 |---|---|---|
@@ -1262,13 +1356,15 @@ un solo job type conosce (`older-than`, `task-logs`, `topic`, `objectId`, `paylo
 | `properties.collection` | string | Tabella/collection sorgente (solo DistribuiteTaskByQuery) |
 | `properties.filter` | string | WHERE SQL o JSON query Mongo (solo DistribuiteTaskByQuery) |
 | `properties.sort` | string | `"col:asc,col2:desc"` (solo DistribuiteTaskByQuery) |
-| `properties.objectType` | string | Finisce in `WorkItem.ObjectType` (solo DistribuiteTaskByQuery, opzionale) |
 | `properties.service` | string | Nome logico del servizio S3 (solo DistribuiteTaskByS3File) |
 | `properties.path` | string | Prefisso S3 per il listing (solo DistribuiteTaskByS3File) |
 | `properties.pattern` | string | Glob pattern sul basename del file, es. `"*.csv"` (solo DistribuiteTaskByS3File) |
 | `properties.dest-path` | string | Prefisso S3 dove spostare i file elaborati (solo DistribuiteTaskByS3File) |
 | `properties.task` | string | **Nome del task** da eseguire, che è anche il `WorkItem.TaskName` letto da `ClaimPending`/`RecoverOrphans`. Obbligatoria per `SingleTask`, `DistribuiteTask*` e `FeedTask`: nessun ripiego sul `type` del job |
 | `properties.objectId` | string | Cosa accodare (solo `FeedTask`): finisce in `WorkItem.ObjectId` ed è la chiave della deduplica |
+| `properties.stream` | string | **Nome della coda di notifiche** (solo `NotificationKafka`, obbligatoria): è il `WorkItem.TaskName` degli item accodati. Non si chiama `task` perché quello è un riferimento a una voce di `tasks:`, e una notifica un runner non ce l'ha |
+| `properties.topic` | string | Topic di **default** (solo `NotificationKafka`, facoltativa): vale per i record che non portano il proprio `topic` nel payload |
+| `properties.max-retry` | int | Tetto ai ritentativi di un item (solo `NotificationKafka`; assente o `-1` = illimitato) |
 | `properties.status` | string | Stato degli item da cancellare, es. `DONE` (solo `PurgeWorkItems`, obbligatoria) |
 | `properties.older-than` | duration | Finestra di retention, misurata su `update_time` (solo `PurgeWorkItems`, obbligatoria) |
 | `properties.task-logs` | bool | Cancella anche le righe di `task_logs` più vecchie della finestra (solo `PurgeWorkItems`, default `false`) |
@@ -1593,8 +1689,8 @@ type DispatchRequest struct {
 // store.IWorkItemStore — claiming + lifecycle. Ogni Mark* è FENCED dal lock token del claim:
 // un worker stale (il cui item è stato ri-claimato da RecoverOrphans) non può finalizzarlo.
 type IWorkItemStore interface {
-    ClaimPending(ctx context.Context, taskName, destination, objectType string, limit int) ([]*WorkItem, *core.ApplicationError)
-    RecoverOrphans(ctx context.Context, taskName, destination, objectType string, maxAge time.Duration, limit int) ([]*WorkItem, *core.ApplicationError)
+    ClaimPending(ctx context.Context, taskName string, limit int) ([]*WorkItem, *core.ApplicationError)
+    RecoverOrphans(ctx context.Context, taskName string, maxAge time.Duration, limit int) ([]*WorkItem, *core.ApplicationError)
     InsertIfNotActive(ctx context.Context, items []*WorkItem) (int, *core.ApplicationError)
     MarkDone(ctx context.Context, ids []string, token string) *core.ApplicationError
     MarkFailed(ctx context.Context, id, token, reason string) *core.ApplicationError
@@ -1611,7 +1707,7 @@ type IWorkItemStore interface {
     // Purge: retention. Cancella gli item nello stato indicato più vecchi di olderThan.
     Purge(ctx context.Context, status string, olderThan time.Time, limit int) (int, *core.ApplicationError)
     // Backlog: quanti PENDING aspettano e da quando. Alimenta le gauge batch_workitems_*.
-    Backlog(ctx context.Context, taskName, destination, objectType string) (int, time.Time, *core.ApplicationError)
+    Backlog(ctx context.Context, taskName string) (int, time.Time, *core.ApplicationError)
 }
 
 // store.IData — ciclo di vita task su task_logs

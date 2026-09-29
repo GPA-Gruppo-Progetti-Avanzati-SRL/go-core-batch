@@ -19,8 +19,11 @@ const (
 	IndexWorkItemClaim = "ix_workitem_claim"
 	// IndexWorkItemOrphan serve la query di RecoverOrphans.
 	IndexWorkItemOrphan = "ix_workitem_orphan"
-	// IndexWorkItemClaimDest serve il claim filtrato per destinazione (job NotificationKafka).
-	IndexWorkItemClaimDest = "ix_workitem_claim_dest"
+	// IndexWorkItemPurge serve la query del job PurgeWorkItems, che è l'OPPOSTO delle altre tre:
+	// filtra e ordina per update_time sugli stati TERMINALI, cioè sulla parte grande della
+	// collection — quella che il job esiste per tenere sotto controllo. Senza, la retention
+	// scandisce a ogni tick tutto lo storico, anche quando non c'è nulla da cancellare.
+	IndexWorkItemPurge = "ix_workitem_purge"
 )
 
 // ExpectedIndexes è l'elenco che le verifiche di avvio confrontano con ciò che esiste davvero.
@@ -30,7 +33,7 @@ var ExpectedIndexes = []string{
 	IndexWorkItemActive,
 	IndexWorkItemClaim,
 	IndexWorkItemOrphan,
-	IndexWorkItemClaimDest,
+	IndexWorkItemPurge,
 }
 
 // MissingIndexes ritorna gli indici attesi che non compaiono fra quelli presenti.
@@ -60,6 +63,6 @@ func WarnMissingIndexes(presenti []string, comeCrearli string) {
 			IndexWorkItemActive)
 	}
 	log.Warn().Str("collection", CollectionWorkItems).Strs("indici", mancanti).Msgf(
-		"go-core-batch: indici ASSENTI su %s — il claim di ogni tick scandisce l'intero storico invece del solo lavoro da fare. Crearli via %s o migration, oppure confermare che l'assenza è voluta.",
+		"go-core-batch: indici ASSENTI su %s — il claim di ogni tick (e la retention) scandiscono l'intera collection invece del solo lavoro da fare. Crearli via %s o migration, oppure confermare che l'assenza è voluta.",
 		CollectionWorkItems, comeCrearli)
 }

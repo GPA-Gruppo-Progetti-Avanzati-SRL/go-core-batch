@@ -20,12 +20,10 @@ import (
 )
 
 type workItemFilter struct {
-	Id          string   `field:"_id"         operator:"$eq"  omitempty:"true"`
-	IdIn        []string `field:"_id"         operator:"$in"  omitempty:"true"`
-	TaskName    string   `field:"taskName"    operator:"$eq"  omitempty:"true"`
-	Status      string   `field:"status"      operator:"$eq"  omitempty:"true"`
-	Destination string   `field:"destination" operator:"$eq"  omitempty:"true"`
-	ObjectType  string   `field:"objectType"  operator:"$eq"  omitempty:"true"`
+	Id       string   `field:"_id"         operator:"$eq"  omitempty:"true"`
+	IdIn     []string `field:"_id"         operator:"$in"  omitempty:"true"`
+	TaskName string   `field:"taskName"    operator:"$eq"  omitempty:"true"`
+	Status   string   `field:"status"      operator:"$eq"  omitempty:"true"`
 }
 
 func (f workItemFilter) GetFilterCollectionName(ctx context.Context) string {
@@ -84,7 +82,7 @@ var _ store.IWorkItemStore = (*workItemData)(nil)
 //
 // La query dei candidati tratta un nextRunAt assente o null come "scaduto adesso" (specchio del
 // `next_run_at IS NULL OR <= NOW()` del backend SQL).
-func (d *workItemData) ClaimPending(ctx context.Context, taskName, destination, objectType string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemData) ClaimPending(ctx context.Context, taskName string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
 	// La verifica sta anche qui, e non solo su InsertIfNotActive: gli indici del claim servono a
 	// OGNI job, compresi quelli claim-only (DistribuiteTask, NotificationKafka) che un feed non
 	// ce l'hanno e quindi non passerebbero mai di là. È sync.Once: una sola lettura degli indici
@@ -101,12 +99,6 @@ func (d *workItemData) ClaimPending(ctx context.Context, taskName, destination, 
 			{"nextRunAt": nil},
 			{"nextRunAt": bson.M{"$lte": now}},
 		},
-	}
-	if destination != "" {
-		query["destination"] = destination
-	}
-	if objectType != "" {
-		query["objectType"] = objectType
 	}
 
 	cursor, err := coll.Find(ctx, query,
@@ -175,18 +167,12 @@ func (d *workItemData) byToken(ctx context.Context, code string, ids []string, t
 //
 // Stessa forma di ClaimPending: tre round-trip invece di 1+N. Il filtro `lockedAt < cutoff`
 // resta dentro ogni UpdateOne, quindi due repliche non recuperano lo stesso orfano.
-func (d *workItemData) RecoverOrphans(ctx context.Context, taskName, destination, objectType string, maxAge time.Duration, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemData) RecoverOrphans(ctx context.Context, taskName string, maxAge time.Duration, limit int) ([]*store.WorkItem, *core.ApplicationError) {
 	now := time.Now()
 	cutoff := now.Add(-maxAge)
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 
 	query := bson.M{"taskName": taskName, "status": store.StatusInProgress, "lockedAt": bson.M{"$lt": cutoff}}
-	if destination != "" {
-		query["destination"] = destination
-	}
-	if objectType != "" {
-		query["objectType"] = objectType
-	}
 	cursor, err := coll.Find(ctx, query,
 		options.Find().
 			SetSort(bson.D{{Key: "lockedAt", Value: 1}}).
@@ -284,13 +270,20 @@ func (d *workItemData) MarkFailed(ctx context.Context, id, token, reason string)
 // Release riporta a PENDING un item claimato ma mai eseguito (dispatch fallito), fenced dal
 // token e idempotente. È MarkPending meno l'$inc su retry: il tentativo non è avvenuto, quindi
 // non va contato. nextRunAt = now, così il tick successivo lo riprende subito.
+//
+// L'`error` di un fallimento precedente viene AZZERATO: un item che torna PENDING è un item vivo,
+// e lasciargli addosso il motivo per cui l'ultimo tentativo non era riuscito fa leggere come
+// fallito qualcosa che è solo in attesa. Il motivo resta nella riga di task_logs.
 func (d *workItemData) Release(ctx context.Context, id, token string) *core.ApplicationError {
 	now := time.Now()
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	res, err := coll.UpdateOne(ctx, fencedFilter(id, token),
-		bson.M{"$set": bson.M{
-			"status": store.StatusPending, "lockedAt": nil, "updateTime": now, "nextRunAt": now,
-		}},
+		bson.M{
+			"$set": bson.M{
+				"status": store.StatusPending, "lockedAt": nil, "updateTime": now, "nextRunAt": now,
+			},
+			"$unset": bson.M{"error": ""},
+		},
 	)
 	if err != nil {
 		return errs.Tech(errs.CodeRelease).WithCause(err)
@@ -302,6 +295,10 @@ func (d *workItemData) Release(ctx context.Context, id, token string) *core.Appl
 }
 
 // MarkPending resets a single IN_PROGRESS item back to PENDING for retry, fenced dal token (idempotente).
+//
+// L'`error` di un fallimento precedente viene AZZERATO: un item che torna PENDING è un item vivo,
+// e lasciargli addosso il motivo per cui l'ultimo tentativo non era riuscito fa leggere come
+// fallito qualcosa che è solo in attesa. Il motivo resta nella riga di task_logs.
 func (d *workItemData) MarkPending(ctx context.Context, id, token string, after time.Duration) *core.ApplicationError {
 	now := time.Now()
 	nextRunAt := now.Add(after)
@@ -312,7 +309,8 @@ func (d *workItemData) MarkPending(ctx context.Context, id, token string, after 
 				"status": store.StatusPending, "lockedAt": nil, "updateTime": now,
 				"nextRunAt": nextRunAt, "executedBy": store.Hostname(),
 			},
-			"$inc": bson.M{"retry": 1},
+			"$unset": bson.M{"error": ""},
+			"$inc":   bson.M{"retry": 1},
 		},
 	)
 	if err != nil {
@@ -453,15 +451,9 @@ func (d *workItemData) Purge(ctx context.Context, status string, olderThan time.
 }
 
 // Backlog conta i PENDING in attesa e ritorna la data di creazione del più vecchio.
-func (d *workItemData) Backlog(ctx context.Context, taskName, destination, objectType string) (int, time.Time, *core.ApplicationError) {
+func (d *workItemData) Backlog(ctx context.Context, taskName string) (int, time.Time, *core.ApplicationError) {
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	query := bson.M{"taskName": taskName, "status": store.StatusPending}
-	if destination != "" {
-		query["destination"] = destination
-	}
-	if objectType != "" {
-		query["objectType"] = objectType
-	}
 	count, err := coll.CountDocuments(ctx, query)
 	if err != nil {
 		return 0, time.Time{}, errs.Tech(errs.CodeBacklog).WithCause(err)
@@ -507,13 +499,16 @@ func (d *workItemData) List(ctx context.Context, taskName, status string, paging
 //   - ix_workitem_claim: serve la query di ClaimPending (filtro + ordinamento), che ogni job
 //     esegue a ogni tick;
 //   - ix_workitem_orphan: serve la query di RecoverOrphans;
-//   - ix_workitem_claim_dest: serve il claim filtrato per destinazione (job NotificationKafka).
+//   - ix_workitem_purge: serve la query del job PurgeWorkItems.
 //
-// I tre indici del claim sono parziali sugli stati attivi: gli item DONE/FAILED non vengono mai
+// I tre indici del claim sono parziali sugli stati ATTIVI: gli item DONE/FAILED non vengono mai
 // claimati, quindi tenerli fuori mantiene l'indice della dimensione del LAVORO e non dello storico.
+// Quello della retention è parziale sugli stati TERMINALI, per la ragione speculare: la purge
+// lavora solo lì, e indicizzare anche il lavoro in corso la renderebbe più grande senza servirla.
 func EnsureIndexes(ctx context.Context, service *mongo.Service) error {
 	coll := service.GetCollection(store.CollectionWorkItems, "")
 	attivi := bson.M{"status": bson.M{"$in": bson.A{store.StatusPending, store.StatusInProgress}}}
+	terminali := bson.M{"status": bson.M{"$in": bson.A{store.StatusDone, store.StatusFailed}}}
 	_, err := coll.Indexes().CreateMany(ctx, []mgodriver.IndexModel{
 		{
 			Keys: bson.D{{Key: "taskName", Value: 1}, {Key: "objectId", Value: 1}},
@@ -541,12 +536,8 @@ func EnsureIndexes(ctx context.Context, service *mongo.Service) error {
 			Options: options.Index().SetPartialFilterExpression(attivi).SetName(store.IndexWorkItemOrphan),
 		},
 		{
-			Keys: bson.D{
-				{Key: "taskName", Value: 1}, {Key: "status", Value: 1},
-				{Key: "destination", Value: 1}, {Key: "objectType", Value: 1},
-				{Key: "nextRunAt", Value: 1},
-			},
-			Options: options.Index().SetPartialFilterExpression(attivi).SetName(store.IndexWorkItemClaimDest),
+			Keys:    bson.D{{Key: "status", Value: 1}, {Key: "updateTime", Value: 1}},
+			Options: options.Index().SetPartialFilterExpression(terminali).SetName(store.IndexWorkItemPurge),
 		},
 	})
 	return err

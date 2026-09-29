@@ -25,12 +25,12 @@ type fakeStore struct {
 	ops   []opLifecycle
 }
 
-func (f *fakeStore) ClaimPending(_ context.Context, _, _, _ string, _ int) ([]*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) ClaimPending(_ context.Context, _ string, _ int) ([]*store.WorkItem, *core.ApplicationError) {
 	out := f.claim
 	f.claim = nil
 	return out, nil
 }
-func (f *fakeStore) RecoverOrphans(context.Context, string, string, string, time.Duration, int) ([]*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) RecoverOrphans(context.Context, string, time.Duration, int) ([]*store.WorkItem, *core.ApplicationError) {
 	return nil, nil
 }
 func (f *fakeStore) Release(_ context.Context, id, token string) *core.ApplicationError {
@@ -48,7 +48,7 @@ func (f *fakeStore) MarkFailed(context.Context, string, string, string) *core.Ap
 func (f *fakeStore) Purge(context.Context, string, time.Time, int) (int, *core.ApplicationError) {
 	return 0, nil
 }
-func (f *fakeStore) Backlog(context.Context, string, string, string) (int, time.Time, *core.ApplicationError) {
+func (f *fakeStore) Backlog(context.Context, string) (int, time.Time, *core.ApplicationError) {
 	return 0, time.Time{}, nil
 }
 func (f *fakeStore) Insert(context.Context, []*store.WorkItem) *core.ApplicationError { return nil }
