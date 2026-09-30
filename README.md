@@ -330,6 +330,12 @@ mainframe irraggiungibile — fa riprovare l'item per sempre, a ogni ciclo.
 un tentativo** anche se il runner non ha mai fallito. Con `max-retry: 2`, tre riavvii
 consecutivi mandano l'item in FAILED senza un solo fallimento applicativo.
 
+Il tetto vale **anche per gli orfani**: prima di eseguire un item, ogni percorso — `SingleTask`, il
+`MuxRunner` in-process, il bridge del worker gRPC — confronta `Retry` col tetto (`store.CheckExhausted`)
+e, superato, lo manda in FAILED senza eseguirlo (`OutcomeExhausted`). Prima il tetto lo leggeva solo
+`ApplyResult`, cioè dopo che il runner era tornato: un item la cui esecuzione **non ritorna mai** (OOM,
+pod ucciso) veniva ri-claimato da `RecoverOrphans` a ogni giro, per sempre.
+
 ⚠️ **`max-retry` ha effetto solo dalla versione corrente.** Fino a prima, `task.Instances`
 ricostruiva la voce di `tasks:` campo per campo e dimenticava `MaxRetry`: il valore veniva letto
 dallo YAML, validato, documentato — e poi buttato, quindi **ogni task ritentava all'infinito**
@@ -764,16 +770,21 @@ solo da `workers:` viene istanziato anche nel processo scheduler, e viceversa. Q
 tenere fuori dal grafo i task dichiarati e mai usati, con le loro dipendenze; a decidere *chi esegue
 cosa* sono i modes e il routing del pool.
 
-**Sul filo passa il solo `Id`.** Il proto porta `JobId`, `TaskId`, `TaskName`, `ObjectId`: non il
-WorkItem, che il bridge lato worker ricarica con `GetById`. È l'unico percorso in cui la rilettura è
-necessaria, e resta.
+**Sul filo passa l'`Id`, non il WorkItem**, che il bridge lato worker ricarica con `GetById`. Col
+`Id` viaggiano due cose che la rilettura non può dare:
 
-> **Divergenza nota fra i due percorsi**: `DispatchRequest.Timeout` **non attraversa il filo** — il
-> proto non ha un campo per portarlo. La task in-process ha come deadline l'orphan timeout del job;
-> quella sul worker non ha deadline, e il suo tetto è il processo che la ospita. Se l'orphan timeout
-> del job è più corto della lavorazione, sul percorso gRPC l'item viene ri-claimato mentre il worker
-> lavora ancora: il fencing token impedisce al perdente di finalizzare, ma i due effetti sono già
-> stati prodotti entrambi. Dimensionare `lock-timeout` sulla durata reale del task.
+- **`LockToken`, il token del claim che ha dispatchato.** Il worker finalizza con quello e, se
+  l'item riletto ne porta un altro — ri-claimato perché l'orphan timeout è scaduto mentre il task era
+  in coda —, **non lo esegue** (esito `ErrHandled`): il lavoro è di un altro claim. Prima usava il
+  token riletto, quindi eseguiva comunque e poteva chiudere l'esecuzione altrui.
+- **`TimeoutMs`, la deadline del task**, cioè l'orphan timeout del job: la stessa del percorso
+  in-process. È **relativa** e la applica il worker col proprio orologio, perché un istante assoluto
+  passato fra due processi è una misura fatta con due orologi. Prima sul worker il task non aveva
+  deadline, e un task più lungo del `lock-timeout` veniva ri-claimato mentre ancora girava.
+
+**Un pool in arresto rifiuta.** Durante `OnStop` i worker si fermano prima del server gRPC, e in
+quella finestra il router accodava su canali che nessuno legge più. Ora risponde `Unavailable`: lo
+scheduler fa `Release` e l'item torna `PENDING` senza consumare un ritentativo.
 
 Il percorso completo di un task, lato worker:
 
@@ -1038,6 +1049,26 @@ c'è per gli esiti riusciti, con `off` non c'è affatto, e `SingleTask` non scri
 
 ---
 
+## Il lease si misura con l'orologio del database
+
+Ogni istante del lease — `locked_at`/`lockedAt` del claim e del recupero, `next_run_at` di `Release`
+e `MarkPending`, `update_time` — lo scrive il **database** (`NOW()` su PostgreSQL, `$$NOW` su Mongo),
+e con lo stesso orologio lo confrontano `ClaimPending` (`next_run_at <= NOW()`) e `RecoverOrphans`
+(`locked_at < NOW() - maxAge`). Prima lo scriveva la replica con `time.Now()` e il backend SQL lo
+confrontava con `NOW()`: due orologi, e qualche secondo di scarto bastava a lasciare non claimabile un
+item appena rilasciato o a recuperare come orfano un item appena claimato. I ritardi di `MarkPending`
+viaggiano come durata relativa e li somma il database. È lo stesso principio di go-core-locker.
+
+`ClaimPending` su SQL è ora **un'istruzione sola** (CTE `FOR UPDATE SKIP LOCKED` + `UPDATE … RETURNING`),
+quindi ritorna ciò che ha scritto invece di ricostruirlo in memoria. Un item `IN_PROGRESS` **senza**
+`locked_at` è un lease malformato e vale come scaduto: prima nessun claim lo riprendeva più. Le colonne
+temporali vanno dichiarate `timestamptz` (è il default di bun su PostgreSQL).
+
+**Suite degli store.** `store/storetest` è la suite che i due backend eseguono identica — claim, limite e
+ordine, fencing dei `Mark*`, `Release` che non conta, recupero degli orfani, deduplica — contro un
+database vero: `BATCH_PG_URL` (`postgres://…?sslmode=disable`) per `sqlstore`, `MONGO_URL` per
+`mongostore`. Senza le variabili i test sono saltati, come la conformance di go-core-locker.
+
 ## Indici — obbligatori, e non creati da soli
 
 Il claim di **ogni job a ogni tick** è una query per `(task_name, status, next_run_at)` ordinata
@@ -1059,6 +1090,7 @@ backend resta il solo modo di sapere quali indici esistono (`Indexes().List` con
 | `ix_workitem_claim` — `(task_name, status, next_run_at, create_time)` | `ClaimPending` | collection scan a ogni tick di ogni job |
 | `ix_workitem_orphan` — `(task_name, status, locked_at)` | `RecoverOrphans` | idem |
 | `ix_workitem_purge` — `(status, update_time)`, parziale sugli stati **terminali** | la query del job `PurgeWorkItems` | la retention scandisce a ogni tick tutto lo storico, cioè la parte di collection che il job esiste per rimpicciolire |
+| `ix_tasklog_purge` — `task_logs (logdate)` | la retention dei `task_logs` di `PurgeWorkItems` (`task-logs: true`) | idem, sulla tabella che cresce di tre righe per item. Non è fra quelli verificati all'avvio (`ExpectedIndexes` guarda `work_items`) |
 
 I tre indici del claim sono **parziali sugli stati attivi**: gli item `DONE`/`FAILED` non vengono
 mai claimati, quindi tenerli fuori mantiene l'indice della dimensione del *lavoro* e non dello
@@ -1066,6 +1098,10 @@ storico. Quello della retention è parziale sugli stati **terminali**, per la ra
 purge lavora solo lì. Al posto di `ix_workitem_purge` c'era `ix_workitem_claim_dest`, che serviva
 il claim filtrato per `destination`: è sparito coi due campi, e lo slot è andato all'unica query
 del sottosistema che non aveva un indice.
+
+`sqlstore.EnsureIndexes` esegue **un'istruzione per volta** (un blocco multi-statement lo accettano solo
+alcuni driver, e un errore non diceva quale istruzione fosse fallita: ora la nomina), e su Mongo il filtro
+parziale dell'unico usa `$in` invece di `$or`, che una partialFilterExpression non ammette.
 
 La libreria **non li crea da sola** (gestione via `EnsureIndexes` allo startup, o migration/ops),
 ma alla **prima operazione sullo store** — il primo claim o il primo insert, quindi entro il primo

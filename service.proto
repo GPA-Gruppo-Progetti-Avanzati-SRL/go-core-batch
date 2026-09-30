@@ -16,8 +16,17 @@ message TaskMessage {
 
   string TaskId = 1 ;
   string JobId = 2;
+  // ObjectId porta il WorkItem.Id (non il suo ObjectId): è la chiave con cui il worker lo ricarica.
   string ObjectId = 3;
   string TaskName = 4;
+  // LockToken è il fencing token del claim che ha prodotto questo dispatch. Il worker finalizza
+  // con QUESTO token e non con quello che rilegge dal DB: se nel frattempo l'item è stato
+  // ri-claimato, il token riletto sarebbe quello del nuovo claim e un worker stale finalizzerebbe
+  // il lavoro di un altro.
+  string LockToken = 5;
+  // TimeoutMs è il tempo massimo di esecuzione (l'orphan timeout del job), relativo: il worker lo
+  // applica dal momento in cui riceve il task, col proprio orologio. 0 = nessun limite.
+  int64 TimeoutMs = 6;
 }
 
 

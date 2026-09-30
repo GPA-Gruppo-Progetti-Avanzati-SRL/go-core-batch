@@ -177,3 +177,21 @@ func TestActiveInstances_TypeDichiaratoEsclusoDalModeNonEUnErrore(t *testing.T) 
 		}
 	}, declared())
 }
+
+// neverRunner fallisce il test se viene eseguito.
+type neverRunner struct{ t *testing.T }
+
+func (n neverRunner) Run(context.Context, *store.WorkItem) error {
+	n.t.Error("il runner non doveva essere eseguito: l'item aveva già esaurito i ritentativi")
+	return nil
+}
+
+// Un orfano recuperato oltre il tetto (il runner di prima è morto senza ritornare, e RecoverOrphans
+// ha incrementato il contatore) va in FAILED senza rieseguire il runner: prima il tetto si
+// applicava solo al ritorno del runner, e un runner che fa morire il processo girava per sempre.
+func TestMaxRetry_OrfanoOltreIlTettoNonRieseguito(t *testing.T) {
+	items := runWith(t, New("import-in", neverRunner{t}).WithMaxRetry(3), itemAtRetry(4))
+	if !items.failed || items.pending || items.done {
+		t.Fatalf("atteso MarkFailed senza esecuzione, ottenuto done=%v pending=%v failed=%v", items.done, items.pending, items.failed)
+	}
+}

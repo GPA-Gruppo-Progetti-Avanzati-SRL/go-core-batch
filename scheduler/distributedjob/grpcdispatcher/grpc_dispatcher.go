@@ -23,14 +23,14 @@ func NewGrpcDispatcher(client *grpctransport.Client) *GrpcDispatcher {
 
 var _ distributedjob.ITaskDispatcher = (*GrpcDispatcher)(nil)
 
-// DispatchTask inoltra il task al worker remoto. Sul filo viaggia il solo item.Id — è tutto
-// ciò che il proto porta — e il bridge lato worker ricarica il WorkItem da lì: è l'unico
-// percorso in cui la rilettura è necessaria, e resta.
-//
-// req.Timeout non attraversa il filo: il proto non ha un campo per portarlo, e il deadline del
-// worker remoto è governato dal suo processo. È una divergenza nota fra i due percorsi.
+// DispatchTask inoltra il task al worker remoto. Sul filo viaggiano l'id dell'item, il suo
+// fencing token e il timeout: il bridge lato worker ricarica il WorkItem dall'id, ma finalizza col
+// token del dispatch (se nel frattempo l'item è stato ri-claimato, non esegue nulla) e interrompe
+// l'esecuzione oltre il timeout — l'orphan timeout del job, lo stesso deadline del percorso
+// in-process. Prima né l'uno né l'altro attraversavano il filo: un task lungo veniva ri-dispatchato
+// mentre ancora girava, e il worker stale finalizzava col token riletto, cioè quello del nuovo claim.
 func (d *GrpcDispatcher) DispatchTask(ctx context.Context, req distributedjob.DispatchRequest) error {
-	_, err := d.client.DistribuiteTask(ctx, req.JobId, req.TaskId, req.Item.Id, req.TaskName)
+	_, err := d.client.DistribuiteTask(ctx, req.JobId, req.TaskId, req.Item.Id, req.TaskName, req.Item.LockToken, req.Timeout)
 	return err
 }
 

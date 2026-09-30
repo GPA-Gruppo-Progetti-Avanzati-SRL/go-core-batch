@@ -169,7 +169,10 @@ func esegui(ctx context.Context, name, jobID, taskName string, item *store.WorkI
 	// nil→MarkDone, store.Retry→MarkPending, err→MarkFailed, store.ErrHandled→intatto.
 	// Un store.Retry oltre il tetto del task diventa MarkFailed: vedi store.ApplyResult.
 	start := batchmetrics.TaskStart(taskName)
-	runErr := tr.Runner.Run(ctx, item)
+	runErr := store.CheckExhausted(item, maxRetry)
+	if runErr == nil {
+		runErr = tr.Runner.Run(ctx, item)
+	}
 	outcome, markErr := store.ApplyResult(ctx, items, item, maxRetry, runErr)
 	// Lo stesso start alle due: misurano per costruzione la stessa finestra.
 	batchmetrics.ObserveTask(taskName, outcome, start)

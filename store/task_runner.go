@@ -63,6 +63,9 @@ func ApplyResult(ctx context.Context, items IWorkItemStore, item *WorkItem, maxR
 	if errors.Is(runErr, ErrHandled) {
 		return OutcomeHandled, nil
 	}
+	if errors.Is(runErr, ErrRetriesExhausted) {
+		return OutcomeExhausted, items.MarkFailed(ctx, item.Id, item.LockToken, runErr.Error())
+	}
 	if re, ok := errors.AsType[*RetryError](runErr); ok {
 		if maxRetry >= 0 && item.Retry >= maxRetry {
 			return OutcomeExhausted, items.MarkFailed(ctx, item.Id, item.LockToken, exhaustedReason(maxRetry, re))
@@ -80,4 +83,24 @@ func exhaustedReason(maxRetry int, re *RetryError) string {
 		return fmt.Sprintf("superati i %d ritentativi previsti: %s", maxRetry, re.Cause.Error())
 	}
 	return fmt.Sprintf("superati i %d ritentativi previsti", maxRetry)
+}
+
+// ErrRetriesExhausted è l'esito di un item che ha già consumato i ritentativi previsti PRIMA di
+// essere eseguito: ApplyResult lo classifica OutcomeExhausted e lo manda in FAILED senza rieseguirlo.
+var ErrRetriesExhausted = errors.New("ritentativi esauriti")
+
+// CheckExhausted dice se item va fermato invece che eseguito: il suo contatore ha già superato il
+// tetto (maxRetry negativo = illimitato). Ritorna nil se l'esecuzione può procedere, altrimenti un
+// errore che avvolge ErrRetriesExhausted, da passare così com'è ad ApplyResult.
+//
+// Serve per gli orfani. ApplyResult controlla il tetto quando il runner RITORNA; un runner che non
+// ritorna mai — il processo muore di OOM, viene ucciso, va in panic fuori dal recover — lascia
+// l'item IN_PROGRESS, RecoverOrphans lo riprende incrementandone il contatore, e senza questo
+// controllo lo si rieseguiva per sempre, occupando uno slot del `limit` a ogni tick. `max-retry: N`
+// concede N+1 esecuzioni: con item.Retry > N sono già state tutte consumate.
+func CheckExhausted(item *WorkItem, maxRetry int) error {
+	if maxRetry < 0 || item.Retry <= maxRetry {
+		return nil
+	}
+	return fmt.Errorf("%w: %d ritentativi previsti, l'item ne ha già consumati %d (orfano recuperato)", ErrRetriesExhausted, maxRetry, item.Retry)
 }

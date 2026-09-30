@@ -1,6 +1,8 @@
 package grpchandler
 
 import (
+	"fmt"
+
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/grpctransport"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/runner"
@@ -64,11 +66,20 @@ func (s *runnerService) GetTaskExecutions(taskName string) (worker.RunTask, bool
 		if appErr != nil {
 			return appErr
 		}
+		if t.DispatchToken != "" && item.LockToken != t.DispatchToken {
+			// Ri-claimato dopo il dispatch (orphan timeout scaduto mentre il task era in coda): il
+			// lavoro è di un altro claim. Eseguirlo lo raddoppierebbe, e finalizzarlo col token riletto
+			// chiuderebbe l'esecuzione altrui.
+			return fmt.Errorf("%w: item %s ri-claimato dopo il dispatch", store.ErrHandled, item.Id)
+		}
 		// Passa a worker.Run l'item INTERO: è ciò che store.ApplyResult riceve per finalizzare
 		// (fencing token, contatore dei tentativi). Il tetto ai ritentativi viaggia a parte,
 		// perché è configurazione dell'istanza di task e non un dato dell'item.
 		t.Item = item
 		t.MaxRetry = tr.MaxRetry
+		if err := store.CheckExhausted(item, t.ResolveMaxRetry()); err != nil {
+			return err
+		}
 		return tr.Runner.Run(t.Context, item)
 	}, true
 }

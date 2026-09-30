@@ -2,6 +2,8 @@ package sqlstore
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,48 +54,38 @@ func (d *workItemDataSQL) warnIfIndexesMissing(ctx context.Context) {
 	})
 }
 
-// ClaimPending atomically selects up to limit PENDING items of taskName,
-// marks them IN_PROGRESS with locked_at = now, and returns the full records.
-// Uses SELECT FOR UPDATE SKIP LOCKED — safe across multiple replicas.
+// ClaimPending atomically selects up to limit PENDING items of taskName, marks them IN_PROGRESS
+// and returns the full records. Uses SELECT FOR UPDATE SKIP LOCKED — safe across multiple replicas.
+//
+// Ogni istante del lease è dell'orologio del DATABASE (NOW()), mai di quello del processo: la
+// scadenza di next_run_at la valuta il database, quindi un locked_at scritto con l'orologio di una
+// replica e confrontato con quello del database è una misura fatta con due orologi — qualche
+// secondo di scarto basta a far recuperare come orfano un item appena claimato, o a lasciare non
+// claimabile un item appena rilasciato. È un'istruzione sola, quindi atomica senza transazione, e
+// ritorna ciò che ha scritto (RETURNING) invece di ricostruirlo.
 func (d *workItemDataSQL) ClaimPending(ctx context.Context, taskName string, limit int) ([]*store.WorkItem, *core.Error) {
 	// La verifica sta anche qui, e non solo su InsertIfNotActive: gli indici del claim servono a
 	// OGNI job, compresi quelli claim-only (DistribuiteTask, NotificationKafka) che un feed non
 	// ce l'hanno e quindi non passerebbero mai di là. È sync.Once: una sola lettura per processo.
 	d.warnIfIndexesMissing(ctx)
-	now := time.Now()
-	token := store.NewLockToken()
-	host := store.Hostname()
 	var items []*store.WorkItem
-	err := d.DB.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		q := `SELECT * FROM work_items WHERE task_name = ? AND status = ?
-			  AND (next_run_at IS NULL OR next_run_at <= NOW())`
-		args := []any{taskName, store.StatusPending}
-		q += ` ORDER BY next_run_at ASC NULLS FIRST, create_time ASC LIMIT ? FOR UPDATE SKIP LOCKED`
-		args = append(args, limit)
-		if err := tx.NewRaw(q, args...).Scan(ctx, &items); err != nil {
-			return err
-		}
-		if len(items) == 0 {
-			return nil
-		}
-		ids := make([]string, len(items))
-		for i, it := range items {
-			ids[i] = it.Id
-			it.Status = store.StatusInProgress
-			it.LockedAt = &now
-			it.LockToken = token
-			it.LockedBy = host
-		}
-		_, err := tx.NewUpdate().TableExpr(store.TableWorkItems).
-			Set("status = ?", store.StatusInProgress).
-			Set("locked_at = ?", now).
-			Set("update_time = ?", now).
-			Set("lock_token = ?", token).
-			Set("locked_by = ?", host).
-			Where("id IN (?)", bun.List(ids)).
-			Exec(ctx)
-		return err
-	})
+	err := d.DB.NewRaw(`
+		WITH claimed AS (
+			SELECT id FROM work_items
+			WHERE task_name = ? AND status = ? AND (next_run_at IS NULL OR next_run_at <= NOW())
+			ORDER BY next_run_at ASC NULLS FIRST, create_time ASC
+			LIMIT ?
+			FOR UPDATE SKIP LOCKED
+		), updated AS (
+			UPDATE work_items w
+			SET status = ?, locked_at = NOW(), update_time = NOW(), lock_token = ?, locked_by = ?
+			FROM claimed WHERE w.id = claimed.id
+			RETURNING w.*
+		)
+		SELECT * FROM updated ORDER BY next_run_at ASC NULLS FIRST, create_time ASC
+	`, taskName, store.StatusPending, limit,
+		store.StatusInProgress, store.NewLockToken(), store.Hostname(),
+	).Scan(ctx, &items)
 	if err != nil {
 		return nil, errs.Tech(errs.CodeClaim).WithCause(err)
 	}
@@ -104,31 +96,28 @@ func (d *workItemDataSQL) ClaimPending(ctx context.Context, taskName string, lim
 // refreshing locked_at to now and incrementing retry. Returns the items for
 // immediate processing — no reset to PENDING, no waiting for the next tick.
 // Uses a CTE with FOR UPDATE SKIP LOCKED so it is safe across replicas.
+//
+// La soglia è NOW() - maxAge, cioè l'età del lease misurata dall'orologio che l'ha scritto (vedi
+// ClaimPending). Un item IN_PROGRESS senza locked_at è un lease malformato e vale come scaduto:
+// altrimenti nessun claim lo riprenderebbe più.
 func (d *workItemDataSQL) RecoverOrphans(ctx context.Context, taskName string, maxAge time.Duration, limit int) ([]*store.WorkItem, *core.Error) {
-	cutoff := time.Now().Add(-maxAge)
-	now := time.Now()
-
-	token := store.NewLockToken()
-	host := store.Hostname()
-
-	where := `task_name = ? AND status = ? AND locked_at < ?`
-	args := []any{taskName, store.StatusInProgress, cutoff}
-	args = append(args, limit, now, token, host, now)
-
 	var items []*store.WorkItem
 	err := d.DB.NewRaw(`
 		WITH recovered AS (
 			SELECT id FROM work_items
-			WHERE `+where+`
-			ORDER BY locked_at ASC
+			WHERE task_name = ? AND status = ?
+			  AND (locked_at IS NULL OR locked_at < NOW() - (? * INTERVAL '1 millisecond'))
+			ORDER BY locked_at ASC NULLS FIRST
 			LIMIT ?
 			FOR UPDATE SKIP LOCKED
 		)
 		UPDATE work_items
-		SET locked_at = ?, lock_token = ?, locked_by = ?, retry = retry + 1, update_time = ?
+		SET locked_at = NOW(), lock_token = ?, locked_by = ?, retry = retry + 1, update_time = NOW()
 		WHERE id IN (SELECT id FROM recovered)
 		RETURNING *
-	`, args...).Scan(ctx, &items)
+	`, taskName, store.StatusInProgress, maxAge.Milliseconds(), limit,
+		store.NewLockToken(), store.Hostname(),
+	).Scan(ctx, &items)
 	if err != nil {
 		return nil, errs.Tech(errs.CodeRecover).WithCause(err)
 	}
@@ -142,10 +131,9 @@ func (d *workItemDataSQL) MarkDone(ctx context.Context, ids []string, token stri
 	if len(ids) == 0 {
 		return nil
 	}
-	now := time.Now()
 	res, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
 		Set("status = ?", store.StatusDone).
-		Set("update_time = ?", now).
+		Set("update_time = NOW()").
 		Set("executed_by = ?", store.Hostname()).
 		Set("locked_at = NULL").
 		Where("id IN (?) AND status = ? AND lock_token = ?", bun.List(ids), store.StatusInProgress, token).
@@ -162,11 +150,10 @@ func (d *workItemDataSQL) MarkDone(ctx context.Context, ids []string, token stri
 
 // MarkFailed transitions a single IN_PROGRESS item to FAILED, fenced dal token (idempotente).
 func (d *workItemDataSQL) MarkFailed(ctx context.Context, id, token, reason string) *core.Error {
-	now := time.Now()
 	res, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
 		Set("status = ?", store.StatusFailed).
 		Set("error = ?", reason).
-		Set("update_time = ?", now).
+		Set("update_time = NOW()").
 		Set("executed_by = ?", store.Hostname()).
 		Set("locked_at = NULL").
 		Where("id = ? AND status = ? AND lock_token = ?", id, store.StatusInProgress, token).
@@ -188,12 +175,11 @@ func (d *workItemDataSQL) MarkFailed(ctx context.Context, id, token, reason stri
 // token e idempotente. È MarkPending meno l'incremento di retry: il tentativo non è avvenuto,
 // quindi non va contato. next_run_at = now, così il tick successivo lo riprende subito.
 func (d *workItemDataSQL) Release(ctx context.Context, id, token string) *core.Error {
-	now := time.Now()
 	res, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
 		Set("status = ?", store.StatusPending).
 		Set("locked_at = NULL").
-		Set("update_time = ?", now).
-		Set("next_run_at = ?", now).
+		Set("update_time = NOW()").
+		Set("next_run_at = NOW()").
 		Set("error = NULL").
 		Where("id = ? AND status = ? AND lock_token = ?", id, store.StatusInProgress, token).
 		Exec(ctx)
@@ -212,15 +198,15 @@ func (d *workItemDataSQL) Release(ctx context.Context, id, token string) *core.E
 // e lasciargli addosso il motivo per cui l'ultimo tentativo non era riuscito fa leggere come
 // fallito qualcosa che è solo in attesa. Il motivo resta nella riga di task_logs.
 func (d *workItemDataSQL) MarkPending(ctx context.Context, id, token string, after time.Duration) *core.Error {
-	now := time.Now()
-	nextRunAt := now.Add(after)
 	res, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
 		Set("status = ?", store.StatusPending).
 		Set("locked_at = NULL").
-		Set("update_time = ?", now).
+		Set("update_time = NOW()").
 		Set("executed_by = ?", store.Hostname()).
 		Set("retry = retry + 1").
-		Set("next_run_at = ?", nextRunAt).
+		// Il ritardo è relativo, e lo somma il database al proprio orologio: è lo stesso con cui
+		// ClaimPending lo confronterà.
+		Set("next_run_at = NOW() + (? * INTERVAL '1 millisecond')", after.Milliseconds()).
 		Set("error = NULL").
 		Where("id = ? AND status = ? AND lock_token = ?", id, store.StatusInProgress, token).
 		Exec(ctx)
@@ -384,11 +370,26 @@ func (d *workItemDataSQL) List(ctx context.Context, taskName, status string, pag
 // È Postgres-specifico (come il resto delle utility DDL del modulo). Su MySQL/SQLite le colonne
 // e gli indici vanno creati manualmente via migration.
 func EnsureIndexes(ctx context.Context, db *bun.DB) error {
-	if _, err := db.ExecContext(ctx, ensureColumnsDDL); err != nil {
-		return err
+	// Un'istruzione per Exec: un blocco multi-statement lo accettano solo alcuni driver (il
+	// protocollo semplice di PostgreSQL sì, MySQL solo con multiStatements=true), e se una delle
+	// istruzioni fallisce l'errore non dice quale.
+	for _, stmt := range ddlStatements(ensureColumnsDDL + ensureIndexesDDL) {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("EnsureIndexes: %s: %w", strings.Join(strings.Fields(stmt), " "), err)
+		}
 	}
-	_, err := db.ExecContext(ctx, ensureIndexesDDL)
-	return err
+	return nil
+}
+
+// ddlStatements divide un blocco DDL nelle sue istruzioni (separate da `;`), scartando quelle vuote.
+func ddlStatements(ddl string) []string {
+	var out []string
+	for _, s := range strings.Split(ddl, ";") {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // ensureColumnsDDL sono le colonne che la libreria aggiunge a una tabella già esistente. Come per
@@ -419,4 +420,7 @@ const ensureIndexesDDL = `
 		CREATE INDEX IF NOT EXISTS ix_workitem_purge
 		ON work_items (status, update_time)
 		WHERE status IN ('DONE', 'FAILED');
+
+		CREATE INDEX IF NOT EXISTS ix_tasklog_purge
+		ON task_logs (logdate);
 	`

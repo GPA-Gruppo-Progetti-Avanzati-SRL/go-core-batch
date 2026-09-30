@@ -49,10 +49,15 @@ type Task struct {
 	// instrada (il bridge grpchandler): nil = illimitato, per la stessa ragione di
 	// task.Config.MaxRetry — lo zero-value di un int direbbe "nessun ritentativo". Non sta sul
 	// WorkItem perché non è un dato dell'item: è configurazione dell'istanza di task.
-	MaxRetry  *int
-	StartTime time.Time
-	Context   context.Context
-	Cancel    context.CancelFunc
+	MaxRetry *int
+	// DispatchToken è il fencing token del claim che ha prodotto il dispatch remoto (gRPC). Il
+	// bridge ricarica l'item dal DB, ma se il token riletto è diverso l'item è stato ri-claimato nel
+	// frattempo: il task non va eseguito, e la finalizzazione usa sempre questo token. Vuoto sul
+	// percorso in-process, dove l'item arriva già claimato.
+	DispatchToken string
+	StartTime     time.Time
+	Context       context.Context
+	Cancel        context.CancelFunc
 }
 
 func GenerateTask(id, jobid, taskName, objectid string, ctx context.Context, cancel context.CancelFunc) Task {

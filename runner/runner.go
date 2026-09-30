@@ -123,7 +123,10 @@ func (r *MuxRunner) Run(ctx context.Context, item *store.WorkItem, items store.I
 		}
 		return err
 	}
-	runErr := runner.Runner.Run(ctx, item)
+	runErr := store.CheckExhausted(item, runner.ResolveMaxRetry())
+	if runErr == nil {
+		runErr = runner.Runner.Run(ctx, item)
+	}
 	outcome, markErr := store.ApplyResult(ctx, items, item, runner.ResolveMaxRetry(), runErr)
 	batchmetrics.ObserveTask(taskName, outcome, start)
 	if markErr != nil {

@@ -49,3 +49,20 @@ func modelloWorkItem() string {
 	}
 	return strings.Join(cols, " ")
 }
+
+// Il DDL si esegue un'istruzione alla volta: ogni istruzione è una sola, senza `;` residui, e c'è
+// anche l'indice di retention di task_logs.
+func TestEnsureIndexes_IstruzioniSingole(t *testing.T) {
+	stmts := ddlStatements(ensureColumnsDDL + ensureIndexesDDL)
+	if len(stmts) != 8 {
+		t.Fatalf("attese 8 istruzioni (3 ADD COLUMN + 5 indici), trovate %d: %q", len(stmts), stmts)
+	}
+	for _, s := range stmts {
+		if strings.Contains(s, ";") {
+			t.Errorf("istruzione con più statement: %q", s)
+		}
+	}
+	if !strings.Contains(ensureIndexesDDL, store.IndexTaskLogPurge) {
+		t.Error("manca l'indice di retention di task_logs")
+	}
+}

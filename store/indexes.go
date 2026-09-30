@@ -24,6 +24,10 @@ const (
 	// collection — quella che il job esiste per tenere sotto controllo. Senza, la retention
 	// scandisce a ogni tick tutto lo storico, anche quando non c'è nulla da cancellare.
 	IndexWorkItemPurge = "ix_workitem_purge"
+	// IndexTaskLogPurge serve PurgeTaskLogs, che filtra e ordina task_logs per logdate: è la
+	// collection con più scritture del sottosistema (fino a tre righe per item), e senza indice
+	// la retention la scandiva per intero a ogni tick.
+	IndexTaskLogPurge = "ix_tasklog_purge"
 )
 
 // ExpectedIndexes è l'elenco che le verifiche di avvio confrontano con ciò che esiste davvero.

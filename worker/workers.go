@@ -39,6 +39,18 @@ func (w *Workers) GetChannel(name string) chan *Task {
 	return nil
 }
 
+// Stopping dice se il pool ha già ricevuto l'OnStop. Chi accoda task dall'esterno (il router gRPC)
+// deve rifiutarli da quel momento: i worker non prelevano più dal canale, e un task accodato lì
+// resterebbe IN_PROGRESS fino all'orphan timeout invece di tornare subito PENDING.
+func (w *Workers) Stopping() bool {
+	select {
+	case <-w.StopChannel:
+		return true
+	default:
+		return false
+	}
+}
+
 // NewWorkers creates the worker pool. Pass items to enable workitem lifecycle management
 // (MarkDone/MarkFailed after each task). Pass nil when not using the claiming pattern.
 //

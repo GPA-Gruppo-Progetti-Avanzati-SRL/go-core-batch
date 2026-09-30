@@ -84,13 +84,15 @@ var _ store.IWorkItemStore = (*workItemData)(nil)
 //
 // La query dei candidati tratta un nextRunAt assente o null come "scaduto adesso" (specchio del
 // `next_run_at IS NULL OR <= NOW()` del backend SQL).
+//
+// Ogni istante del lease è dell'orologio del DATABASE ($$NOW), mai di quello del processo: vedi
+// dbNow.
 func (d *workItemData) ClaimPending(ctx context.Context, taskName string, limit int) ([]*store.WorkItem, *core.Error) {
 	// La verifica sta anche qui, e non solo su InsertIfNotActive: gli indici del claim servono a
 	// OGNI job, compresi quelli claim-only (DistribuiteTask, NotificationKafka) che un feed non
 	// ce l'hanno e quindi non passerebbero mai di là. È sync.Once: una sola lettura degli indici
 	// per processo, qualunque sia la strada che ci arriva per prima.
 	d.warnIfIndexesMissing(ctx)
-	now := time.Now()
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 
 	query := bson.M{
@@ -99,7 +101,7 @@ func (d *workItemData) ClaimPending(ctx context.Context, taskName string, limit 
 		// {nextRunAt: null} matches both missing and null fields in MongoDB.
 		"$or": []bson.M{
 			{"nextRunAt": nil},
-			{"nextRunAt": bson.M{"$lte": now}},
+			{"$expr": bson.M{"$lte": bson.A{"$nextRunAt", "$$NOW"}}},
 		},
 	}
 
@@ -127,14 +129,12 @@ func (d *workItemData) ClaimPending(ctx context.Context, taskName string, limit 
 	ids := make([]string, len(candidates))
 	models := make([]mgodriver.WriteModel, len(candidates))
 	token := store.NewLockToken()
-	host := store.Hostname()
-	set := bson.M{"$set": bson.M{
-		"status":     store.StatusInProgress,
-		"lockedAt":   now,
-		"updateTime": now,
-		"lockToken":  token,
-		"lockedBy":   host,
-	}}
+	set := dbNow(bson.M{
+		"status":    store.StatusInProgress,
+		"lockedAt":  "$$NOW",
+		"lockToken": token,
+		"lockedBy":  store.Hostname(),
+	})
 	for i, c := range candidates {
 		ids[i] = c.Id
 		models[i] = mgodriver.NewUpdateOneModel().
@@ -169,12 +169,17 @@ func (d *workItemData) byToken(ctx context.Context, code string, ids []string, t
 //
 // Stessa forma di ClaimPending: tre round-trip invece di 1+N. Il filtro `lockedAt < cutoff`
 // resta dentro ogni UpdateOne, quindi due repliche non recuperano lo stesso orfano.
+//
+// La soglia è $$NOW - maxAge, l'età del lease misurata dall'orologio che l'ha scritto (vedi dbNow).
+// Un item IN_PROGRESS senza lockedAt è un lease malformato e vale come scaduto — in un'espressione
+// un campo assente o null è minore di qualunque data —, altrimenti nessun claim lo riprenderebbe.
 func (d *workItemData) RecoverOrphans(ctx context.Context, taskName string, maxAge time.Duration, limit int) ([]*store.WorkItem, *core.Error) {
-	now := time.Now()
-	cutoff := now.Add(-maxAge)
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
+	orphan := bson.M{"$expr": bson.M{"$lt": bson.A{
+		"$lockedAt", bson.M{"$subtract": bson.A{"$$NOW", maxAge.Milliseconds()}},
+	}}}
 
-	query := bson.M{"taskName": taskName, "status": store.StatusInProgress, "lockedAt": bson.M{"$lt": cutoff}}
+	query := bson.M{"taskName": taskName, "status": store.StatusInProgress, "$and": bson.A{orphan}}
 	cursor, err := coll.Find(ctx, query,
 		options.Find().
 			SetSort(bson.D{{Key: "lockedAt", Value: 1}}).
@@ -199,15 +204,13 @@ func (d *workItemData) RecoverOrphans(ctx context.Context, taskName string, maxA
 	ids := make([]string, len(candidates))
 	models := make([]mgodriver.WriteModel, len(candidates))
 	token := store.NewLockToken()
-	host := store.Hostname()
-	update := bson.M{
-		"$set": bson.M{"lockedAt": now, "updateTime": now, "lockToken": token, "lockedBy": host},
-		"$inc": bson.M{"retry": 1},
-	}
+	update := dbNow(bson.M{
+		"lockedAt": "$$NOW", "lockToken": token, "lockedBy": store.Hostname(), "retry": incRetry,
+	})
 	for i, c := range candidates {
 		ids[i] = c.Id
 		models[i] = mgodriver.NewUpdateOneModel().
-			SetFilter(bson.M{"_id": c.Id, "status": store.StatusInProgress, "lockedAt": bson.M{"$lt": cutoff}}).
+			SetFilter(bson.M{"_id": c.Id, "status": store.StatusInProgress, "$and": bson.A{orphan}}).
 			SetUpdate(update)
 	}
 	if _, appErr := d.Service.BulkWrite[store.WorkItem](ctx, models, mongo.BulkUnordered()); appErr != nil {
@@ -215,6 +218,32 @@ func (d *workItemData) RecoverOrphans(ctx context.Context, taskName string, maxA
 	}
 	return d.byToken(ctx, errs.CodeRecover, ids, token)
 }
+
+// dbNow è l'update a pipeline dei claim e dei Mark*: imposta i campi di set, e updateTime a $$NOW.
+//
+// Gli istanti del lease sono dell'orologio del DATABASE e mai di quello del processo, perché è il
+// database a confrontarli: una scadenza scritta con l'orologio di una replica e valutata con quello
+// di un'altra (o del server) è una misura fatta con due orologi, e qualche secondo di scarto basta a
+// recuperare come orfano un item appena claimato o a lasciare non claimabile un item appena
+// rilasciato. In un update a pipeline una stringa che comincia con `$` è un'espressione: i valori
+// che non sono espressioni della libreria (token, hostname, motivo) passano da $literal.
+func dbNow(set bson.M, unset ...string) mgodriver.Pipeline {
+	fields := bson.D{{Key: "updateTime", Value: "$$NOW"}}
+	for k, v := range set {
+		if str, ok := v.(string); ok && str != "$$NOW" {
+			v = bson.M{"$literal": str}
+		}
+		fields = append(fields, bson.E{Key: k, Value: v})
+	}
+	p := mgodriver.Pipeline{{{Key: "$set", Value: fields}}}
+	if len(unset) > 0 {
+		p = append(p, bson.D{{Key: "$unset", Value: unset}})
+	}
+	return p
+}
+
+// incRetry è il `$inc: {retry: 1}` di un update a pipeline.
+var incRetry = bson.M{"$add": bson.A{bson.M{"$ifNull": bson.A{"$retry", 0}}, 1}}
 
 // fencedFilter è il filtro base dei Mark*: item ancora IN_PROGRESS E con il fencing token
 // del claim corrente. Se il token non matcha (item ri-claimato da un'altra replica) l'update
@@ -231,14 +260,10 @@ func (d *workItemData) MarkDone(ctx context.Context, ids []string, token string)
 	if len(ids) == 0 {
 		return nil
 	}
-	now := time.Now()
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	res, err := coll.UpdateMany(ctx,
 		bson.M{"_id": bson.M{"$in": ids}, "status": store.StatusInProgress, "lockToken": token},
-		bson.M{"$set": bson.M{
-			"status": store.StatusDone, "updateTime": now, "lockedAt": nil,
-			"executedBy": store.Hostname(),
-		}},
+		dbNow(bson.M{"status": store.StatusDone, "lockedAt": nil, "executedBy": store.Hostname()}),
 	)
 	if err != nil {
 		return errs.Tech(errs.CodeMarkDone).WithCause(err)
@@ -252,13 +277,11 @@ func (d *workItemData) MarkDone(ctx context.Context, ids []string, token string)
 
 // MarkFailed transitions a single IN_PROGRESS item to FAILED, fenced dal token (idempotente).
 func (d *workItemData) MarkFailed(ctx context.Context, id, token, reason string) *core.Error {
-	now := time.Now()
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	res, err := coll.UpdateOne(ctx, fencedFilter(id, token),
-		bson.M{"$set": bson.M{
-			"status": store.StatusFailed, "error": reason, "updateTime": now, "lockedAt": nil,
-			"executedBy": store.Hostname(),
-		}},
+		dbNow(bson.M{
+			"status": store.StatusFailed, "error": reason, "lockedAt": nil, "executedBy": store.Hostname(),
+		}),
 	)
 	if err != nil {
 		return errs.Tech(errs.CodeMarkFailed).WithCause(err)
@@ -277,15 +300,9 @@ func (d *workItemData) MarkFailed(ctx context.Context, id, token, reason string)
 // e lasciargli addosso il motivo per cui l'ultimo tentativo non era riuscito fa leggere come
 // fallito qualcosa che è solo in attesa. Il motivo resta nella riga di task_logs.
 func (d *workItemData) Release(ctx context.Context, id, token string) *core.Error {
-	now := time.Now()
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	res, err := coll.UpdateOne(ctx, fencedFilter(id, token),
-		bson.M{
-			"$set": bson.M{
-				"status": store.StatusPending, "lockedAt": nil, "updateTime": now, "nextRunAt": now,
-			},
-			"$unset": bson.M{"error": ""},
-		},
+		dbNow(bson.M{"status": store.StatusPending, "lockedAt": nil, "nextRunAt": "$$NOW"}, "error"),
 	)
 	if err != nil {
 		return errs.Tech(errs.CodeRelease).WithCause(err)
@@ -302,18 +319,14 @@ func (d *workItemData) Release(ctx context.Context, id, token string) *core.Erro
 // e lasciargli addosso il motivo per cui l'ultimo tentativo non era riuscito fa leggere come
 // fallito qualcosa che è solo in attesa. Il motivo resta nella riga di task_logs.
 func (d *workItemData) MarkPending(ctx context.Context, id, token string, after time.Duration) *core.Error {
-	now := time.Now()
-	nextRunAt := now.Add(after)
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	res, err := coll.UpdateOne(ctx, fencedFilter(id, token),
-		bson.M{
-			"$set": bson.M{
-				"status": store.StatusPending, "lockedAt": nil, "updateTime": now,
-				"nextRunAt": nextRunAt, "executedBy": store.Hostname(),
-			},
-			"$unset": bson.M{"error": ""},
-			"$inc":   bson.M{"retry": 1},
-		},
+		dbNow(bson.M{
+			"status": store.StatusPending, "lockedAt": nil, "executedBy": store.Hostname(), "retry": incRetry,
+			// Il ritardo è relativo e lo somma il database al proprio orologio: è lo stesso con cui
+			// ClaimPending lo confronterà.
+			"nextRunAt": bson.M{"$add": bson.A{"$$NOW", after.Milliseconds()}},
+		}, "error"),
 	)
 	if err != nil {
 		return errs.Tech(errs.CodeMarkPending).WithCause(err)
@@ -516,12 +529,9 @@ func EnsureIndexes(ctx context.Context, service *mongo.Service) error {
 			Keys: bson.D{{Key: "taskName", Value: 1}, {Key: "objectId", Value: 1}},
 			Options: options.Index().
 				SetUnique(true).
-				SetPartialFilterExpression(bson.M{
-					"$or": bson.A{
-						bson.M{"status": store.StatusPending},
-						bson.M{"status": store.StatusInProgress},
-					},
-				}).
+				// $in come gli altri tre: un $or nel partialFilterExpression era l'unica forma
+				// diversa, e le due hanno lo stesso requisito di versione (MongoDB 6.0+).
+				SetPartialFilterExpression(attivi).
 				SetName(store.IndexWorkItemActive),
 		},
 		{
@@ -541,6 +551,13 @@ func EnsureIndexes(ctx context.Context, service *mongo.Service) error {
 			Keys:    bson.D{{Key: "status", Value: 1}, {Key: "updateTime", Value: 1}},
 			Options: options.Index().SetPartialFilterExpression(terminali).SetName(store.IndexWorkItemPurge),
 		},
+	})
+	if err != nil {
+		return err
+	}
+	_, err = service.GetCollection(store.TaskLog{}.GetCollectionName(ctx), "").Indexes().CreateOne(ctx, mgodriver.IndexModel{
+		Keys:    bson.D{{Key: "logdate", Value: 1}},
+		Options: options.Index().SetName(store.IndexTaskLogPurge),
 	})
 	return err
 }

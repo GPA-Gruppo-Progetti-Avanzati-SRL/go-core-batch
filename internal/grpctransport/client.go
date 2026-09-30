@@ -7,6 +7,7 @@ package grpctransport
 import (
 	"context"
 	"fmt"
+	"time"
 
 	batchgrpc "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/grpc"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/grpc/proto"
@@ -35,12 +36,14 @@ func NewClient(config *batchgrpc.ClientConfig) (*Client, error) {
 	return &Client{client: proto.NewDistributionChannelClient(conn)}, nil
 }
 
-func (g *Client) DistribuiteTask(ctx context.Context, jobId, taskId, objectId, taskName string) (string, error) {
+func (g *Client) DistribuiteTask(ctx context.Context, jobId, taskId, objectId, taskName, lockToken string, timeout time.Duration) (string, error) {
 	t, err := g.client.DistribuiteTask(ctx, &proto.TaskMessage{
-		TaskId:   taskId,
-		JobId:    jobId,
-		ObjectId: objectId,
-		TaskName: taskName,
+		TaskId:    taskId,
+		JobId:     jobId,
+		ObjectId:  objectId,
+		TaskName:  taskName,
+		LockToken: lockToken,
+		TimeoutMs: timeout.Milliseconds(),
 	})
 	if err != nil {
 		log.Error().Err(err).Msgf("Errore chiamata gRPC DistribuiteTask: %s", err.Error())

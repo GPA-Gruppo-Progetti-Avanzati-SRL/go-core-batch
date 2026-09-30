@@ -19,8 +19,8 @@ type DispatchRequest struct {
 	TaskName string
 	// Item è il WorkItem INTERO, già claimato dal job: ClaimPending e RecoverOrphans ritornano
 	// i record completi, quindi sul percorso in-process non c'è niente da rileggere. Il percorso
-	// gRPC serializza il solo Id — è tutto ciò che può attraversare il filo — e il bridge lato
-	// worker lo ricarica da lì.
+	// gRPC serializza Id, LockToken e Timeout: il bridge lato worker ricarica l'item dall'Id, ma lo
+	// esegue solo se il token è ancora quello del dispatch.
 	Item *store.WorkItem
 	// Timeout è il tempo oltre il quale l'esecuzione va interrotta. È l'orphan timeout del job
 	// (scheduler.Config.ResolveTimeouts), NON un valore scelto dal dispatcher: oltre quella

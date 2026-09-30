@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -196,5 +197,40 @@ func TestApplyResult(t *testing.T) {
 				t.Errorf("motivo = %q, atteso %q", fs.last.reason, tc.reason)
 			}
 		})
+	}
+}
+
+// TestCheckExhausted: un orfano che ha già consumato i ritentativi va in FAILED senza essere
+// rieseguito. ApplyResult controlla il tetto solo quando il runner ritorna: un runner che fa morire
+// il processo (OOM, kill) non ritorna mai, RecoverOrphans lo riprende col contatore incrementato, e
+// prima lo si rieseguiva per sempre.
+func TestCheckExhausted(t *testing.T) {
+	cases := []struct {
+		retry, maxRetry int
+		stop            bool
+	}{
+		{0, 3, false}, {3, 3, false}, // max-retry: 3 = 4 esecuzioni, l'ultima con Retry 3
+		{4, 3, true},
+		{0, 0, false}, {1, 0, true},
+		{100, -1, false}, // illimitato
+	}
+	for _, c := range cases {
+		err := CheckExhausted(&WorkItem{Id: "x", Retry: c.retry}, c.maxRetry)
+		if (err != nil) != c.stop {
+			t.Errorf("Retry=%d max=%d: err=%v, stop atteso %v", c.retry, c.maxRetry, err, c.stop)
+		}
+		if err != nil && !errors.Is(err, ErrRetriesExhausted) {
+			t.Errorf("errore senza ErrRetriesExhausted: %v", err)
+		}
+	}
+
+	f := &fakeStore{}
+	item := &WorkItem{Id: "x", LockToken: "tok", Retry: 4}
+	outcome, appErr := ApplyResult(context.Background(), f, item, 3, CheckExhausted(item, 3))
+	if appErr != nil || outcome != OutcomeExhausted || f.last.op != "failed" || f.last.token != "tok" {
+		t.Fatalf("outcome=%v appErr=%v last=%+v, atteso Exhausted + MarkFailed fenced", outcome, appErr, f.last)
+	}
+	if !strings.Contains(f.last.reason, "orfano") {
+		t.Errorf("motivo del FAILED senza spiegazione: %q", f.last.reason)
 	}
 }
