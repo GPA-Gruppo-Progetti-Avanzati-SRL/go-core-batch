@@ -2,7 +2,6 @@ package sqlstore
 
 import (
 	"context"
-	"strings"
 	"sync"
 	"time"
 
@@ -347,11 +346,15 @@ func (d *workItemDataSQL) List(ctx context.Context, taskName, status string, pag
 		return nil, appErr
 	}
 
-	orderExpr := "create_time DESC"
-	if expr := strings.TrimPrefix(coresql.SortToSQL(sort), "ORDER BY "); expr != "" {
-		orderExpr = expr
+	q := filtrata()
+	if len(sort) == 0 {
+		q = q.OrderExpr("create_time DESC")
+	} else {
+		var sortErr error
+		if q, sortErr = coresql.ApplySort(q, sort); sortErr != nil {
+			return nil, errs.Tech(errs.CodeList).WithCause(sortErr)
+		}
 	}
-	q := filtrata().OrderExpr(orderExpr)
 	if offset >= 0 {
 		q = q.Offset(offset).Limit(paging.PageSize)
 	}
