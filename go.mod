@@ -3,11 +3,11 @@ module github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch
 go 1.27.1
 
 require (
-	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app v0.0.29-0.20260930144830-cda97e2d1c58
-	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-kafka v0.0.0-20260930140826-a031a6dcfc05
-	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-locker v0.0.0-20260930140825-c5a8ee54c74f
-	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo v0.0.20-0.20260930144830-f84943ee0ccd
-	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-sql v0.0.2-0.20260930144830-7b6f09e06608
+	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app v0.0.29-0.20260930155225-6ce10256d1c2
+	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-kafka v0.0.0-20260930155224-a9f2245e2705
+	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-locker v0.0.0-20260930145246-6ef40841b1b4
+	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo v0.0.20-0.20260930155224-1a71bac1d9bc
+	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-sql v0.0.2-0.20260930155225-0fbda2674d67
 	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/tpm-mongo-common v1.0.24-0.20260806095729-fb30bfd3074b
 	github.com/aws/aws-sdk-go-v2 v1.42.1
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.26
