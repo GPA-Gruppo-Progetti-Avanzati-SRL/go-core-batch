@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 )
@@ -20,10 +22,10 @@ type storeFake struct {
 	// created è quanti item InsertIfNotActive dichiara di aver creato: 0 simula l'item già
 	// attivo, cioè l'esecuzione precedente non ancora finita.
 	created *int
-	err     *core.ApplicationError
+	err     *core.Error
 }
 
-func (s *storeFake) InsertIfNotActive(_ context.Context, items []*store.WorkItem) (int, *core.ApplicationError) {
+func (s *storeFake) InsertIfNotActive(_ context.Context, items []*store.WorkItem) (int, *core.Error) {
 	if s.err != nil {
 		return 0, s.err
 	}
@@ -34,7 +36,7 @@ func (s *storeFake) InsertIfNotActive(_ context.Context, items []*store.WorkItem
 	return len(items), nil
 }
 
-func config(props core.Properties) scheduler.Config {
+func config(props properties.Properties) scheduler.Config {
 	return scheduler.Config{Name: "feed-test", Type: JobType, LockTimeout: time.Minute, Properties: props}
 }
 
@@ -43,7 +45,7 @@ func TestCreaIlWorkItem(t *testing.T) {
 	// Le chiavi arrivano come viper le lascia: minuscole per il payload scritto nello YAML.
 	payload := map[string]any{"modalita": "completa", "tentativi": 3}
 
-	err := run("feed-test", st, config(core.Properties{
+	err := run("feed-test", st, config(properties.Properties{
 		scheduler.PropTask: "import-anagrafiche",
 		PropObjectId:       "ANAGRAFICHE",
 		PropPayload:        payload,
@@ -86,7 +88,7 @@ func TestCreaIlWorkItem(t *testing.T) {
 func TestSenzaPayload(t *testing.T) {
 	st := &storeFake{}
 
-	if err := run("feed-test", st, config(core.Properties{
+	if err := run("feed-test", st, config(properties.Properties{
 		scheduler.PropTask: "import-anagrafiche",
 		PropObjectId:       "ANAGRAFICHE",
 	})); err != nil {
@@ -102,7 +104,7 @@ func TestSenzaPayload(t *testing.T) {
 func TestPropertyConChiaviAbbassate(t *testing.T) {
 	st := &storeFake{}
 
-	if err := run("feed-test", st, config(core.Properties{
+	if err := run("feed-test", st, config(properties.Properties{
 		"task":     "import-anagrafiche",
 		"objectid": "ANAGRAFICHE",
 		"payload":  map[string]any{"modalita": "completa"},
@@ -119,7 +121,7 @@ func TestPropertyConChiaviAbbassate(t *testing.T) {
 // Una property obbligatoria mancante è un errore di CONFIGURAZIONE, e il messaggio deve
 // nominarla: altrimenti si va a cercare il guasto nel database.
 func TestPropertyObbligatorieMancanti(t *testing.T) {
-	for nome, props := range map[string]core.Properties{
+	for nome, props := range map[string]properties.Properties{
 		"senza task":     {PropObjectId: "ANAGRAFICHE"},
 		"senza objectId": {scheduler.PropTask: "import-anagrafiche"},
 		"task vuoto":     {scheduler.PropTask: "", PropObjectId: "ANAGRAFICHE"},
@@ -151,7 +153,7 @@ func TestItemGiaAttivo(t *testing.T) {
 	zero := 0
 	st := &storeFake{created: &zero}
 
-	if err := run("feed-test", st, config(core.Properties{
+	if err := run("feed-test", st, config(properties.Properties{
 		scheduler.PropTask: "import-anagrafiche",
 		PropObjectId:       "ANAGRAFICHE",
 	})); err != nil {
@@ -164,16 +166,16 @@ func TestItemGiaAttivo(t *testing.T) {
 func TestStoreInErrore(t *testing.T) {
 	st := &storeFake{err: core.TechnicalError().WithMessage("mongo giù")}
 
-	err := run("feed-test", st, config(core.Properties{
+	err := run("feed-test", st, config(properties.Properties{
 		scheduler.PropTask: "import-anagrafiche",
 		PropObjectId:       "ANAGRAFICHE",
 	}))
 	if err == nil {
 		t.Fatal("atteso un errore")
 	}
-	var appErr *core.ApplicationError
+	var appErr *core.Error
 	if !errors.As(err, &appErr) {
-		t.Errorf("atteso un *core.ApplicationError, ottenuto %T", err)
+		t.Errorf("atteso un *core.Error, ottenuto %T", err)
 	}
 }
 
@@ -186,7 +188,7 @@ func TestRegister(t *testing.T) {
 	if reg.Factory == nil {
 		t.Fatal("factory nil")
 	}
-	if task := reg.Factory("feed-test", config(core.Properties{
+	if task := reg.Factory("feed-test", config(properties.Properties{
 		scheduler.PropTask: "import-anagrafiche", PropObjectId: "ANAGRAFICHE",
 	})); task == nil {
 		t.Error("la factory deve costruire una gocron.Task")

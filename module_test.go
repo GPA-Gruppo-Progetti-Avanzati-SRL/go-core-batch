@@ -6,12 +6,13 @@ import (
 	"testing"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/worker"
 )
 
-func job(typ string, props core.Properties) scheduler.Config {
+func job(typ string, props properties.Properties) scheduler.Config {
 	return scheduler.Config{Name: typ, Type: typ, Properties: props}
 }
 
@@ -20,8 +21,8 @@ func job(typ string, props core.Properties) scheduler.Config {
 func TestActiveSet_ExplicitReferences(t *testing.T) {
 	a := ActiveSet(&Config{
 		JobsConfig: []scheduler.Config{
-			job("DistribuiteTaskByQuery", core.Properties{"task": "BonifyInit"}),
-			job("HelloWorld", core.Properties{"task": "hello-nightly"}),
+			job("DistribuiteTaskByQuery", properties.Properties{"task": "BonifyInit"}),
+			job("HelloWorld", properties.Properties{"task": "hello-nightly"}),
 		},
 		WorkersConfig: []worker.Config{{Name: "Default", Tasks: []string{"BonifyInit", "AggiornaLimiti"}}},
 	})
@@ -42,7 +43,7 @@ func TestActiveSet_ExplicitReferences(t *testing.T) {
 // `task` è un riferimento ESPLICITO, e una notifica un runner da dichiarare non ce l'ha.
 func TestActiveSet_FrameworkJobTypeIsNotAnExplicitReference(t *testing.T) {
 	a := ActiveSet(&Config{JobsConfig: []scheduler.Config{
-		job("NotificationKafka", core.Properties{"topic": "eventi", "stream": "notifiche-bacheca"}),
+		job("NotificationKafka", properties.Properties{"topic": "eventi", "stream": "notifiche-bacheca"}),
 	}})
 	if len(a.Referenced) != 0 {
 		t.Fatalf("un job type del framework non è un riferimento esplicito: %v", a.Referenced)
@@ -70,7 +71,7 @@ func TestActiveSet_ImpliedActivatesSameNamedTask(t *testing.T) {
 
 func TestActiveSet_SkipsDisabledJobs(t *testing.T) {
 	a := ActiveSet(&Config{JobsConfig: []scheduler.Config{
-		{Name: "spento", Type: "DistribuiteTask", Disabled: true, Properties: core.Properties{"task": "BonifyInit"}},
+		{Name: "spento", Type: "DistribuiteTask", Disabled: true, Properties: properties.Properties{"task": "BonifyInit"}},
 	}})
 	if len(a.Referenced) != 0 || len(a.Implied) != 0 {
 		t.Fatalf("un job disabilitato non referenzia nulla: %v / %v", a.Referenced, a.Implied)
@@ -107,7 +108,7 @@ func TestBatchActive_GatedOnSchedulerOrWorkerModes(t *testing.T) {
 // non dichiarato ferma l'avvio.
 func TestApply_StillFailsOnUnknownExplicitReference(t *testing.T) {
 	a := ActiveSet(&Config{JobsConfig: []scheduler.Config{
-		job("DistribuiteTask", core.Properties{"task": "TaskInesistente"}),
+		job("DistribuiteTask", properties.Properties{"task": "TaskInesistente"}),
 	}})
 	defer func() {
 		r := recover()

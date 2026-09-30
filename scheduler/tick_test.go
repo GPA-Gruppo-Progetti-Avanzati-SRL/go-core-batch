@@ -6,7 +6,8 @@ import (
 	"testing"
 	"time"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/page"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 )
@@ -14,13 +15,13 @@ import (
 type fakeStore struct {
 	claim       []*store.WorkItem
 	orphans     []*store.WorkItem
-	claimErr    *core.ApplicationError
+	claimErr    *core.Error
 	backlogN    int
 	backlogOld  time.Time
 	backlogHits int
 }
 
-func (f *fakeStore) ClaimPending(context.Context, string, int) ([]*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) ClaimPending(context.Context, string, int) ([]*store.WorkItem, *core.Error) {
 	if f.claimErr != nil {
 		return nil, f.claimErr
 	}
@@ -28,42 +29,44 @@ func (f *fakeStore) ClaimPending(context.Context, string, int) ([]*store.WorkIte
 	f.claim = nil
 	return out, nil
 }
-func (f *fakeStore) RecoverOrphans(context.Context, string, time.Duration, int) ([]*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) RecoverOrphans(context.Context, string, time.Duration, int) ([]*store.WorkItem, *core.Error) {
 	out := f.orphans
 	f.orphans = nil
 	return out, nil
 }
-func (f *fakeStore) Backlog(context.Context, string) (int, time.Time, *core.ApplicationError) {
+func (f *fakeStore) Backlog(context.Context, string) (int, time.Time, *core.Error) {
 	f.backlogHits++
 	return f.backlogN, f.backlogOld, nil
 }
-func (f *fakeStore) Release(context.Context, string, string) *core.ApplicationError { return nil }
-func (f *fakeStore) MarkDone(context.Context, []string, string) *core.ApplicationError {
+func (f *fakeStore) Release(context.Context, string, string) *core.Error { return nil }
+func (f *fakeStore) MarkDone(context.Context, []string, string) *core.Error {
 	return nil
 }
-func (f *fakeStore) MarkFailed(context.Context, string, string, string) *core.ApplicationError {
+func (f *fakeStore) MarkFailed(context.Context, string, string, string) *core.Error {
 	return nil
 }
-func (f *fakeStore) MarkPending(context.Context, string, string, time.Duration) *core.ApplicationError {
+func (f *fakeStore) MarkPending(context.Context, string, string, time.Duration) *core.Error {
 	return nil
 }
-func (f *fakeStore) Purge(context.Context, string, time.Time, int) (int, *core.ApplicationError) {
+func (f *fakeStore) Purge(context.Context, string, time.Time, int) (int, *core.Error) {
 	return 0, nil
 }
-func (f *fakeStore) Insert(context.Context, []*store.WorkItem) *core.ApplicationError { return nil }
-func (f *fakeStore) InsertIfNotActive(context.Context, []*store.WorkItem) (int, *core.ApplicationError) {
+func (f *fakeStore) Insert(context.Context, []*store.WorkItem) *core.Error {
+	return nil
+}
+func (f *fakeStore) InsertIfNotActive(context.Context, []*store.WorkItem) (int, *core.Error) {
 	return 0, nil
 }
-func (f *fakeStore) HasActive(context.Context, string, string) (bool, *core.ApplicationError) {
+func (f *fakeStore) HasActive(context.Context, string, string) (bool, *core.Error) {
 	return false, nil
 }
-func (f *fakeStore) GetById(context.Context, string) (*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) GetById(context.Context, string) (*store.WorkItem, *core.Error) {
 	return nil, nil
 }
-func (f *fakeStore) DeleteIfPending(context.Context, string) (bool, *core.ApplicationError) {
+func (f *fakeStore) DeleteIfPending(context.Context, string) (bool, *core.Error) {
 	return false, nil
 }
-func (f *fakeStore) List(context.Context, string, string, *page.Paging, page.SortRequest) ([]*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) List(context.Context, string, string, *page.Paging, page.SortRequest) ([]*store.WorkItem, *core.Error) {
 	return nil, nil
 }
 

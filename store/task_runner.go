@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 )
 
 // ITaskRunner is the single runner contract shared by every job family
@@ -56,7 +56,7 @@ const (
 // L'item serve intero e non come coppia (id, token): il fencing token è item.LockToken — i
 // Mark* lo richiedono, così un worker stale non può finalizzare un item ri-claimato da un'altra
 // replica — e il contatore è item.Retry.
-func ApplyResult(ctx context.Context, items IWorkItemStore, item *WorkItem, maxRetry int, runErr error) (Outcome, *core.ApplicationError) {
+func ApplyResult(ctx context.Context, items IWorkItemStore, item *WorkItem, maxRetry int, runErr error) (Outcome, *core.Error) {
 	if runErr == nil {
 		return OutcomeDone, items.MarkDone(ctx, []string{item.Id}, item.LockToken)
 	}

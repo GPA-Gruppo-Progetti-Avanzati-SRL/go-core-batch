@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/utils"
 )
 
 const TableTaskLogs = "task_logs"
@@ -44,7 +44,7 @@ func NewTaskLog(taskId, jobId, taskName, objectId, stato, errMsg string) *TaskLo
 		JobID:    jobId,
 		TaskName: taskName,
 		Stato:    stato,
-		Hostname: core.GetHostname(),
+		Hostname: utils.GetHostname(),
 		Logdate:  time.Now(),
 		Objectid: objectId,
 		Error:    errMsg,

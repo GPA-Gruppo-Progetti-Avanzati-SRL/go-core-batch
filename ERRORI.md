@@ -2,7 +2,7 @@
 
 In batch gli errori vivono su due piani distinti:
 
-1. **`*core.ApplicationError`** — errori di store/infrastruttura, con codici.
+1. **`*core.Error`** — errori di store/infrastruttura, con codici.
 2. **Errori di ritorno del runner** — senza codice: sono **sentinelle** che il framework
    classifica per decidere il lifecycle del `WorkItem`. È il piano che conta per chi scrive un
    task.
@@ -79,7 +79,7 @@ quindi un refuso in YAML non si vedeva all'avvio e si presentava come un errore 
 
 `store.ApplyResult` (`store/task_runner.go:45`) classifica il valore ritornato da
 `ITaskRunner.Run` in un `store.Outcome`. La catena è ispezionata con `errors.Is`/`errors.As`,
-quindi **funziona anche se l'errore è avvolto** in un `*ApplicationError` (per questo
+quindi **funziona anche se l'errore è avvolto** in un `*core.Error` (per questo
 `ApplicationError.Unwrap` non ritorna mai nil).
 
 | Ritorno del runner | `Outcome` | Azione del framework |

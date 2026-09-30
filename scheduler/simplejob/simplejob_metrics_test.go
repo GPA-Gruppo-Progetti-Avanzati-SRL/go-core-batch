@@ -6,7 +6,8 @@ import (
 	"testing"
 	"time"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/page"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/batchmetrics"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/runner"
@@ -24,7 +25,7 @@ type metricsStore struct {
 
 // ClaimPending rispetta il limit, perché è ciò che il test deve poter osservare: SingleTask ne
 // chiede UNO per tick, e un fake che li consegnasse tutti nasconderebbe una regressione.
-func (s *metricsStore) ClaimPending(_ context.Context, _ string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+func (s *metricsStore) ClaimPending(_ context.Context, _ string, limit int) ([]*store.WorkItem, *core.Error) {
 	if limit > len(s.pending) {
 		limit = len(s.pending)
 	}
@@ -32,37 +33,43 @@ func (s *metricsStore) ClaimPending(_ context.Context, _ string, limit int) ([]*
 	s.pending = s.pending[limit:]
 	return out, nil
 }
-func (s *metricsStore) RecoverOrphans(context.Context, string, time.Duration, int) ([]*store.WorkItem, *core.ApplicationError) {
+func (s *metricsStore) RecoverOrphans(context.Context, string, time.Duration, int) ([]*store.WorkItem, *core.Error) {
 	return nil, nil
 }
-func (s *metricsStore) MarkDone(context.Context, []string, string) *core.ApplicationError { return nil }
-func (s *metricsStore) MarkFailed(context.Context, string, string, string) *core.ApplicationError {
+func (s *metricsStore) MarkDone(context.Context, []string, string) *core.Error {
 	return nil
 }
-func (s *metricsStore) MarkPending(context.Context, string, string, time.Duration) *core.ApplicationError {
+func (s *metricsStore) MarkFailed(context.Context, string, string, string) *core.Error {
 	return nil
 }
-func (s *metricsStore) GetById(context.Context, string) (*store.WorkItem, *core.ApplicationError) {
+func (s *metricsStore) MarkPending(context.Context, string, string, time.Duration) *core.Error {
+	return nil
+}
+func (s *metricsStore) GetById(context.Context, string) (*store.WorkItem, *core.Error) {
 	return nil, nil
 }
-func (s *metricsStore) Release(context.Context, string, string) *core.ApplicationError { return nil }
-func (s *metricsStore) Purge(context.Context, string, time.Time, int) (int, *core.ApplicationError) {
+func (s *metricsStore) Release(context.Context, string, string) *core.Error {
+	return nil
+}
+func (s *metricsStore) Purge(context.Context, string, time.Time, int) (int, *core.Error) {
 	return 0, nil
 }
-func (s *metricsStore) Backlog(context.Context, string) (int, time.Time, *core.ApplicationError) {
+func (s *metricsStore) Backlog(context.Context, string) (int, time.Time, *core.Error) {
 	return 0, time.Time{}, nil
 }
-func (s *metricsStore) Insert(context.Context, []*store.WorkItem) *core.ApplicationError { return nil }
-func (s *metricsStore) InsertIfNotActive(context.Context, []*store.WorkItem) (int, *core.ApplicationError) {
+func (s *metricsStore) Insert(context.Context, []*store.WorkItem) *core.Error {
+	return nil
+}
+func (s *metricsStore) InsertIfNotActive(context.Context, []*store.WorkItem) (int, *core.Error) {
 	return 0, nil
 }
-func (s *metricsStore) HasActive(context.Context, string, string) (bool, *core.ApplicationError) {
+func (s *metricsStore) HasActive(context.Context, string, string) (bool, *core.Error) {
 	return false, nil
 }
-func (s *metricsStore) DeleteIfPending(context.Context, string) (bool, *core.ApplicationError) {
+func (s *metricsStore) DeleteIfPending(context.Context, string) (bool, *core.Error) {
 	return false, nil
 }
-func (s *metricsStore) List(context.Context, string, string, *page.Paging, page.SortRequest) ([]*store.WorkItem, *core.ApplicationError) {
+func (s *metricsStore) List(context.Context, string, string, *page.Paging, page.SortRequest) ([]*store.WorkItem, *core.Error) {
 	return nil, nil
 }
 

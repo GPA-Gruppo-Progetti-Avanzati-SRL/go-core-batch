@@ -5,11 +5,13 @@ package mongostore
 import (
 	"context"
 	"encoding/json"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo/mongoutil"
 	"time"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo/mongoutil"
+
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob"
 	coremongo "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -49,7 +51,7 @@ func newQueryData(ms *coremongo.Service) *queryData {
 
 var _ distributedjob.IQueryStore = (*queryData)(nil)
 
-func (q *queryData) GetIds(ctx context.Context, collection, filter, sort string, limit int) ([]string, *core.ApplicationError) {
+func (q *queryData) GetIds(ctx context.Context, collection, filter, sort string, limit int) ([]string, *core.Error) {
 	coll := q.Service.GetCollection(collection, "")
 
 	var query bson.M

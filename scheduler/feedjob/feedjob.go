@@ -46,7 +46,7 @@ import (
 	"time"
 	"uuid"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 
@@ -145,10 +145,10 @@ func run(name string, items store.IWorkItemStore, config scheduler.Config) error
 }
 
 // valoreGrezzo legge una property senza convertirla, con lo stesso confronto case-insensitive
-// dei getter di core.Properties (viper abbassa le chiavi, quindi l'indicizzazione diretta non
+// dei getter di properties.Properties (viper abbassa le chiavi, quindi l'indicizzazione diretta non
 // basta). Serve perché il payload è OPACO: non ha un tipo da dichiarare, e i getter esportati
 // sono tutti tipizzati.
-func valoreGrezzo(p core.Properties, key string) (any, bool) {
+func valoreGrezzo(p properties.Properties, key string) (any, bool) {
 	if v, ok := p[key]; ok {
 		return v, true
 	}

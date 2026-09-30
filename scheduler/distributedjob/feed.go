@@ -5,7 +5,7 @@ import (
 	"time"
 	"uuid"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"github.com/rs/zerolog/log"
 )
@@ -13,7 +13,7 @@ import (
 // IFeedSource produces WorkItems from an external source (DB query, S3 listing, etc.).
 // Implementations must return ready-to-insert WorkItems with at least ObjectId and Type set.
 type IFeedSource interface {
-	Feed(ctx context.Context, taskName string, props core.Properties, limit int) ([]*store.WorkItem, error)
+	Feed(ctx context.Context, taskName string, props properties.Properties, limit int) ([]*store.WorkItem, error)
 }
 
 // queryStoreFeed adapts IQueryStore to IFeedSource.
@@ -26,7 +26,7 @@ func NewQueryFeed(qs IQueryStore) IFeedSource {
 	return &queryStoreFeed{qs: qs}
 }
 
-func (f *queryStoreFeed) Feed(ctx context.Context, taskName string, props core.Properties, limit int) ([]*store.WorkItem, error) {
+func (f *queryStoreFeed) Feed(ctx context.Context, taskName string, props properties.Properties, limit int) ([]*store.WorkItem, error) {
 	collection := props.GetString("collection", "")
 	filter := props.GetString("filter", "")
 	sort := props.GetString("sort", "")
@@ -53,7 +53,7 @@ func (f *queryStoreFeed) Feed(ctx context.Context, taskName string, props core.P
 
 // runFeedPhase executes the feed phase: generates WorkItems from the feed source
 // and inserts those not already active into the store.
-func runFeedPhase(ctx context.Context, feed IFeedSource, items store.IWorkItemStore, jobId, taskName string, props core.Properties, limit int) {
+func runFeedPhase(ctx context.Context, feed IFeedSource, items store.IWorkItemStore, jobId, taskName string, props properties.Properties, limit int) {
 	workItems, err := feed.Feed(ctx, taskName, props, limit)
 	if err != nil {
 		log.Warn().Err(err).Msgf("[%s] feed query failed", jobId)

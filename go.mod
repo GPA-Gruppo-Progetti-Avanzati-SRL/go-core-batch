@@ -3,11 +3,11 @@ module github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch
 go 1.27.1
 
 require (
-	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app v0.0.29-0.20260930093347-d42c77cd6b6d
-	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-kafka v0.0.0-20260930093346-6e8ba425a3b4
-	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-locker v0.0.0-20260930093346-5c78f90acc58
-	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo v0.0.20-0.20260930093347-51f35fef2604
-	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-sql v0.0.2-0.20260930093347-be8c106ed4e4
+	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app v0.0.29-0.20260930105232-67b4143d76d8
+	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-kafka v0.0.0-20260930105624-fb04e05bb372
+	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-locker v0.0.0-20260930105948-35d2332998ae
+	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo v0.0.20-0.20260930105625-aace142a2a35
+	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-sql v0.0.2-0.20260930105625-8efb2abc07d5
 	github.com/aws/aws-sdk-go-v2 v1.42.1
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.26
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.104.2
@@ -51,7 +51,6 @@ require (
 	github.com/go-playground/validator/v10 v10.30.5 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
-	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/ipfans/fxlogger v0.2.0 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jonboulle/clockwork v0.5.0 // indirect
@@ -72,7 +71,6 @@ require (
 	github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
-	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/spf13/viper v1.21.0 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect

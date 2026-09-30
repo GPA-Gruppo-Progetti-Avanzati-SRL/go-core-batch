@@ -3,12 +3,14 @@ package mongostore
 import (
 	"context"
 	"errors"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo/mongoutil"
 	"sync"
 	"time"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo/mongoutil"
+
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/page"
 	mongo "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo"
 	"github.com/rs/zerolog/log"
@@ -82,7 +84,7 @@ var _ store.IWorkItemStore = (*workItemData)(nil)
 //
 // La query dei candidati tratta un nextRunAt assente o null come "scaduto adesso" (specchio del
 // `next_run_at IS NULL OR <= NOW()` del backend SQL).
-func (d *workItemData) ClaimPending(ctx context.Context, taskName string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemData) ClaimPending(ctx context.Context, taskName string, limit int) ([]*store.WorkItem, *core.Error) {
 	// La verifica sta anche qui, e non solo su InsertIfNotActive: gli indici del claim servono a
 	// OGNI job, compresi quelli claim-only (DistribuiteTask, NotificationKafka) che un feed non
 	// ce l'hanno e quindi non passerebbero mai di là. È sync.Once: una sola lettura degli indici
@@ -147,7 +149,7 @@ func (d *workItemData) ClaimPending(ctx context.Context, taskName string, limit 
 
 // byToken rilegge gli item che portano il token di questo tick: sono esattamente quelli che la
 // BulkWrite ha vinto. Il filtro su _id tiene la query sull'indice primario.
-func (d *workItemData) byToken(ctx context.Context, code string, ids []string, token string) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemData) byToken(ctx context.Context, code string, ids []string, token string) ([]*store.WorkItem, *core.Error) {
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	cur, err := coll.Find(ctx, bson.M{"_id": bson.M{"$in": ids}, "lockToken": token})
 	if err != nil {
@@ -167,7 +169,7 @@ func (d *workItemData) byToken(ctx context.Context, code string, ids []string, t
 //
 // Stessa forma di ClaimPending: tre round-trip invece di 1+N. Il filtro `lockedAt < cutoff`
 // resta dentro ogni UpdateOne, quindi due repliche non recuperano lo stesso orfano.
-func (d *workItemData) RecoverOrphans(ctx context.Context, taskName string, maxAge time.Duration, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemData) RecoverOrphans(ctx context.Context, taskName string, maxAge time.Duration, limit int) ([]*store.WorkItem, *core.Error) {
 	now := time.Now()
 	cutoff := now.Add(-maxAge)
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
@@ -225,7 +227,7 @@ func fencedFilter(id, token string) bson.M {
 // condividere lo stesso lock_token). Idempotente: gli id non matchati (già finalizzati o token
 // stale) sono ignorati — non è un errore, è l'esito atteso quando un worker stale prova a
 // finalizzare item ri-claimati altrove.
-func (d *workItemData) MarkDone(ctx context.Context, ids []string, token string) *core.ApplicationError {
+func (d *workItemData) MarkDone(ctx context.Context, ids []string, token string) *core.Error {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -249,7 +251,7 @@ func (d *workItemData) MarkDone(ctx context.Context, ids []string, token string)
 }
 
 // MarkFailed transitions a single IN_PROGRESS item to FAILED, fenced dal token (idempotente).
-func (d *workItemData) MarkFailed(ctx context.Context, id, token, reason string) *core.ApplicationError {
+func (d *workItemData) MarkFailed(ctx context.Context, id, token, reason string) *core.Error {
 	now := time.Now()
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	res, err := coll.UpdateOne(ctx, fencedFilter(id, token),
@@ -274,7 +276,7 @@ func (d *workItemData) MarkFailed(ctx context.Context, id, token, reason string)
 // L'`error` di un fallimento precedente viene AZZERATO: un item che torna PENDING è un item vivo,
 // e lasciargli addosso il motivo per cui l'ultimo tentativo non era riuscito fa leggere come
 // fallito qualcosa che è solo in attesa. Il motivo resta nella riga di task_logs.
-func (d *workItemData) Release(ctx context.Context, id, token string) *core.ApplicationError {
+func (d *workItemData) Release(ctx context.Context, id, token string) *core.Error {
 	now := time.Now()
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	res, err := coll.UpdateOne(ctx, fencedFilter(id, token),
@@ -299,7 +301,7 @@ func (d *workItemData) Release(ctx context.Context, id, token string) *core.Appl
 // L'`error` di un fallimento precedente viene AZZERATO: un item che torna PENDING è un item vivo,
 // e lasciargli addosso il motivo per cui l'ultimo tentativo non era riuscito fa leggere come
 // fallito qualcosa che è solo in attesa. Il motivo resta nella riga di task_logs.
-func (d *workItemData) MarkPending(ctx context.Context, id, token string, after time.Duration) *core.ApplicationError {
+func (d *workItemData) MarkPending(ctx context.Context, id, token string, after time.Duration) *core.Error {
 	now := time.Now()
 	nextRunAt := now.Add(after)
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
@@ -322,7 +324,7 @@ func (d *workItemData) MarkPending(ctx context.Context, id, token string, after 
 	return nil
 }
 
-func (d *workItemData) Insert(ctx context.Context, items []*store.WorkItem) *core.ApplicationError {
+func (d *workItemData) Insert(ctx context.Context, items []*store.WorkItem) *core.Error {
 	list := make([]mongo.ICollection, len(items))
 	for i, item := range items {
 		list[i] = item
@@ -330,7 +332,7 @@ func (d *workItemData) Insert(ctx context.Context, items []*store.WorkItem) *cor
 	return d.Service.InsertMany(ctx, list)
 }
 
-func (d *workItemData) DeleteIfPending(ctx context.Context, id string) (bool, *core.ApplicationError) {
+func (d *workItemData) DeleteIfPending(ctx context.Context, id string) (bool, *core.Error) {
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	res, err := coll.DeleteOne(ctx, bson.M{"_id": id, "status": store.StatusPending})
 	if err != nil {
@@ -339,7 +341,7 @@ func (d *workItemData) DeleteIfPending(ctx context.Context, id string) (bool, *c
 	return res.DeletedCount == 1, nil
 }
 
-func (d *workItemData) GetById(ctx context.Context, id string) (*store.WorkItem, *core.ApplicationError) {
+func (d *workItemData) GetById(ctx context.Context, id string) (*store.WorkItem, *core.Error) {
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	var item store.WorkItem
 	if err := coll.FindOne(ctx, bson.M{"_id": id}).Decode(&item); err != nil {
@@ -351,7 +353,7 @@ func (d *workItemData) GetById(ctx context.Context, id string) (*store.WorkItem,
 	return &item, nil
 }
 
-func (d *workItemData) HasActive(ctx context.Context, taskName, objectId string) (bool, *core.ApplicationError) {
+func (d *workItemData) HasActive(ctx context.Context, taskName, objectId string) (bool, *core.Error) {
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	count, err := coll.CountDocuments(ctx, bson.M{
 		"taskName": taskName,
@@ -372,7 +374,7 @@ func (d *workItemData) HasActive(ctx context.Context, taskName, objectId string)
 // item e ritorna gli errori dei soli duplicati, che è esattamente il comportamento che serve.
 // Con un feed by-query da limit 100 erano 100 round-trip per tick, dove il backend SQL faceva
 // una sola INSERT ... ON CONFLICT DO NOTHING.
-func (d *workItemData) InsertIfNotActive(ctx context.Context, items []*store.WorkItem) (int, *core.ApplicationError) {
+func (d *workItemData) InsertIfNotActive(ctx context.Context, items []*store.WorkItem) (int, *core.Error) {
 	if len(items) == 0 {
 		return 0, nil
 	}
@@ -418,7 +420,7 @@ func inserted(res *mgodriver.InsertManyResult) int {
 // Purge cancella gli item nello stato indicato più vecchi di olderThan, al più limit per
 // chiamata. Il limit tiene corta la singola cancellazione: la retention è ripetuta a ogni tick
 // del job, non fatta tutta in una volta.
-func (d *workItemData) Purge(ctx context.Context, status string, olderThan time.Time, limit int) (int, *core.ApplicationError) {
+func (d *workItemData) Purge(ctx context.Context, status string, olderThan time.Time, limit int) (int, *core.Error) {
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	// Mongo non ha un LIMIT sulla delete: si selezionano prima gli id (bounded) e si cancellano
 	// quelli. Due round-trip, sull'indice.
@@ -451,7 +453,7 @@ func (d *workItemData) Purge(ctx context.Context, status string, olderThan time.
 }
 
 // Backlog conta i PENDING in attesa e ritorna la data di creazione del più vecchio.
-func (d *workItemData) Backlog(ctx context.Context, taskName string) (int, time.Time, *core.ApplicationError) {
+func (d *workItemData) Backlog(ctx context.Context, taskName string) (int, time.Time, *core.Error) {
 	coll := d.Service.GetCollection(store.CollectionWorkItems, "")
 	query := bson.M{"taskName": taskName, "status": store.StatusPending}
 	count, err := coll.CountDocuments(ctx, query)
@@ -473,7 +475,7 @@ func (d *workItemData) Backlog(ctx context.Context, taskName string) (int, time.
 	return int(count), oldest.CreateTime, nil
 }
 
-func (d *workItemData) List(ctx context.Context, taskName, status string, paging *page.Paging, sort page.SortRequest) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemData) List(ctx context.Context, taskName, status string, paging *page.Paging, sort page.SortRequest) ([]*store.WorkItem, *core.Error) {
 	filter := workItemFilter{TaskName: taskName, Status: status}
 	var sortOpt options.Lister[options.FindOptions]
 	if len(sort) > 0 {

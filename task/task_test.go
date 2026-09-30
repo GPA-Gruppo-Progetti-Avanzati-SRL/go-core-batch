@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
 )
 
 func names(cs []Config) []string {
@@ -49,8 +49,8 @@ func TestInstances_OnePerDeclaredTask(t *testing.T) {
 	var got []Config
 	Apply(func() { got = Instances("IMPORT") }, ActiveSet{
 		Tasks: []Config{
-			{Name: "import-in", Type: "IMPORT", Properties: core.Properties{"folder": "/data/in"}},
-			{Name: "import-bulk", Type: "IMPORT", Properties: core.Properties{"folder": "/data/bulk"}},
+			{Name: "import-in", Type: "IMPORT", Properties: properties.Properties{"folder": "/data/in"}},
+			{Name: "import-bulk", Type: "IMPORT", Properties: properties.Properties{"folder": "/data/bulk"}},
 		},
 		Referenced: []string{"import-in", "import-bulk"},
 	})

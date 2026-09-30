@@ -3,9 +3,7 @@
 // scrive codice: le app non li costruiscono, li riconoscono — e i valori stanno in ERRORI.md.
 package errs
 
-import (
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
-)
+import "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 
 // Ambit è la libreria di origine. I costruttori di core riempiono Ambit con l'AppName, cioè
 // con l'app che l'errore lo riceve: senza sovrascriverlo un guasto dello store batch si
@@ -38,11 +36,11 @@ const (
 )
 
 // Tech è il costruttore usato da tutto il modulo: errore tecnico con codice e libreria.
-func Tech(code string) *core.ApplicationError {
+func Tech(code string) *core.Error {
 	return core.TechnicalError().WithAmbit(Ambit).WithCode(code)
 }
 
 // NotFound è il 404 del modulo (codice NOT-FOUND di core), con la libreria di origine.
-func NotFound() *core.ApplicationError {
+func NotFound() *core.Error {
 	return core.NotFoundError().WithAmbit(Ambit)
 }

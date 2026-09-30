@@ -1670,7 +1670,7 @@ type TaskLogWriter struct {
 //   nil→MarkDone · ErrHandled→noop · *RetryError→MarkPending (MarkFailed oltre maxRetry)
 //   · altro err→MarkFailed
 // L'item serve intero: id e LockToken per i Mark* fenced, Retry per il confronto col tetto.
-func ApplyResult(ctx context.Context, items IWorkItemStore, item *WorkItem, maxRetry int, runErr error) (Outcome, *core.ApplicationError)
+func ApplyResult(ctx context.Context, items IWorkItemStore, item *WorkItem, maxRetry int, runErr error) (Outcome, *core.Error)
 
 // distributedjob.ITaskDispatcher — chiamata dal job per ogni item.
 // Riceve il WorkItem INTERO (il job l'ha appena claimato: rileggerlo sul percorso in-process
@@ -1689,25 +1689,25 @@ type DispatchRequest struct {
 // store.IWorkItemStore — claiming + lifecycle. Ogni Mark* è FENCED dal lock token del claim:
 // un worker stale (il cui item è stato ri-claimato da RecoverOrphans) non può finalizzarlo.
 type IWorkItemStore interface {
-    ClaimPending(ctx context.Context, taskName string, limit int) ([]*WorkItem, *core.ApplicationError)
-    RecoverOrphans(ctx context.Context, taskName string, maxAge time.Duration, limit int) ([]*WorkItem, *core.ApplicationError)
-    InsertIfNotActive(ctx context.Context, items []*WorkItem) (int, *core.ApplicationError)
-    MarkDone(ctx context.Context, ids []string, token string) *core.ApplicationError
-    MarkFailed(ctx context.Context, id, token, reason string) *core.ApplicationError
+    ClaimPending(ctx context.Context, taskName string, limit int) ([]*WorkItem, *core.Error)
+    RecoverOrphans(ctx context.Context, taskName string, maxAge time.Duration, limit int) ([]*WorkItem, *core.Error)
+    InsertIfNotActive(ctx context.Context, items []*WorkItem) (int, *core.Error)
+    MarkDone(ctx context.Context, ids []string, token string) *core.Error
+    MarkFailed(ctx context.Context, id, token, reason string) *core.Error
     // MarkPending: status → PENDING, retry++, next_run_at = now + retryDelay
-    MarkPending(ctx context.Context, id, token string, retryDelay time.Duration) *core.ApplicationError
+    MarkPending(ctx context.Context, id, token string, retryDelay time.Duration) *core.Error
     // Release: status → PENDING, next_run_at = now, retry INVARIATO. Per un item claimato che
     // NESSUNO ha eseguito (dispatch rifiutato): un tentativo non avvenuto non è un tentativo.
-    Release(ctx context.Context, id, token string) *core.ApplicationError
-    Insert(ctx context.Context, items []*WorkItem) *core.ApplicationError
-    GetById(ctx context.Context, id string) (*WorkItem, *core.ApplicationError)
-    HasActive(ctx context.Context, taskName, objectId string) (bool, *core.ApplicationError)
-    DeleteIfPending(ctx context.Context, id string) (bool, *core.ApplicationError)
-    List(ctx context.Context, taskName, status string, paging *page.Paging, sort page.SortRequest) ([]*WorkItem, *core.ApplicationError)
+    Release(ctx context.Context, id, token string) *core.Error
+    Insert(ctx context.Context, items []*WorkItem) *core.Error
+    GetById(ctx context.Context, id string) (*WorkItem, *core.Error)
+    HasActive(ctx context.Context, taskName, objectId string) (bool, *core.Error)
+    DeleteIfPending(ctx context.Context, id string) (bool, *core.Error)
+    List(ctx context.Context, taskName, status string, paging *page.Paging, sort page.SortRequest) ([]*WorkItem, *core.Error)
     // Purge: retention. Cancella gli item nello stato indicato più vecchi di olderThan.
-    Purge(ctx context.Context, status string, olderThan time.Time, limit int) (int, *core.ApplicationError)
+    Purge(ctx context.Context, status string, olderThan time.Time, limit int) (int, *core.Error)
     // Backlog: quanti PENDING aspettano e da quando. Alimenta le gauge batch_workitems_*.
-    Backlog(ctx context.Context, taskName string) (int, time.Time, *core.ApplicationError)
+    Backlog(ctx context.Context, taskName string) (int, time.Time, *core.Error)
 }
 
 // store.IData — ciclo di vita task su task_logs
@@ -1719,7 +1719,7 @@ type IData interface {
     SetTaskAssignationKO(ctx context.Context, taskid, jobid, typeTask, objectid, errMsg string)
     // InsertTaskLogs: più righe in UNA scrittura. La fase di dispatch ne produce una per item.
     InsertTaskLogs(ctx context.Context, logs []*TaskLog)
-    PurgeTaskLogs(ctx context.Context, olderThan time.Time, limit int) (int, *core.ApplicationError)
+    PurgeTaskLogs(ctx context.Context, olderThan time.Time, limit int) (int, *core.Error)
 }
 ```
 
@@ -1770,7 +1770,7 @@ In gRPC, `limit` e pool size sono dimensioni ortogonali: lo scheduler può claim
 - **Un campo esportato senza tag NON è una dipendenza**: nelle struct passate a `Register` è un campo di lavorazione. Le dipendenze vanno taggate `inject:`/`from:`, le properties `prop:`.
 - **`core.In` non va usato nelle struct dei runner**: è un errore al wiring. Il marker lo porta il param object sintetizzato dalla libreria; accettarlo lascerebbe passare struct scritte per la vecchia semantica, con le dipendenze silenziosamente a nil. Resta valido nei param object dei costruttori scritti a mano passati a `core.Provide`.
 - **`jobs[].properties` è infrastrutturale, `tasks[].properties` è applicativo**: mettere la config del runner nel blocco del job non la fa arrivare ai campi `prop:`.
-- **Le chiavi delle properties sono case-insensitive**: viper abbassa le chiavi della config, quindi `task` nello YAML arriva come `worktype`. I getter di `core.Properties` e il binding `prop:` lo gestiscono; l'indicizzazione diretta della mappa no.
+- **Le chiavi delle properties sono case-insensitive**: viper abbassa le chiavi della config, quindi `task` nello YAML arriva come `worktype`. I getter di `properties.Properties` e il binding `prop:` lo gestiscono; l'indicizzazione diretta della mappa no.
 - **`gocron.NewTask` deve usare una closure zero-arg** che cattura le dipendenze — non passare interface nil come `...any` o gocron va in panic in reflect.
 - **Tabelle**: `work_items` e `task_logs` (costanti `store.TableWorkItems`, `store.TableTaskLogs`). Senza un job `PurgeWorkItems` **crescono per sempre**, e con loro gli indici del claim.
 - **Gli indici del claim non sono opzionali**: senza `ix_workitem_claim`/`ix_workitem_orphan` ogni tick di ogni job scandisce la collection. `EnsureIndexes` li crea; in assenza la libreria logga un Warn all'avvio ma non li crea da sola.

@@ -6,8 +6,10 @@ import (
 	"testing"
 	"time"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/page"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 )
@@ -25,46 +27,50 @@ type fakeStore struct {
 	ops   []opLifecycle
 }
 
-func (f *fakeStore) ClaimPending(_ context.Context, _ string, _ int) ([]*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) ClaimPending(_ context.Context, _ string, _ int) ([]*store.WorkItem, *core.Error) {
 	out := f.claim
 	f.claim = nil
 	return out, nil
 }
-func (f *fakeStore) RecoverOrphans(context.Context, string, time.Duration, int) ([]*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) RecoverOrphans(context.Context, string, time.Duration, int) ([]*store.WorkItem, *core.Error) {
 	return nil, nil
 }
-func (f *fakeStore) Release(_ context.Context, id, token string) *core.ApplicationError {
+func (f *fakeStore) Release(_ context.Context, id, token string) *core.Error {
 	f.ops = append(f.ops, opLifecycle{"release", id, token})
 	return nil
 }
-func (f *fakeStore) MarkPending(_ context.Context, id, token string, _ time.Duration) *core.ApplicationError {
+func (f *fakeStore) MarkPending(_ context.Context, id, token string, _ time.Duration) *core.Error {
 	f.ops = append(f.ops, opLifecycle{"pending", id, token})
 	return nil
 }
-func (f *fakeStore) MarkDone(context.Context, []string, string) *core.ApplicationError { return nil }
-func (f *fakeStore) MarkFailed(context.Context, string, string, string) *core.ApplicationError {
+func (f *fakeStore) MarkDone(context.Context, []string, string) *core.Error {
 	return nil
 }
-func (f *fakeStore) Purge(context.Context, string, time.Time, int) (int, *core.ApplicationError) {
+func (f *fakeStore) MarkFailed(context.Context, string, string, string) *core.Error {
+	return nil
+}
+func (f *fakeStore) Purge(context.Context, string, time.Time, int) (int, *core.Error) {
 	return 0, nil
 }
-func (f *fakeStore) Backlog(context.Context, string) (int, time.Time, *core.ApplicationError) {
+func (f *fakeStore) Backlog(context.Context, string) (int, time.Time, *core.Error) {
 	return 0, time.Time{}, nil
 }
-func (f *fakeStore) Insert(context.Context, []*store.WorkItem) *core.ApplicationError { return nil }
-func (f *fakeStore) InsertIfNotActive(context.Context, []*store.WorkItem) (int, *core.ApplicationError) {
+func (f *fakeStore) Insert(context.Context, []*store.WorkItem) *core.Error {
+	return nil
+}
+func (f *fakeStore) InsertIfNotActive(context.Context, []*store.WorkItem) (int, *core.Error) {
 	return 0, nil
 }
-func (f *fakeStore) HasActive(context.Context, string, string) (bool, *core.ApplicationError) {
+func (f *fakeStore) HasActive(context.Context, string, string) (bool, *core.Error) {
 	return false, nil
 }
-func (f *fakeStore) GetById(context.Context, string) (*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) GetById(context.Context, string) (*store.WorkItem, *core.Error) {
 	return nil, nil
 }
-func (f *fakeStore) DeleteIfPending(context.Context, string) (bool, *core.ApplicationError) {
+func (f *fakeStore) DeleteIfPending(context.Context, string) (bool, *core.Error) {
 	return false, nil
 }
-func (f *fakeStore) List(context.Context, string, string, *page.Paging, page.SortRequest) ([]*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) List(context.Context, string, string, *page.Paging, page.SortRequest) ([]*store.WorkItem, *core.Error) {
 	return nil, nil
 }
 
@@ -89,7 +95,7 @@ func (d *fakeData) InsertTaskLogs(_ context.Context, logs []*store.TaskLog) {
 	d.batches++
 	d.righe = append(d.righe, logs...)
 }
-func (d *fakeData) PurgeTaskLogs(context.Context, time.Time, int) (int, *core.ApplicationError) {
+func (d *fakeData) PurgeTaskLogs(context.Context, time.Time, int) (int, *core.Error) {
 	return 0, nil
 }
 
@@ -105,7 +111,7 @@ func (f *fakeDispatcher) DispatchTask(_ context.Context, req DispatchRequest) er
 	return f.err
 }
 
-func conf(props core.Properties) scheduler.Config {
+func conf(props properties.Properties) scheduler.Config {
 	return scheduler.Config{Name: "j", Type: JobType, LockTimeout: time.Minute, Properties: props}
 }
 
@@ -121,7 +127,7 @@ func TestDispatchFallito_RilasciaSenzaConsumareRitentativo(t *testing.T) {
 	disp := &fakeDispatcher{err: errors.New("pool saturo")}
 
 	factory := makeClaimingFactory(disp, items, nil, data)
-	_ = factory("j", conf(core.Properties{"task": "T", "limit": 10}))
+	_ = factory("j", conf(properties.Properties{"task": "T", "limit": 10}))
 
 	if err := jobTick(t, disp, items, data); err != nil {
 		t.Fatalf("il tick non deve fallire per un dispatch rifiutato: %v", err)
@@ -191,7 +197,7 @@ func TestDispatch_PortaItemInteroEDeadline(t *testing.T) {
 // ancora qualcuno che guarda i log di avvio — e poi a ogni tick, invece di presentarsi come un
 // errore di runtime al primo tick.
 func TestRisolvi_ConfigInvalida(t *testing.T) {
-	cases := map[string]core.Properties{
+	cases := map[string]properties.Properties{
 		"senza task":     {"limit": 10},
 		"task vuoto":     {"task": "", "limit": 10},
 		"senza limit":    {"task": "T"},
@@ -205,7 +211,7 @@ func TestRisolvi_ConfigInvalida(t *testing.T) {
 			}
 		})
 	}
-	if _, limit, err := risolvi("j", conf(core.Properties{"task": "T", "limit": 42})); err != nil || limit != 42 {
+	if _, limit, err := risolvi("j", conf(properties.Properties{"task": "T", "limit": 42})); err != nil || limit != 42 {
 		t.Fatalf("config valida: limit=%d err=%v", limit, err)
 	}
 }
@@ -213,7 +219,7 @@ func TestRisolvi_ConfigInvalida(t *testing.T) {
 // jobTick esegue un tick completo con la configurazione standard del test.
 func jobTick(t *testing.T, disp ITaskDispatcher, items store.IWorkItemStore, data store.IData) error {
 	t.Helper()
-	taskName, limit, err := risolvi("j", conf(core.Properties{"task": "T", "limit": 10}))
+	taskName, limit, err := risolvi("j", conf(properties.Properties{"task": "T", "limit": 10}))
 	if err != nil {
 		t.Fatalf("risolvi: %v", err)
 	}

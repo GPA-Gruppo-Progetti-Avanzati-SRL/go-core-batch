@@ -2,12 +2,14 @@ package sqlstore
 
 import (
 	"context"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
 	"strings"
 	"sync"
 	"time"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
+
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/page"
 	coresql "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-sql"
 	"github.com/rs/zerolog/log"
@@ -54,7 +56,7 @@ func (d *workItemDataSQL) warnIfIndexesMissing(ctx context.Context) {
 // ClaimPending atomically selects up to limit PENDING items of taskName,
 // marks them IN_PROGRESS with locked_at = now, and returns the full records.
 // Uses SELECT FOR UPDATE SKIP LOCKED — safe across multiple replicas.
-func (d *workItemDataSQL) ClaimPending(ctx context.Context, taskName string, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemDataSQL) ClaimPending(ctx context.Context, taskName string, limit int) ([]*store.WorkItem, *core.Error) {
 	// La verifica sta anche qui, e non solo su InsertIfNotActive: gli indici del claim servono a
 	// OGNI job, compresi quelli claim-only (DistribuiteTask, NotificationKafka) che un feed non
 	// ce l'hanno e quindi non passerebbero mai di là. È sync.Once: una sola lettura per processo.
@@ -103,7 +105,7 @@ func (d *workItemDataSQL) ClaimPending(ctx context.Context, taskName string, lim
 // refreshing locked_at to now and incrementing retry. Returns the items for
 // immediate processing — no reset to PENDING, no waiting for the next tick.
 // Uses a CTE with FOR UPDATE SKIP LOCKED so it is safe across replicas.
-func (d *workItemDataSQL) RecoverOrphans(ctx context.Context, taskName string, maxAge time.Duration, limit int) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemDataSQL) RecoverOrphans(ctx context.Context, taskName string, maxAge time.Duration, limit int) ([]*store.WorkItem, *core.Error) {
 	cutoff := time.Now().Add(-maxAge)
 	now := time.Now()
 
@@ -137,7 +139,7 @@ func (d *workItemDataSQL) RecoverOrphans(ctx context.Context, taskName string, m
 // MarkDone transitions IN_PROGRESS items to DONE in batch, fenced dal token (gli id devono
 // condividere lo stesso lock_token). Idempotente: gli id non matchati (già finalizzati o token
 // stale) sono ignorati — è l'esito atteso quando un worker stale prova a finalizzarli.
-func (d *workItemDataSQL) MarkDone(ctx context.Context, ids []string, token string) *core.ApplicationError {
+func (d *workItemDataSQL) MarkDone(ctx context.Context, ids []string, token string) *core.Error {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -160,7 +162,7 @@ func (d *workItemDataSQL) MarkDone(ctx context.Context, ids []string, token stri
 }
 
 // MarkFailed transitions a single IN_PROGRESS item to FAILED, fenced dal token (idempotente).
-func (d *workItemDataSQL) MarkFailed(ctx context.Context, id, token, reason string) *core.ApplicationError {
+func (d *workItemDataSQL) MarkFailed(ctx context.Context, id, token, reason string) *core.Error {
 	now := time.Now()
 	res, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
 		Set("status = ?", store.StatusFailed).
@@ -186,7 +188,7 @@ func (d *workItemDataSQL) MarkFailed(ctx context.Context, id, token, reason stri
 // Release riporta a PENDING un item claimato ma mai eseguito (dispatch fallito), fenced dal
 // token e idempotente. È MarkPending meno l'incremento di retry: il tentativo non è avvenuto,
 // quindi non va contato. next_run_at = now, così il tick successivo lo riprende subito.
-func (d *workItemDataSQL) Release(ctx context.Context, id, token string) *core.ApplicationError {
+func (d *workItemDataSQL) Release(ctx context.Context, id, token string) *core.Error {
 	now := time.Now()
 	res, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
 		Set("status = ?", store.StatusPending).
@@ -210,7 +212,7 @@ func (d *workItemDataSQL) Release(ctx context.Context, id, token string) *core.A
 // L'`error` di un fallimento precedente viene AZZERATO: un item che torna PENDING è un item vivo,
 // e lasciargli addosso il motivo per cui l'ultimo tentativo non era riuscito fa leggere come
 // fallito qualcosa che è solo in attesa. Il motivo resta nella riga di task_logs.
-func (d *workItemDataSQL) MarkPending(ctx context.Context, id, token string, after time.Duration) *core.ApplicationError {
+func (d *workItemDataSQL) MarkPending(ctx context.Context, id, token string, after time.Duration) *core.Error {
 	now := time.Now()
 	nextRunAt := now.Add(after)
 	res, err := d.DB.NewUpdate().TableExpr(store.TableWorkItems).
@@ -232,11 +234,11 @@ func (d *workItemDataSQL) MarkPending(ctx context.Context, id, token string, aft
 	return nil
 }
 
-func (d *workItemDataSQL) Insert(ctx context.Context, items []*store.WorkItem) *core.ApplicationError {
+func (d *workItemDataSQL) Insert(ctx context.Context, items []*store.WorkItem) *core.Error {
 	return d.Sql.InsertMany[store.WorkItem](ctx, items)
 }
 
-func (d *workItemDataSQL) DeleteIfPending(ctx context.Context, id string) (bool, *core.ApplicationError) {
+func (d *workItemDataSQL) DeleteIfPending(ctx context.Context, id string) (bool, *core.Error) {
 	res, err := d.DB.NewDelete().TableExpr(store.TableWorkItems).
 		Where("id = ? AND status = ?", id, store.StatusPending).
 		Exec(ctx)
@@ -247,11 +249,11 @@ func (d *workItemDataSQL) DeleteIfPending(ctx context.Context, id string) (bool,
 	return affected == 1, nil
 }
 
-func (d *workItemDataSQL) GetById(ctx context.Context, id string) (*store.WorkItem, *core.ApplicationError) {
+func (d *workItemDataSQL) GetById(ctx context.Context, id string) (*store.WorkItem, *core.Error) {
 	return d.Sql.GetById[store.WorkItem](ctx, id)
 }
 
-func (d *workItemDataSQL) HasActive(ctx context.Context, taskName, objectId string) (bool, *core.ApplicationError) {
+func (d *workItemDataSQL) HasActive(ctx context.Context, taskName, objectId string) (bool, *core.Error) {
 	var count int
 	if err := d.DB.NewSelect().TableExpr(store.TableWorkItems).
 		ColumnExpr("COUNT(*)").
@@ -266,7 +268,7 @@ func (d *workItemDataSQL) HasActive(ctx context.Context, taskName, objectId stri
 // InsertIfNotActive inserts each item only if no active (PENDING or IN_PROGRESS) entry
 // exists for the same (task_name, object_id). Relies on the partial unique index
 // uk_workitem_active — call EnsureIndexes at startup to create it.
-func (d *workItemDataSQL) InsertIfNotActive(ctx context.Context, items []*store.WorkItem) (int, *core.ApplicationError) {
+func (d *workItemDataSQL) InsertIfNotActive(ctx context.Context, items []*store.WorkItem) (int, *core.Error) {
 	if len(items) == 0 {
 		return 0, nil
 	}
@@ -285,7 +287,7 @@ func (d *workItemDataSQL) InsertIfNotActive(ctx context.Context, items []*store.
 // Purge cancella gli item nello stato indicato più vecchi di olderThan, al più limit per
 // chiamata. Il limit tiene corta la singola transazione: la retention è ripetuta a ogni tick
 // del job, non fatta tutta in una volta.
-func (d *workItemDataSQL) Purge(ctx context.Context, status string, olderThan time.Time, limit int) (int, *core.ApplicationError) {
+func (d *workItemDataSQL) Purge(ctx context.Context, status string, olderThan time.Time, limit int) (int, *core.Error) {
 	res, err := d.DB.NewRaw(`
 		DELETE FROM work_items
 		WHERE id IN (
@@ -303,7 +305,7 @@ func (d *workItemDataSQL) Purge(ctx context.Context, status string, olderThan ti
 }
 
 // Backlog conta i PENDING in attesa e ritorna la data di creazione del più vecchio.
-func (d *workItemDataSQL) Backlog(ctx context.Context, taskName string) (int, time.Time, *core.ApplicationError) {
+func (d *workItemDataSQL) Backlog(ctx context.Context, taskName string) (int, time.Time, *core.Error) {
 	where := "task_name = ? AND status = ?"
 	args := []any{taskName, store.StatusPending}
 	var row struct {
@@ -321,7 +323,7 @@ func (d *workItemDataSQL) Backlog(ctx context.Context, taskName string) (int, ti
 	return row.N, *row.Oldest, nil
 }
 
-func (d *workItemDataSQL) List(ctx context.Context, taskName, status string, paging *page.Paging, sort page.SortRequest) ([]*store.WorkItem, *core.ApplicationError) {
+func (d *workItemDataSQL) List(ctx context.Context, taskName, status string, paging *page.Paging, sort page.SortRequest) ([]*store.WorkItem, *core.Error) {
 	// Il filtro si esprime una volta sola: la COUNT e la SELECT paginata devono guardare le
 	// stesse righe per costruzione. Erano due catene di Where scritte a mano — la prima mutata
 	// da ColumnExpr("COUNT(*)") e poi buttata, la seconda ricostruita da zero — quindi due

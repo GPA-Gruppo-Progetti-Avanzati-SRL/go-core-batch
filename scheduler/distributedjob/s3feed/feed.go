@@ -7,7 +7,7 @@ import (
 	"time"
 	"uuid"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/s3client"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 )
@@ -37,7 +37,7 @@ func New(reg *s3client.Registry) *S3Feed {
 //   - path:      prefix for S3 listing
 //   - pattern:   glob pattern matched against the object key basename (e.g. "*.csv")
 //   - dest-path: destination prefix where files are moved after successful processing
-func (f *S3Feed) Feed(ctx context.Context, taskName string, props core.Properties, limit int) ([]*store.WorkItem, error) {
+func (f *S3Feed) Feed(ctx context.Context, taskName string, props properties.Properties, limit int) ([]*store.WorkItem, error) {
 	serviceName := props.GetString("service", "")
 	prefix := props.GetString("path", "")
 	pattern := props.GetString("pattern", "")

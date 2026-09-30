@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/kafka"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
@@ -116,15 +118,15 @@ func TestPrepareRecords_UnPayloadRottoNonAffondaGliAltri(t *testing.T) {
 type fakeProducer struct {
 	sent  []*message.ProducerRecord
 	topic string
-	err   *core.ApplicationError
+	err   *core.Error
 }
 
-func (f *fakeProducer) Produce(_ context.Context, recs []*message.ProducerRecord) *core.ApplicationError {
+func (f *fakeProducer) Produce(_ context.Context, recs []*message.ProducerRecord) *core.Error {
 	f.sent = append(f.sent, recs...)
 	return f.err
 }
 
-func (f *fakeProducer) ProduceTo(ctx context.Context, topic string, recs []*message.ProducerRecord) *core.ApplicationError {
+func (f *fakeProducer) ProduceTo(ctx context.Context, topic string, recs []*message.ProducerRecord) *core.Error {
 	f.topic = topic
 	return f.Produce(ctx, recs)
 }
@@ -146,17 +148,17 @@ type fakeStore struct {
 	recoveredTask string
 }
 
-func (f *fakeStore) RecoverOrphans(_ context.Context, taskName string, _ time.Duration, _ int) ([]*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) RecoverOrphans(_ context.Context, taskName string, _ time.Duration, _ int) ([]*store.WorkItem, *core.Error) {
 	f.recoveredTask = taskName
 	return nil, nil
 }
 
-func (f *fakeStore) ClaimPending(_ context.Context, taskName string, _ int) ([]*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) ClaimPending(_ context.Context, taskName string, _ int) ([]*store.WorkItem, *core.Error) {
 	f.claimedTask = taskName
 	return f.claim, nil
 }
 
-func (f *fakeStore) MarkDone(_ context.Context, ids []string, token string) *core.ApplicationError {
+func (f *fakeStore) MarkDone(_ context.Context, ids []string, token string) *core.Error {
 	if f.done == nil {
 		f.done = map[string][]string{}
 	}
@@ -164,7 +166,7 @@ func (f *fakeStore) MarkDone(_ context.Context, ids []string, token string) *cor
 	return nil
 }
 
-func (f *fakeStore) MarkFailed(_ context.Context, id, _, reason string) *core.ApplicationError {
+func (f *fakeStore) MarkFailed(_ context.Context, id, _, reason string) *core.Error {
 	f.failed = append(f.failed, id)
 	if f.reasons == nil {
 		f.reasons = map[string]string{}
@@ -173,7 +175,7 @@ func (f *fakeStore) MarkFailed(_ context.Context, id, _, reason string) *core.Ap
 	return nil
 }
 
-func (f *fakeStore) MarkPending(_ context.Context, id, _ string, _ time.Duration) *core.ApplicationError {
+func (f *fakeStore) MarkPending(_ context.Context, id, _ string, _ time.Duration) *core.Error {
 	f.pending = append(f.pending, id)
 	return nil
 }
@@ -181,7 +183,7 @@ func (f *fakeStore) MarkPending(_ context.Context, id, _ string, _ time.Duration
 func notificaConfig() scheduler.Config {
 	return scheduler.Config{
 		Type: JobType,
-		Properties: core.Properties{
+		Properties: properties.Properties{
 			"stream": "notifiche-edwh",
 			"topic":  "notifiche.topic",
 		},
@@ -311,7 +313,7 @@ func TestNotificationJobRun_ClaimaLaCodaDelloStream(t *testing.T) {
 func TestRisolvi_StreamObbligatoria(t *testing.T) {
 	_, err := risolvi("notifica", scheduler.Config{
 		Type:       JobType,
-		Properties: core.Properties{"topic": "notifiche.topic"},
+		Properties: properties.Properties{"topic": "notifiche.topic"},
 	})
 	if err == nil || !strings.Contains(err.Error(), PropStream) {
 		t.Fatalf("errore = %v, atteso un messaggio che nomini %q", err, PropStream)
@@ -353,7 +355,7 @@ func TestPublishBatch_SenzaTopicLItemFallisceDaSolo(t *testing.T) {
 	st := &fakeStore{claim: []*store.WorkItem{senzaTopic, conTopic}}
 	prod := &fakeProducer{}
 
-	cfg := scheduler.Config{Type: JobType, Properties: core.Properties{"stream": "notifiche-edwh"}}
+	cfg := scheduler.Config{Type: JobType, Properties: properties.Properties{"stream": "notifiche-edwh"}}
 	if err := notificationJobRun("notifica", prod, st, cfg); err != nil {
 		t.Fatalf("run: %v", err)
 	}

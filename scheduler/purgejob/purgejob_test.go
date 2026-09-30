@@ -5,8 +5,10 @@ import (
 	"testing"
 	"time"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/page"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 )
@@ -22,44 +24,46 @@ type fakeStore struct {
 	n     int
 }
 
-func (f *fakeStore) Purge(_ context.Context, status string, olderThan time.Time, limit int) (int, *core.ApplicationError) {
+func (f *fakeStore) Purge(_ context.Context, status string, olderThan time.Time, limit int) (int, *core.Error) {
 	f.calls = append(f.calls, purgeCall{status, olderThan, limit})
 	return f.n, nil
 }
 
-func (f *fakeStore) ClaimPending(context.Context, string, int) ([]*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) ClaimPending(context.Context, string, int) ([]*store.WorkItem, *core.Error) {
 	return nil, nil
 }
-func (f *fakeStore) RecoverOrphans(context.Context, string, time.Duration, int) ([]*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) RecoverOrphans(context.Context, string, time.Duration, int) ([]*store.WorkItem, *core.Error) {
 	return nil, nil
 }
-func (f *fakeStore) Release(context.Context, string, string) *core.ApplicationError { return nil }
-func (f *fakeStore) MarkDone(context.Context, []string, string) *core.ApplicationError {
+func (f *fakeStore) Release(context.Context, string, string) *core.Error { return nil }
+func (f *fakeStore) MarkDone(context.Context, []string, string) *core.Error {
 	return nil
 }
-func (f *fakeStore) MarkFailed(context.Context, string, string, string) *core.ApplicationError {
+func (f *fakeStore) MarkFailed(context.Context, string, string, string) *core.Error {
 	return nil
 }
-func (f *fakeStore) MarkPending(context.Context, string, string, time.Duration) *core.ApplicationError {
+func (f *fakeStore) MarkPending(context.Context, string, string, time.Duration) *core.Error {
 	return nil
 }
-func (f *fakeStore) Backlog(context.Context, string) (int, time.Time, *core.ApplicationError) {
+func (f *fakeStore) Backlog(context.Context, string) (int, time.Time, *core.Error) {
 	return 0, time.Time{}, nil
 }
-func (f *fakeStore) Insert(context.Context, []*store.WorkItem) *core.ApplicationError { return nil }
-func (f *fakeStore) InsertIfNotActive(context.Context, []*store.WorkItem) (int, *core.ApplicationError) {
+func (f *fakeStore) Insert(context.Context, []*store.WorkItem) *core.Error {
+	return nil
+}
+func (f *fakeStore) InsertIfNotActive(context.Context, []*store.WorkItem) (int, *core.Error) {
 	return 0, nil
 }
-func (f *fakeStore) HasActive(context.Context, string, string) (bool, *core.ApplicationError) {
+func (f *fakeStore) HasActive(context.Context, string, string) (bool, *core.Error) {
 	return false, nil
 }
-func (f *fakeStore) GetById(context.Context, string) (*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) GetById(context.Context, string) (*store.WorkItem, *core.Error) {
 	return nil, nil
 }
-func (f *fakeStore) DeleteIfPending(context.Context, string) (bool, *core.ApplicationError) {
+func (f *fakeStore) DeleteIfPending(context.Context, string) (bool, *core.Error) {
 	return false, nil
 }
-func (f *fakeStore) List(context.Context, string, string, *page.Paging, page.SortRequest) ([]*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) List(context.Context, string, string, *page.Paging, page.SortRequest) ([]*store.WorkItem, *core.Error) {
 	return nil, nil
 }
 
@@ -71,19 +75,19 @@ func (d *fakeData) SetTaskInError(context.Context, string, string, string, strin
 func (d *fakeData) SetTaskAssigned(context.Context, string, string, string, string)              {}
 func (d *fakeData) SetTaskAssignationKO(context.Context, string, string, string, string, string) {}
 func (d *fakeData) InsertTaskLogs(context.Context, []*store.TaskLog)                             {}
-func (d *fakeData) PurgeTaskLogs(_ context.Context, _ time.Time, _ int) (int, *core.ApplicationError) {
+func (d *fakeData) PurgeTaskLogs(_ context.Context, _ time.Time, _ int) (int, *core.Error) {
 	d.purged++
 	return 0, nil
 }
 
-func conf(props core.Properties) scheduler.Config {
+func conf(props properties.Properties) scheduler.Config {
 	return scheduler.Config{Name: "retention", Type: JobType, LockTimeout: time.Minute, Properties: props}
 }
 
 // La retention non ha default: senza `status` o senza `older-than` non si sa cosa cancellare né
 // da quando, e indovinare significherebbe cancellare dati che nessuno ha chiesto di cancellare.
 func TestRisolvi_ConfigInvalida(t *testing.T) {
-	cases := map[string]core.Properties{
+	cases := map[string]properties.Properties{
 		"senza status":     {"older-than": "24h"},
 		"status vuoto":     {"status": "", "older-than": "24h"},
 		"senza older-than": {"status": "DONE"},
@@ -100,7 +104,7 @@ func TestRisolvi_ConfigInvalida(t *testing.T) {
 }
 
 func TestRisolvi_Default(t *testing.T) {
-	p, err := risolvi("retention", conf(core.Properties{"status": "DONE", "older-than": "168h"}))
+	p, err := risolvi("retention", conf(properties.Properties{"status": "DONE", "older-than": "168h"}))
 	if err != nil {
 		t.Fatalf("risolvi: %v", err)
 	}
@@ -120,7 +124,7 @@ func TestRisolvi_Default(t *testing.T) {
 func TestRun_CancellaSoloQuantoConfigurato(t *testing.T) {
 	items := &fakeStore{n: 7}
 	data := &fakeData{}
-	p, err := risolvi("retention", conf(core.Properties{
+	p, err := risolvi("retention", conf(properties.Properties{
 		"status": "DONE", "older-than": "24h", "limit": 100,
 	}))
 	if err != nil {

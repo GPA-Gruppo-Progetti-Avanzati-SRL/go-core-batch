@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
 )
 
@@ -44,7 +44,7 @@ const (
 type Props struct {
 	job string
 	typ string
-	p   core.Properties
+	p   properties.Properties
 }
 
 // JobProps lega le property di una voce di `jobs:` al nome e al type del job, che sono ciò con cui
@@ -53,7 +53,7 @@ func JobProps(name string, config Config) Props {
 	return Props{job: name, typ: config.Type, p: config.Properties}
 }
 
-// Has dice se la property è stata scritta (case-insensitive, come tutti i getter di core.Properties).
+// Has dice se la property è stata scritta (case-insensitive, come tutti i getter di properties.Properties).
 func (j Props) Has(key string) bool { return j.p.Has(key) }
 
 // String legge una property facoltativa.

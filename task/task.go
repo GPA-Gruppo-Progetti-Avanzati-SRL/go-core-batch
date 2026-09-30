@@ -28,12 +28,12 @@ import (
 	"fmt"
 	"strings"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
 	"github.com/rs/zerolog/log"
 )
 
 // Config è una voce della sezione `tasks:`: un'istanza di task type, con la sua configurazione
-// applicativa. Le Properties sono mappate sui campi `prop:` della struct del runner (core.BindProps).
+// applicativa. Le Properties sono mappate sui campi `prop:` della struct del runner (properties.BindProps).
 type Config struct {
 	// Name identifica l'istanza ed è ciò che job e worker referenziano; è anche il WorkItem.Type
 	// usato da claiming e instradamento. È OBBLIGATORIO e va scritto anche quando coincide col
@@ -54,8 +54,8 @@ type Config struct {
 	// ATTENZIONE: il contatore su cui si misura è WorkItem.Retry, che RecoverOrphans incrementa
 	// insieme a MarkPending. Il recupero di un item orfano — tipicamente il riavvio di un pod —
 	// consuma quindi un tentativo, anche se il runner non ha mai fallito.
-	MaxRetry   *int            `yaml:"max-retry" mapstructure:"max-retry" json:"max-retry"`
-	Properties core.Properties `yaml:"properties" mapstructure:"properties" json:"properties"`
+	MaxRetry   *int                  `yaml:"max-retry" mapstructure:"max-retry" json:"max-retry"`
+	Properties properties.Properties `yaml:"properties" mapstructure:"properties" json:"properties"`
 }
 
 // ResolveMaxRetry applica la convenzione dell'assenza: nessun valore configurato significa

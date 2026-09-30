@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 )
 
 // IData is the framework-level interface for task lifecycle tracking.
@@ -24,5 +24,5 @@ type IData interface {
 	InsertTaskLogs(ctx context.Context, logs []*TaskLog)
 	// PurgeTaskLogs cancella le righe più vecchie di olderThan, al più limit per chiamata.
 	// Senza, task_logs cresce per sempre: è la collection che riceve più scritture di tutte.
-	PurgeTaskLogs(ctx context.Context, olderThan time.Time, limit int) (int, *core.ApplicationError)
+	PurgeTaskLogs(ctx context.Context, olderThan time.Time, limit int) (int, *core.Error)
 }

@@ -4,7 +4,8 @@ import (
 	"context"
 	"time"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+
 	"github.com/rs/zerolog/log"
 )
 
@@ -19,7 +20,7 @@ import (
 //
 // Restano al chiamante: la fase di feed (che precede), lo span/tracing, e la fase di process
 // (dispatch gRPC / esecuzione in-process / publish Kafka) che segue.
-func ClaimBatch(ctx context.Context, items IWorkItemStore, jobID, taskName string, orphanTimeout time.Duration, limit int) (batch []*WorkItem, orphans, fresh int, claimErr *core.ApplicationError) {
+func ClaimBatch(ctx context.Context, items IWorkItemStore, jobID, taskName string, orphanTimeout time.Duration, limit int) (batch []*WorkItem, orphans, fresh int, claimErr *core.Error) {
 	orph, appErr := items.RecoverOrphans(ctx, taskName, orphanTimeout, limit)
 	if appErr != nil {
 		log.Warn().Err(appErr).Msgf("[%s] orphan recovery failed", jobID)

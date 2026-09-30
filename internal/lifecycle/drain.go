@@ -6,7 +6,7 @@ import (
 	"context"
 	"sync"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/httpx"
 	"github.com/rs/zerolog/log"
 )
 
@@ -21,7 +21,7 @@ import (
 // `chi` nomina il componente nei due log, che sono l'unico modo di sapere, dopo un rolling restart,
 // se l'arresto è stato pulito.
 func Drain(ctx context.Context, wg *sync.WaitGroup, chi string) {
-	if core.WaitContext(ctx, wg) {
+	if httpx.WaitContext(ctx, wg) {
 		log.Info().Msgf("%s: tutte le task in volo drenate", chi)
 		return
 	}

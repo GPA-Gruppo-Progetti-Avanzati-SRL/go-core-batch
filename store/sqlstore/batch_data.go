@@ -56,7 +56,7 @@ func (d *batchDataSQL) InsertTaskLogs(ctx context.Context, logs []*store.TaskLog
 }
 
 // PurgeTaskLogs cancella le righe più vecchie di olderThan, al più limit per chiamata.
-func (d *batchDataSQL) PurgeTaskLogs(ctx context.Context, olderThan time.Time, limit int) (int, *core.ApplicationError) {
+func (d *batchDataSQL) PurgeTaskLogs(ctx context.Context, olderThan time.Time, limit int) (int, *core.Error) {
 	res, err := d.Sql.DB().NewRaw(`
 		DELETE FROM task_logs
 		WHERE ctid IN (

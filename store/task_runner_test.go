@@ -6,7 +6,8 @@ import (
 	"testing"
 	"time"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/page"
 )
 
@@ -21,47 +22,47 @@ type markCall struct {
 
 type fakeStore struct{ last markCall }
 
-func (f *fakeStore) MarkDone(_ context.Context, ids []string, token string) *core.ApplicationError {
+func (f *fakeStore) MarkDone(_ context.Context, ids []string, token string) *core.Error {
 	f.last = markCall{op: "done", id: ids[0], token: token}
 	return nil
 }
-func (f *fakeStore) MarkFailed(_ context.Context, id, token, reason string) *core.ApplicationError {
+func (f *fakeStore) MarkFailed(_ context.Context, id, token, reason string) *core.Error {
 	f.last = markCall{op: "failed", id: id, token: token, reason: reason}
 	return nil
 }
-func (f *fakeStore) MarkPending(_ context.Context, id, token string, after time.Duration) *core.ApplicationError {
+func (f *fakeStore) MarkPending(_ context.Context, id, token string, after time.Duration) *core.Error {
 	f.last = markCall{op: "pending", id: id, token: token, after: after}
 	return nil
 }
 
 // Resto dell'interfaccia: non esercitato da ApplyResult.
-func (f *fakeStore) Release(context.Context, string, string) *core.ApplicationError { return nil }
-func (f *fakeStore) Purge(context.Context, string, time.Time, int) (int, *core.ApplicationError) {
+func (f *fakeStore) Release(context.Context, string, string) *core.Error { return nil }
+func (f *fakeStore) Purge(context.Context, string, time.Time, int) (int, *core.Error) {
 	return 0, nil
 }
-func (f *fakeStore) Backlog(context.Context, string) (int, time.Time, *core.ApplicationError) {
+func (f *fakeStore) Backlog(context.Context, string) (int, time.Time, *core.Error) {
 	return 0, time.Time{}, nil
 }
-func (f *fakeStore) ClaimPending(context.Context, string, int) ([]*WorkItem, *core.ApplicationError) {
+func (f *fakeStore) ClaimPending(context.Context, string, int) ([]*WorkItem, *core.Error) {
 	return nil, nil
 }
-func (f *fakeStore) RecoverOrphans(context.Context, string, time.Duration, int) ([]*WorkItem, *core.ApplicationError) {
+func (f *fakeStore) RecoverOrphans(context.Context, string, time.Duration, int) ([]*WorkItem, *core.Error) {
 	return nil, nil
 }
-func (f *fakeStore) Insert(context.Context, []*WorkItem) *core.ApplicationError { return nil }
-func (f *fakeStore) InsertIfNotActive(context.Context, []*WorkItem) (int, *core.ApplicationError) {
+func (f *fakeStore) Insert(context.Context, []*WorkItem) *core.Error { return nil }
+func (f *fakeStore) InsertIfNotActive(context.Context, []*WorkItem) (int, *core.Error) {
 	return 0, nil
 }
-func (f *fakeStore) HasActive(context.Context, string, string) (bool, *core.ApplicationError) {
+func (f *fakeStore) HasActive(context.Context, string, string) (bool, *core.Error) {
 	return false, nil
 }
-func (f *fakeStore) GetById(context.Context, string) (*WorkItem, *core.ApplicationError) {
+func (f *fakeStore) GetById(context.Context, string) (*WorkItem, *core.Error) {
 	return nil, nil
 }
-func (f *fakeStore) DeleteIfPending(context.Context, string) (bool, *core.ApplicationError) {
+func (f *fakeStore) DeleteIfPending(context.Context, string) (bool, *core.Error) {
 	return false, nil
 }
-func (f *fakeStore) List(context.Context, string, string, *page.Paging, page.SortRequest) ([]*WorkItem, *core.ApplicationError) {
+func (f *fakeStore) List(context.Context, string, string, *page.Paging, page.SortRequest) ([]*WorkItem, *core.Error) {
 	return nil, nil
 }
 
@@ -89,35 +90,35 @@ func TestApplyResult(t *testing.T) {
 		{name: "RetryError → pending", runErr: Retry(5 * time.Minute), outcome: OutcomeRetry, op: "pending", after: 5 * time.Minute},
 		{name: "errore generico → failed", runErr: transient, outcome: OutcomeFailed, op: "failed"},
 
-		// I tre casi sotto sono quelli abilitati da ApplicationError.Unwrap: prima
+		// I tre casi sotto sono quelli abilitati da core.Error.Unwrap: prima
 		// finivano tutti su OutcomeFailed, perché la catena si interrompeva
-		// sull'ApplicationError e né errors.Is né errors.AsType la attraversavano.
+		// sul core.Error e né errors.Is né errors.AsType la attraversavano.
 		{
-			name:    "ApplicationError che avvolge RetryError → pending",
+			name:    "core.Error che avvolge RetryError → pending",
 			runErr:  core.TechnicalError().WithCause(RetryWithCause(90*time.Second, transient)),
 			outcome: OutcomeRetry, op: "pending", after: 90 * time.Second,
 		},
 		{
-			name:    "ApplicationError che avvolge ErrHandled → nessun Mark*",
+			name:    "core.Error che avvolge ErrHandled → nessun Mark*",
 			runErr:  core.TechnicalError().WithCause(ErrHandled),
 			outcome: OutcomeHandled, op: "",
 		},
 		{
-			name:    "ApplicationError con WithCause(RetryError) → pending",
+			name:    "core.Error con WithCause(RetryError) → pending",
 			runErr:  core.TechnicalError().WithCode("SINK-KO").WithMessage("sink non raggiungibile").WithCause(Retry(0)),
 			outcome: OutcomeRetry, op: "pending", after: 0,
 		},
 
-		// Un ApplicationError la cui causa non è né RetryError né ErrHandled resta un
+		// Un core.Error la cui causa non è né RetryError né ErrHandled resta un
 		// errore normale: la causa sintetica di *WithCodeAndMessage non deve dirottare
 		// la classificazione.
 		{
-			name:    "ApplicationError con sola causa sintetica → failed",
+			name:    "core.Error con sola causa sintetica → failed",
 			runErr:  core.TechnicalError().WithCode("TECH500").WithMessage("boom"),
 			outcome: OutcomeFailed, op: "failed",
 		},
 		{
-			name:    "ApplicationError che avvolge un errore estraneo → failed",
+			name:    "core.Error che avvolge un errore estraneo → failed",
 			runErr:  core.TechnicalError().WithCause(transient),
 			outcome: OutcomeFailed, op: "failed",
 		},

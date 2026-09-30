@@ -192,7 +192,7 @@ func publishBatch(ctx context.Context, name, jobId string, p parametri, all []*s
 		log.Error().Err(errProduce).Msgf("[%s] Kafka produce failed — resetting %d items to PENDING", jobId, len(valid))
 		// Errore transiente: gli item claimati tornano PENDING e il tick successivo li riprende.
 		// Il delay è 0 — quando riprovare lo decide il cron del job, non il producer: l'errore che
-		// arriva qui è un *core.ApplicationError di go-core-kafka, che non conosce (né potrebbe
+		// arriva qui è un *core.Error di go-core-kafka, che non conosce (né potrebbe
 		// conoscere) store.RetryError.
 		for _, item := range valid {
 			if errMark := items.MarkPending(ctx, item.Id, item.LockToken, 0); errMark != nil {

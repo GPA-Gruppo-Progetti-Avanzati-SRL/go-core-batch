@@ -5,11 +5,13 @@ package sqlstore
 import (
 	"context"
 	"fmt"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
 	"regexp"
 	"strings"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
+
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob"
 	"github.com/uptrace/bun"
 )
@@ -21,7 +23,7 @@ var identRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // da config trusted (Properties del job), ma la validazione previene injection nel caso venissero
 // templati da input esterno e intercetta refusi (fail-fast con errore chiaro). Il filter NON è
 // validabile così (è una WHERE arbitraria) e resta trusted-config-only.
-func validateIdent(kind, s string, allowDot bool) *core.ApplicationError {
+func validateIdent(kind, s string, allowDot bool) *core.Error {
 	parts := []string{s}
 	if allowDot {
 		parts = strings.Split(s, ".")
@@ -48,7 +50,7 @@ func newQueryDataSQL(db *bun.DB) *queryDataSQL {
 
 var _ distributedjob.IQueryStore = (*queryDataSQL)(nil)
 
-func (q *queryDataSQL) GetIds(ctx context.Context, table, filter, sort string, limit int) ([]string, *core.ApplicationError) {
+func (q *queryDataSQL) GetIds(ctx context.Context, table, filter, sort string, limit int) ([]string, *core.Error) {
 	if err := validateIdent("table", table, true); err != nil {
 		return nil, err
 	}

@@ -16,7 +16,7 @@ import (
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/grpctransport"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/worker"
 
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/utils"
 	"github.com/rs/zerolog/log"
 )
 
@@ -63,5 +63,5 @@ func (r *Router) DistribuiteTask(ctx context.Context, s *proto.TaskMessage) (*pr
 }
 
 func okStatus() (*proto.TaskStatus, error) {
-	return &proto.TaskStatus{Status: "OK", Hostname: core.GetHostname()}, nil
+	return &proto.TaskStatus{Status: "OK", Hostname: utils.GetHostname()}, nil
 }

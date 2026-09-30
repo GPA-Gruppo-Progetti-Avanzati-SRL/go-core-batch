@@ -6,7 +6,8 @@ import (
 	"testing"
 	"time"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/page"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 )
@@ -24,47 +25,49 @@ type fakeStore struct {
 	item *store.WorkItem
 }
 
-func (f *fakeStore) MarkDone(_ context.Context, ids []string, token string) *core.ApplicationError {
+func (f *fakeStore) MarkDone(_ context.Context, ids []string, token string) *core.Error {
 	f.last = markCall{op: "done", id: ids[0], token: token}
 	return nil
 }
-func (f *fakeStore) MarkFailed(_ context.Context, id, token, _ string) *core.ApplicationError {
+func (f *fakeStore) MarkFailed(_ context.Context, id, token, _ string) *core.Error {
 	f.last = markCall{op: "failed", id: id, token: token}
 	return nil
 }
-func (f *fakeStore) MarkPending(_ context.Context, id, token string, after time.Duration) *core.ApplicationError {
+func (f *fakeStore) MarkPending(_ context.Context, id, token string, after time.Duration) *core.Error {
 	f.last = markCall{op: "pending", id: id, token: token, after: after}
 	return nil
 }
-func (f *fakeStore) GetById(_ context.Context, _ string) (*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) GetById(_ context.Context, _ string) (*store.WorkItem, *core.Error) {
 	return f.item, nil
 }
 
 // resto dell'interfaccia: no-op non usati da worker.Run.
-func (f *fakeStore) Release(context.Context, string, string) *core.ApplicationError { return nil }
-func (f *fakeStore) Purge(context.Context, string, time.Time, int) (int, *core.ApplicationError) {
+func (f *fakeStore) Release(context.Context, string, string) *core.Error { return nil }
+func (f *fakeStore) Purge(context.Context, string, time.Time, int) (int, *core.Error) {
 	return 0, nil
 }
-func (f *fakeStore) Backlog(context.Context, string) (int, time.Time, *core.ApplicationError) {
+func (f *fakeStore) Backlog(context.Context, string) (int, time.Time, *core.Error) {
 	return 0, time.Time{}, nil
 }
-func (f *fakeStore) ClaimPending(context.Context, string, int) ([]*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) ClaimPending(context.Context, string, int) ([]*store.WorkItem, *core.Error) {
 	return nil, nil
 }
-func (f *fakeStore) RecoverOrphans(context.Context, string, time.Duration, int) ([]*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) RecoverOrphans(context.Context, string, time.Duration, int) ([]*store.WorkItem, *core.Error) {
 	return nil, nil
 }
-func (f *fakeStore) Insert(context.Context, []*store.WorkItem) *core.ApplicationError { return nil }
-func (f *fakeStore) InsertIfNotActive(context.Context, []*store.WorkItem) (int, *core.ApplicationError) {
+func (f *fakeStore) Insert(context.Context, []*store.WorkItem) *core.Error {
+	return nil
+}
+func (f *fakeStore) InsertIfNotActive(context.Context, []*store.WorkItem) (int, *core.Error) {
 	return 0, nil
 }
-func (f *fakeStore) HasActive(context.Context, string, string) (bool, *core.ApplicationError) {
+func (f *fakeStore) HasActive(context.Context, string, string) (bool, *core.Error) {
 	return false, nil
 }
-func (f *fakeStore) DeleteIfPending(context.Context, string) (bool, *core.ApplicationError) {
+func (f *fakeStore) DeleteIfPending(context.Context, string) (bool, *core.Error) {
 	return false, nil
 }
-func (f *fakeStore) List(context.Context, string, string, *page.Paging, page.SortRequest) ([]*store.WorkItem, *core.ApplicationError) {
+func (f *fakeStore) List(context.Context, string, string, *page.Paging, page.SortRequest) ([]*store.WorkItem, *core.Error) {
 	return nil, nil
 }
 
@@ -77,7 +80,7 @@ func (fakeData) SetTaskInError(context.Context, string, string, string, string, 
 func (fakeData) SetTaskAssigned(context.Context, string, string, string, string)              {}
 func (fakeData) SetTaskAssignationKO(context.Context, string, string, string, string, string) {}
 func (fakeData) InsertTaskLogs(context.Context, []*store.TaskLog)                             {}
-func (fakeData) PurgeTaskLogs(context.Context, time.Time, int) (int, *core.ApplicationError) {
+func (fakeData) PurgeTaskLogs(context.Context, time.Time, int) (int, *core.Error) {
 	return 0, nil
 }
 

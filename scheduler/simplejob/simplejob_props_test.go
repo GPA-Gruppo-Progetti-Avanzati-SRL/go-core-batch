@@ -8,6 +8,7 @@ import (
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/page"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/runner"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
@@ -55,8 +56,8 @@ func TestAgnosticRegistrationFeedsSingleTask(t *testing.T) {
 		runner.Register[notifyRunner]("Notify") // nessun job/worker lo referenzia
 	}, task.ActiveSet{
 		Tasks: []task.Config{
-			{Name: "import-in", Type: "Import", Properties: core.Properties{"folder": "/data/in"}},
-			{Name: "import-bulk", Type: "Import", Properties: core.Properties{"folder": "/data/bulk", "limit": 500}},
+			{Name: "import-in", Type: "Import", Properties: properties.Properties{"folder": "/data/in"}},
+			{Name: "import-bulk", Type: "Import", Properties: properties.Properties{"folder": "/data/bulk", "limit": 500}},
 			{Name: "notify-mail", Type: "Notify"},
 		},
 		Referenced: []string{"import-in", "import-bulk"},
@@ -131,14 +132,14 @@ func TestRisolvi_NienteRipieghi(t *testing.T) {
 	instances := map[string]*runner.TaskRunner{"import-in": runner.New("import-in", &importRunner{})}
 
 	t.Run("task noto", func(t *testing.T) {
-		nome, tr, err := risolvi("j", instances, cfg(core.Properties{scheduler.PropTask: "import-in"}))
+		nome, tr, err := risolvi("j", instances, cfg(properties.Properties{scheduler.PropTask: "import-in"}))
 		if err != nil || nome != "import-in" || tr == nil {
 			t.Fatalf("nome=%q tr=%v err=%v", nome, tr, err)
 		}
 	})
 
 	t.Run("property mancante", func(t *testing.T) {
-		_, _, err := risolvi("j", instances, cfg(core.Properties{}))
+		_, _, err := risolvi("j", instances, cfg(properties.Properties{}))
 		if err == nil || !strings.Contains(err.Error(), scheduler.PropTask) {
 			t.Fatalf("atteso un errore che nomini %q: %v", scheduler.PropTask, err)
 		}
@@ -146,7 +147,7 @@ func TestRisolvi_NienteRipieghi(t *testing.T) {
 
 	// Il job type NON è più un ripiego: un job che si chiamasse come il task non lo eseguirebbe.
 	t.Run("niente ripiego sul job type", func(t *testing.T) {
-		c := cfg(core.Properties{})
+		c := cfg(properties.Properties{})
 		c.Type = "import-in"
 		if _, _, err := risolvi("import-in", instances, c); err == nil {
 			t.Error("il type del job non deve valere come nome del task")
@@ -154,53 +155,53 @@ func TestRisolvi_NienteRipieghi(t *testing.T) {
 	})
 
 	t.Run("task sconosciuto", func(t *testing.T) {
-		_, _, err := risolvi("j", instances, cfg(core.Properties{scheduler.PropTask: "boh"}))
+		_, _, err := risolvi("j", instances, cfg(properties.Properties{scheduler.PropTask: "boh"}))
 		if err == nil || !strings.Contains(err.Error(), "boh") {
 			t.Fatalf("atteso un errore che nomini il task: %v", err)
 		}
 	})
 }
 
-func cfg(props core.Properties) scheduler.Config {
+func cfg(props properties.Properties) scheduler.Config {
 	return scheduler.Config{Name: "j", Type: JobType, LockTimeout: time.Minute, Properties: props}
 }
 
 // fakeStore: tutti no-op, serve solo a soddisfare il grafo.
 type fakeStore struct{}
 
-func (*fakeStore) GetById(context.Context, string) (*store.WorkItem, *core.ApplicationError) {
+func (*fakeStore) GetById(context.Context, string) (*store.WorkItem, *core.Error) {
 	return &store.WorkItem{Id: "obj"}, nil
 }
-func (*fakeStore) MarkDone(context.Context, []string, string) *core.ApplicationError { return nil }
-func (*fakeStore) MarkFailed(context.Context, string, string, string) *core.ApplicationError {
+func (*fakeStore) MarkDone(context.Context, []string, string) *core.Error { return nil }
+func (*fakeStore) MarkFailed(context.Context, string, string, string) *core.Error {
 	return nil
 }
-func (*fakeStore) MarkPending(context.Context, string, string, time.Duration) *core.ApplicationError {
+func (*fakeStore) MarkPending(context.Context, string, string, time.Duration) *core.Error {
 	return nil
 }
-func (*fakeStore) Release(context.Context, string, string) *core.ApplicationError { return nil }
-func (*fakeStore) Purge(context.Context, string, time.Time, int) (int, *core.ApplicationError) {
+func (*fakeStore) Release(context.Context, string, string) *core.Error { return nil }
+func (*fakeStore) Purge(context.Context, string, time.Time, int) (int, *core.Error) {
 	return 0, nil
 }
-func (*fakeStore) Backlog(context.Context, string) (int, time.Time, *core.ApplicationError) {
+func (*fakeStore) Backlog(context.Context, string) (int, time.Time, *core.Error) {
 	return 0, time.Time{}, nil
 }
-func (*fakeStore) ClaimPending(context.Context, string, int) ([]*store.WorkItem, *core.ApplicationError) {
+func (*fakeStore) ClaimPending(context.Context, string, int) ([]*store.WorkItem, *core.Error) {
 	return nil, nil
 }
-func (*fakeStore) RecoverOrphans(context.Context, string, time.Duration, int) ([]*store.WorkItem, *core.ApplicationError) {
+func (*fakeStore) RecoverOrphans(context.Context, string, time.Duration, int) ([]*store.WorkItem, *core.Error) {
 	return nil, nil
 }
-func (*fakeStore) Insert(context.Context, []*store.WorkItem) *core.ApplicationError { return nil }
-func (*fakeStore) InsertIfNotActive(context.Context, []*store.WorkItem) (int, *core.ApplicationError) {
+func (*fakeStore) Insert(context.Context, []*store.WorkItem) *core.Error { return nil }
+func (*fakeStore) InsertIfNotActive(context.Context, []*store.WorkItem) (int, *core.Error) {
 	return 0, nil
 }
-func (*fakeStore) HasActive(context.Context, string, string) (bool, *core.ApplicationError) {
+func (*fakeStore) HasActive(context.Context, string, string) (bool, *core.Error) {
 	return false, nil
 }
-func (*fakeStore) DeleteIfPending(context.Context, string) (bool, *core.ApplicationError) {
+func (*fakeStore) DeleteIfPending(context.Context, string) (bool, *core.Error) {
 	return false, nil
 }
-func (*fakeStore) List(context.Context, string, string, *page.Paging, page.SortRequest) ([]*store.WorkItem, *core.ApplicationError) {
+func (*fakeStore) List(context.Context, string, string, *page.Paging, page.SortRequest) ([]*store.WorkItem, *core.Error) {
 	return nil, nil
 }

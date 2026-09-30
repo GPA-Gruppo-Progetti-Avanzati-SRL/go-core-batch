@@ -3,7 +3,7 @@ package scheduler
 import (
 	"time"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
 )
 
 const (
@@ -28,8 +28,8 @@ type Config struct {
 	// applicativa del runner sta nella sezione `tasks:` (vedi package task).
 	//
 	// NB: viper abbassa le chiavi della config, quindi le letture passano dai getter
-	// case-insensitive di core.Properties e non dall'indicizzazione diretta.
-	Properties core.Properties `mapstructure:"properties"`
+	// case-insensitive di properties.Properties e non dall'indicizzazione diretta.
+	Properties properties.Properties `mapstructure:"properties"`
 }
 
 // ResolveTimeouts deriva, con convenzione UNICA per tutte le famiglie di job (distributedjob,

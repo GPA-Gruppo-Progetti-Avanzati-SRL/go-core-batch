@@ -21,7 +21,7 @@ import (
 // `sort != ""` per scegliere quale chiamare, cioè rifaceva a mano ciò che l'alias già faceva.
 // `sort` vuoto significa "nessun ordinamento", e lo sa dire la stessa firma.
 type IQueryStore interface {
-	GetIds(ctx context.Context, collection, filter, sort string, limit int) ([]string, *core.ApplicationError)
+	GetIds(ctx context.Context, collection, filter, sort string, limit int) ([]string, *core.Error)
 }
 
 // SortField è una voce dell'ordinamento richiesto dal feed, nella forma `colonna[:desc]`.

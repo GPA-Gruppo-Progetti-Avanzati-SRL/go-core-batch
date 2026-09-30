@@ -4,10 +4,10 @@ import (
 	"strings"
 	"testing"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
 )
 
-func props(p core.Properties) Props {
+func jobProps(p properties.Properties) Props {
 	return JobProps("il-job", Config{Type: "IlType", Properties: p})
 }
 
@@ -15,7 +15,7 @@ func props(p core.Properties) Props {
 // distingue un messaggio su cui si agisce da «configurazione non valida». Prima ogni job type se
 // lo scriveva da sé, e simplejob per esempio non allegava nemmeno il codice BATCH-JOB-PROPS.
 func TestProps_MessaggiEObbligatorieta(t *testing.T) {
-	j := props(core.Properties{"vuota": "", "task": "import", "limit": 10, "eta": "24h"})
+	j := jobProps(properties.Properties{"vuota": "", "task": "import", "limit": 10, "eta": "24h"})
 
 	if _, err := j.RequiredString("task", "serve"); err != nil {
 		t.Fatalf("una property valorizzata non deve dare errore: %v", err)
@@ -47,7 +47,7 @@ func TestProps_MessaggiEObbligatorieta(t *testing.T) {
 // Una property scritta ma non convertibile NON ricade sul default: un refuso su `limit` cambia
 // quanto lavoro fa un tick, e deve fermare l'avvio invece di degradare in silenzio.
 func TestProps_ValoreInvalidoNonRicadeSulDefault(t *testing.T) {
-	j := props(core.Properties{"limit": "molti", "eta": "tantissimo"})
+	j := jobProps(properties.Properties{"limit": "molti", "eta": "tantissimo"})
 
 	if n, err := j.PositiveInt("limit", 100); err == nil {
 		t.Fatalf("un limit non numerico deve essere un errore, non il default: ho avuto %d", n)

@@ -22,17 +22,17 @@ type recordingStore struct {
 	after   time.Duration
 }
 
-func (s *recordingStore) MarkDone(context.Context, []string, string) *core.ApplicationError {
+func (s *recordingStore) MarkDone(context.Context, []string, string) *core.Error {
 	s.done = true
 	return nil
 }
 
-func (s *recordingStore) MarkFailed(_ context.Context, _, _, reason string) *core.ApplicationError {
+func (s *recordingStore) MarkFailed(_ context.Context, _, _, reason string) *core.Error {
 	s.failed, s.reason = true, reason
 	return nil
 }
 
-func (s *recordingStore) MarkPending(_ context.Context, _, _ string, after time.Duration) *core.ApplicationError {
+func (s *recordingStore) MarkPending(_ context.Context, _, _ string, after time.Duration) *core.Error {
 	s.pending, s.after = true, after
 	return nil
 }

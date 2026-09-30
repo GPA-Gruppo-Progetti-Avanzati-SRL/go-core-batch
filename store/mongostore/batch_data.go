@@ -62,7 +62,7 @@ func (d *batchData) InsertTaskLogs(ctx context.Context, logs []*store.TaskLog) {
 }
 
 // PurgeTaskLogs cancella le righe più vecchie di olderThan, al più limit per chiamata.
-func (d *batchData) PurgeTaskLogs(ctx context.Context, olderThan time.Time, limit int) (int, *core.ApplicationError) {
+func (d *batchData) PurgeTaskLogs(ctx context.Context, olderThan time.Time, limit int) (int, *core.Error) {
 	coll := d.Service.GetCollection(store.TaskLog{}.GetCollectionName(ctx), "")
 	cur, err := coll.Find(ctx, bson.M{"logdate": bson.M{"$lt": olderThan}},
 		options.Find().SetSort(bson.D{{Key: "logdate", Value: 1}}).SetLimit(int64(limit)).SetProjection(bson.M{"_id": 1}))

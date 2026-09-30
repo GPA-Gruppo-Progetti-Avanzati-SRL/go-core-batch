@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/s3client"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/runner"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
@@ -83,7 +83,7 @@ func TestS3Feed_Feed_FiltersAndLimits(t *testing.T) {
 	t.Run("unknown service returns error", func(t *testing.T) {
 		reg, _ := s3client.NewRegistry(nil) // empty registry
 		feed := New(reg)
-		props := core.Properties{
+		props := properties.Properties{
 			"service": "nonexistent",
 			"path":    "inbox/",
 			"pattern": "*.csv",
