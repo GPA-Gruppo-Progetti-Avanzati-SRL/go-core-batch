@@ -6,6 +6,7 @@ import (
 	"context"
 	"sync"
 
+	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/rs/zerolog/log"
 )
 
@@ -20,15 +21,9 @@ import (
 // `chi` nomina il componente nei due log, che sono l'unico modo di sapere, dopo un rolling restart,
 // se l'arresto è stato pulito.
 func Drain(ctx context.Context, wg *sync.WaitGroup, chi string) {
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
+	if core.WaitContext(ctx, wg) {
 		log.Info().Msgf("%s: tutte le task in volo drenate", chi)
-	case <-ctx.Done():
-		log.Warn().Msgf("%s: drain scaduto, task residue abbandonate (saranno recuperate come orfani)", chi)
+		return
 	}
+	log.Warn().Msgf("%s: drain scaduto, task residue abbandonate (saranno recuperate come orfani)", chi)
 }

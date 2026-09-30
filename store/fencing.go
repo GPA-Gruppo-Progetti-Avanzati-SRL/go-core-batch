@@ -1,9 +1,9 @@
 package store
 
 import (
-	"os"
-	"sync"
 	"uuid"
+
+	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 )
 
 // NewLockToken genera un fencing token unico per un claim/recover. Un nuovo token viene
@@ -11,20 +11,8 @@ import (
 // stale (il cui item è stato ri-claimato da RecoverOrphans) non può più finalizzarlo.
 func NewLockToken() string { return uuid.New().String() }
 
-var (
-	hostnameOnce sync.Once
-	hostnameVal  string
-)
-
-// Hostname ritorna l'hostname del processo (cached). Usato come WorkItem.LockedBy per sapere
-// quale replica ha in carico un item — solo osservabilità, non partecipa al fencing.
-func Hostname() string {
-	hostnameOnce.Do(func() {
-		if h, err := os.Hostname(); err == nil && h != "" {
-			hostnameVal = h
-		} else {
-			hostnameVal = "unknown"
-		}
-	})
-	return hostnameVal
-}
+// Hostname ritorna l'hostname del processo. Usato come WorkItem.LockedBy/ExecutedBy per sapere
+// quale replica ha in carico un item — solo osservabilità, non partecipa al fencing. Delega a
+// core.GetHostname, la stessa fonte del campo hostname di task_logs: prima erano due helper che
+// divergevano quando os.Hostname falliva ("unknown" qui, "" là).
+func Hostname() string { return core.GetHostname() }

@@ -57,7 +57,22 @@ func NewServer(lc fx.Lifecycle, sh fx.Shutdowner, config *batchgrpc.ServerConfig
 		},
 		OnStop: func(ctx context.Context) error {
 			log.Info().Msg("Stopping grpc Server")
-			grpcServer.GracefulStop()
+			// GracefulStop aspetta la fine di ogni RPC in volo e non conosce il context: un RPC
+			// che non termina teneva in piedi il processo dopo il SIGTERM, ignorando la deadline
+			// di fx.StopTimeout. Si attende in una goroutine e, a deadline scaduta, Stop chiude
+			// le connessioni — che è anche ciò che sblocca GracefulStop.
+			done := make(chan struct{})
+			go func() {
+				grpcServer.GracefulStop()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-ctx.Done():
+				log.Warn().Msg("grpc Server: graceful stop scaduto, RPC in volo interrotte")
+				grpcServer.Stop()
+				<-done
+			}
 			return nil
 		},
 	})

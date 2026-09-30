@@ -3,7 +3,9 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
+	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/gocronlock"
 	corelock "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-locker"
 	gocron "github.com/go-co-op/gocron/v2"
@@ -35,7 +37,11 @@ type schedulerParams struct {
 func newScheduler(p schedulerParams) (*Scheduler, error) {
 	sm := NewSchedulerMetrics()
 	opts := make([]gocron.SchedulerOption, 0)
-	logger := gocron.NewLogger(-1)
+	// NewLogger(-1) era sotto ogni livello di gocron, quindi i suoi log erano spenti — e
+	// accendendoli avrebbe scritto su stdout col log della standard library. *slog.Logger ha la
+	// forma di gocron.Logger: con l'handler di core le righe finiscono nello stream zerolog
+	// dell'app, al livello tradotto.
+	logger := slog.New(core.SlogHandler("gocron"))
 	// The distributed lock is a dispatch-dedup optimization across replicas, not
 	// the correctness mechanism (that is the DB claiming in the job runners). The
 	// concrete backend (Redis/Mongo/SQL) is injected as a neutral corelock.Locker and
