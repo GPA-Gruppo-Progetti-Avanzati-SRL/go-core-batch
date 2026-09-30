@@ -48,7 +48,7 @@ func NewServer(lc fx.Lifecycle, sh fx.Shutdowner, config *batchgrpc.ServerConfig
 				// dell'app (non lasciare un processo vivo senza worker gRPC).
 				if serveErr := grpcServer.Serve(lis); serveErr != nil && !errors.Is(serveErr, gogrpc.ErrServerStopped) {
 					log.Error().Err(serveErr).Msg("grpc Server terminato con errore, shutdown dell'app")
-					if shErr := sh.Shutdown(); shErr != nil {
+					if shErr := sh.Shutdown(fx.ExitCode(1)); shErr != nil {
 						log.Error().Err(shErr).Msg("Shutdown dell'app fallito")
 					}
 				}

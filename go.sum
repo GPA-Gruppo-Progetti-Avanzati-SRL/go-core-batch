@@ -1,5 +1,5 @@
-github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app v0.0.29-0.20260930105232-67b4143d76d8 h1:zLrvl3rAUDlMn7e98LsY8M03HuDRyCEo6+xS/sdYfw8=
-github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app v0.0.29-0.20260930105232-67b4143d76d8/go.mod h1:5gGqcCK30s7HuhIHGU/LQrBeP0YnRef8PkG08BnHojs=
+github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app v0.0.29-0.20260930140542-5b06937a5101 h1:Ia9TgoyimvUlEpGQu2iCQG6vwYXZ7UZdxnVWcEJZPWM=
+github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app v0.0.29-0.20260930140542-5b06937a5101/go.mod h1:5gGqcCK30s7HuhIHGU/LQrBeP0YnRef8PkG08BnHojs=
 github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-kafka v0.0.0-20260930105624-fb04e05bb372 h1:SO2OhNLeeCaqdWHeZqOeWH7AKsx4wO6Q1vkBY1ZNJ0o=
 github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-kafka v0.0.0-20260930105624-fb04e05bb372/go.mod h1:/S2ItqQP+46dqQtqs1DBa6yQCDFBCR7CKfVEJZp9b+g=
 github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-locker v0.0.0-20260930105948-35d2332998ae h1:AxxI9XkDGA16OigesxOMHAx3ejYNh/ztBs3pv0g2/1Y=
