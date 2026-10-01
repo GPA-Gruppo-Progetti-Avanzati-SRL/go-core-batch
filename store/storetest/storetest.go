@@ -3,7 +3,7 @@
 //
 // Esiste per la stessa ragione della conformance di go-core-locker: i backend sono due, scritti in
 // due linguaggi di query diversi, e la sola garanzia che non divergano è che rispondano alle stesse
-// prove. I backend la eseguono contro un database vero (BATCH_PG_URL, MONGO_URL) e la saltano
+// prove. I backend la eseguono contro un database vero (PG_URL, MONGO_URL) e la saltano
 // senza — il claiming è codice che un fake non verifica.
 package storetest
 

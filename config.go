@@ -35,7 +35,7 @@ type Config struct {
 	// propri job, che spesso coincidono, e il sintomo è soltanto un tick che non parte.
 	Lock       corelock.Config    `yaml:"lock" mapstructure:"lock" json:"lock"`
 	S3         s3.Config          `yaml:"s3" mapstructure:"s3" json:"s3"`
-	JobsConfig []scheduler.Config `yaml:"jobs" mapstructure:"jobs" json:"jobs"`
+	JobsConfig []scheduler.Config `yaml:"jobs" mapstructure:"jobs" json:"jobs" validate:"dive"`
 	// TasksConfig è la configurazione APPLICATIVA dei task (sezione `tasks:`): ogni voce è
 	// un'istanza — name + type + properties — mappata sui campi `prop:` della struct del runner.
 	// Da non confondere col blocco `properties:` di un job, che è infrastrutturale.

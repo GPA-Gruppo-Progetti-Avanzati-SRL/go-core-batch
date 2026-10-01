@@ -62,7 +62,7 @@ func DecodePayload(raw any, out any) error {
 		return nil
 	}
 
-	var payload any = toNative(raw)
+	payload := toNative(raw)
 	switch v := raw.(type) {
 	case []byte:
 		return json.Unmarshal(v, out)

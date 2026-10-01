@@ -11,14 +11,11 @@ import (
 
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
-	"go.opentelemetry.io/otel"
 	"go.uber.org/fx"
 	gogrpc "google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/reflection"
 )
-
-var tracer = otel.Tracer("grpc-server")
 
 type Server struct {
 	*gogrpc.Server

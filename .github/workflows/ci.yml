@@ -19,3 +19,7 @@ permissions:
 jobs:
   ci:
     uses: GPA-Gruppo-Progetti-Avanzati-SRL/go-core-ci/.github/workflows/module-ci.yml@master
+    with:
+      # I test sugli store e le transazioni contro un database vero, saltati senza.
+      postgres: true
+      mongo: true

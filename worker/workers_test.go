@@ -131,7 +131,7 @@ func TestRunLifecycle(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			// Nel path known-type è il RunTask (bridge) a popolare t.Item; qui lo simuliamo.
 			// Nel path type-not-found worker.Run lo recupera da GetById (fs.item).
-			task := &Task{Id: "t1", JobId: "j1", TaskName: "MY_TASK", ObjectId: "obj-1",
+			task := &Task{Id: "t1", JobId: "j1", TaskName: "MY_TASK", WorkItemId: "obj-1",
 				Item:     &store.WorkItem{Id: "obj-1", LockToken: "tok-1", Retry: c.retry},
 				MaxRetry: c.maxRetry, Context: ctx, Cancel: cancel}
 			sem := make(chan struct{}, 1)

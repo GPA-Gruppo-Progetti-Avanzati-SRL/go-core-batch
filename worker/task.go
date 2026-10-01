@@ -35,7 +35,9 @@ type Task struct {
 	// TaskName è il nome dell'istanza di task da eseguire (non un "tipo"): arriva dal
 	// WorkItem ed è la chiave con cui il pool trova la RunTask registrata.
 	TaskName string
-	ObjectId string
+	// WorkItemId è il WorkItem.Id dell'item da eseguire. Si chiamava ObjectId pur non portando il
+	// WorkItem.ObjectId, che è tutt'altra cosa (l'oggetto di dominio).
+	WorkItemId string
 	// Item è il WorkItem su cui il task lavora. Lo popola chi lo carica — il bridge grpchandler
 	// dopo la GetById, o il dispatch in-process che lo riceve già claimato dal job — e worker.Run
 	// lo passa INTERO a store.ApplyResult.
@@ -60,15 +62,15 @@ type Task struct {
 	Cancel        context.CancelFunc
 }
 
-func GenerateTask(id, jobid, taskName, objectid string, ctx context.Context, cancel context.CancelFunc) Task {
+func GenerateTask(id, jobid, taskName, workItemId string, ctx context.Context, cancel context.CancelFunc) Task {
 	return Task{
-		Id:        id,
-		JobId:     jobid,
-		TaskName:  taskName,
-		ObjectId:  objectid,
-		StartTime: time.Now(),
-		Context:   ctx,
-		Cancel:    cancel,
+		Id:         id,
+		JobId:      jobid,
+		TaskName:   taskName,
+		WorkItemId: workItemId,
+		StartTime:  time.Now(),
+		Context:    ctx,
+		Cancel:     cancel,
 	}
 }
 
@@ -94,7 +96,7 @@ func (w *Task) GetJobId() string {
 
 func (w *Task) LogStart(data store.IData) {
 	w.StartTime = batchmetrics.TaskStart(w.TaskName)
-	data.SetTaskStart(w.Context, w.Id, w.JobId, w.TaskName, w.ObjectId)
+	data.SetTaskStart(w.Context, w.Id, w.JobId, w.TaskName, w.WorkItemId)
 }
 
 // LogOutcome scrive la riga di task_log ed emette le metriche di task per l'esito classificato.
@@ -104,7 +106,7 @@ func (w *Task) LogStart(data store.IData) {
 func (w *Task) LogOutcome(data store.IData, o store.Outcome, runErr error) {
 	batchmetrics.ObserveTask(w.TaskName, o, w.StartTime)
 	if batchmetrics.Status(o) == batchmetrics.StatusSuccess {
-		data.SetTaskDone(w.Context, w.Id, w.JobId, w.TaskName, w.ObjectId)
+		data.SetTaskDone(w.Context, w.Id, w.JobId, w.TaskName, w.WorkItemId)
 		return
 	}
 	errMsg := ""
@@ -112,5 +114,5 @@ func (w *Task) LogOutcome(data store.IData, o store.Outcome, runErr error) {
 		errMsg = runErr.Error()
 	}
 	log.Error().Msg(errMsg)
-	data.SetTaskInError(w.Context, w.Id, w.JobId, w.TaskName, w.ObjectId, errMsg)
+	data.SetTaskInError(w.Context, w.Id, w.JobId, w.TaskName, w.WorkItemId, errMsg)
 }

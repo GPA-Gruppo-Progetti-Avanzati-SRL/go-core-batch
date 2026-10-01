@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -86,13 +87,35 @@ func TestClaimingTick_OrdineFeedPoiClaim(t *testing.T) {
 		ordine = append(ordine, "process")
 		return nil
 	})
-	tk.Feed = func(context.Context, string) { ordine = append(ordine, "feed") }
+	tk.Feed = func(context.Context, string) error { ordine = append(ordine, "feed"); return nil }
 
 	if err := tk.Run(items); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if strings.Join(ordine, ",") != "feed,process" {
 		t.Fatalf("ordine delle fasi = %v, atteso feed prima del process", ordine)
+	}
+}
+
+// Un feed rotto non ferma la coda — gli item già accodati si lavorano — ma è l'esito del tick:
+// prima era un Warn, e un feed guasto da giorni si leggeva come una serie di tick riusciti.
+func TestClaimingTick_FeedFallitoELEsitoDelTick(t *testing.T) {
+	feedErr := errors.New("sorgente irraggiungibile")
+	processed := 0
+	tk := tick(func(_ context.Context, _ string, b []*store.WorkItem) error {
+		processed += len(b)
+		return nil
+	})
+	tk.Feed = func(context.Context, string) error { return feedErr }
+
+	if err := tk.Run(&fakeStore{claim: []*store.WorkItem{{Id: "a"}}}); !errors.Is(err, feedErr) {
+		t.Fatalf("esito = %v, atteso l'errore del feed", err)
+	}
+	if processed != 1 {
+		t.Fatalf("processati %d item, atteso 1: il feed rotto non deve fermare la coda", processed)
+	}
+	if err := tk.Run(&fakeStore{}); !errors.Is(err, feedErr) {
+		t.Fatalf("tick a vuoto: esito = %v, atteso l'errore del feed", err)
 	}
 }
 

@@ -520,7 +520,7 @@ flowchart TD
         end
 
         subgraph REMOTE["Worker remoto (gRPC)"]
-            WS[IData.SetTaskStart] --> WRUN["GetById(ObjectId): sul filo passa il solo Id\n→ ITaskRunner.Run(ctx, item)\n→ store.ApplyResult(return)"]
+            WS[IData.SetTaskStart] --> WRUN["GetById(WorkItemId): sul filo passano Id, token e deadline\n→ ITaskRunner.Run(ctx, item)\n→ store.ApplyResult(return)"]
             WRUN -- "nil / ErrHandled → DONE" --> WD[IData.SetTaskDone]
             WRUN -- "store.Retry → MarkPending → PENDING" --> WP[IData.SetTaskInError]
             WRUN -- "err → MarkFailed → FAILED" --> WE[IData.SetTaskInError]
@@ -632,6 +632,12 @@ recuperati, nel qual caso si lavorano quelli, perché sono già `IN_PROGRESS` e 
 costerebbe un altro giro di orphan timeout. Il **backlog** si misura *dopo* il claim: ciò che resta
 è l'arretrato che questo tick non ha preso, che è esattamente il numero su cui si costruisce un
 alert.
+
+**Un feed che fallisce è l'esito del tick**, ma non lo ferma: la lettura della sorgente o
+l'accodamento falliti si registrano sullo span e diventano l'errore che il tick ritorna (quindi
+gocron e le sue metriche lo vedono), mentre claim ed elaborazione proseguono sugli item già in coda.
+Prima era un Warn, e un feed guasto da giorni si presentava come una serie di tick riusciti senza
+lavoro.
 
 **`lock-timeout` governa due cose insieme** (`Config.ResolveTimeouts`): il timeout del context del
 tick (default 30s) e l'età oltre la quale un `IN_PROGRESS` è considerato orfano (default 10m).
@@ -867,10 +873,10 @@ workers:
 | Claim | tick | tick | tick (processo scheduler) |
 | Item per tick | 1 | fino a `limit` | fino a `limit` |
 | Dove gira il runner | dentro il tick | goroutine del dispatcher | goroutine del worker pool |
-| Rilettura del WorkItem | no | no | **sì** (sul filo passa il solo `Id`) |
+| Rilettura del WorkItem | no | no | **sì** (sul filo passano `Id`, token del claim e deadline) |
 | Chi applica `ApplyResult` | `simplejob.esegui` | `runner.MuxRunner.Run` | `worker.Run` |
 | Righe di `task_logs` | nessuna | `ASSIGNED` + `DONE`/`ERROR` | `ASSIGNED` + `DONE`/`ERROR` |
-| Deadline dell'esecuzione | `lock-timeout` (context del tick) | orphan timeout, dalla `DispatchRequest` | nessuno dal filo: lo dà il processo worker |
+| Deadline dell'esecuzione | `lock-timeout` (context del tick) | orphan timeout, dalla `DispatchRequest` | orphan timeout, dal `TimeoutMs` del `TaskMessage` (relativo, applicato dal worker) |
 | Concorrenza | 1 | Σ dei `limit`, pavimento 100 | `size` del pool, × N processi |
 | Se non c'è capienza | non si presenta | `Release` dell'item | `Release` dell'item |
 | Scaling | — | verticale | orizzontale |
@@ -1066,7 +1072,7 @@ temporali vanno dichiarate `timestamptz` (è il default di bun su PostgreSQL).
 
 **Suite degli store.** `store/storetest` è la suite che i due backend eseguono identica — claim, limite e
 ordine, fencing dei `Mark*`, `Release` che non conta, recupero degli orfani, deduplica — contro un
-database vero: `BATCH_PG_URL` (`postgres://…?sslmode=disable`) per `sqlstore`, `MONGO_URL` per
+database vero: `PG_URL` (`postgres://…?sslmode=disable`) per `sqlstore`, `MONGO_URL` per
 `mongostore`. Senza le variabili i test sono saltati, come la conformance di go-core-locker.
 
 ## Indici — obbligatori, e non creati da soli
@@ -1134,7 +1140,7 @@ jobs:
     singleton: true
     lock-timeout: 10m
     properties:
-      status:     DONE     # obbligatoria
+      status:     DONE     # obbligatoria: DONE | FAILED, uno stato attivo ferma il job
       older-than: 168h     # obbligatoria
       limit:      5000     # facoltativa (default 1000)
       task-logs:  true     # facoltativa: cancella anche le righe di task_logs più vecchie
@@ -1381,9 +1387,9 @@ conosce (`older-than`, `task-logs`, `topic`, `stream`, `max-retry`, `objectId`, 
 
 | Campo | Tipo | Descrizione |
 |---|---|---|
-| `name` | string | Nome univoco del job |
+| `name` | string | Nome del job, **obbligatorio e univoco**: è la chiave del lock distribuito, e due job omonimi se lo contenderebbero (uno dei due non girerebbe mai). Un duplicato ferma l'avvio |
 | `type` | string | Il **job type**, sempre una stringa del framework: `"SingleTask"` · `"DistribuiteTask"` · `"DistribuiteTaskByQuery"` · `"DistribuiteTaskByS3File"` · `"FeedTask"` · `"NotificationKafka"` · `"PurgeWorkItems"`. Non è mai un task type: quale task eseguire lo dice `properties.task` |
-| `cron` | string | Espressione cron (secondi abilitati) |
+| `cron` | string | Espressione cron (secondi abilitati); obbligatoria per un job attivo |
 | `singleton` | bool | distributed job lock — evita run paralleli su repliche diverse |
 | `lock-timeout` | duration | Dopo quanto un IN_PROGRESS è considerato orfano (default: 10m — distributedjob e simplejob). simplejob: anche timeout del context di `Run` (default: 30s) |
 | `disabled` | bool | Disabilita il job senza rimuoverlo dalla config |
@@ -1401,10 +1407,10 @@ conosce (`older-than`, `task-logs`, `topic`, `stream`, `max-retry`, `objectId`, 
 | `properties.stream` | string | **Nome della coda di notifiche** (solo `NotificationKafka`, obbligatoria): è il `WorkItem.TaskName` degli item accodati. Non si chiama `task` perché quello è un riferimento a una voce di `tasks:`, e una notifica un runner non ce l'ha |
 | `properties.topic` | string | Topic di **default** (solo `NotificationKafka`, facoltativa): vale per i record che non portano il proprio `topic` nel payload |
 | `properties.max-retry` | int | Tetto ai ritentativi di un item (solo `NotificationKafka`; assente o `-1` = illimitato) |
-| `properties.status` | string | Stato degli item da cancellare, es. `DONE` (solo `PurgeWorkItems`, obbligatoria) |
+| `properties.status` | string | Stato degli item da cancellare, `DONE` o `FAILED` (solo `PurgeWorkItems`, obbligatoria). Uno stato attivo è un errore di configurazione: cancellerebbe lavoro non fatto o in corso, e l'indice della purge copre solo gli stati terminali |
 | `properties.older-than` | duration | Finestra di retention, misurata su `update_time` (solo `PurgeWorkItems`, obbligatoria) |
 | `properties.task-logs` | bool | Cancella anche le righe di `task_logs` più vecchie della finestra (solo `PurgeWorkItems`, default `false`) |
-| `properties.backlog-metrics` | bool | Abilita le gauge `batch_workitems_pending` / `batch_workitems_oldest_age_seconds` per questo job. Default `false`: è una query in più per tick, e la paga chi la vuole |
+| `properties.backlog-metrics` | bool | Abilita le gauge `batch_workitems_pending` / `batch_workitems_oldest_age_seconds` per questo job. Default `false`: è una query in più per tick, e la paga chi la vuole. Va accesa su **un solo job per coda**: la gauge misura la coda (`task`), quindi due job sulla stessa coda producono due serie identiche (label `job` diversa) e pagano la query due volte |
 
 > **Le property dei job sono validate alla COSTRUZIONE, non dentro il tick.** Un refuso in YAML
 > compare nei log di avvio (`il job fallirà a ogni tick`) ed è poi restituito da ogni esecuzione.
@@ -1417,7 +1423,7 @@ conosce (`older-than`, `task-logs`, `topic`, `stream`, `max-retry`, `objectId`, 
 
 | Campo | Tipo | Descrizione |
 |---|---|---|
-| `name` | string | Nome dell'istanza, referenziato da `jobs[].properties.task`/`task` e da `workers[].tasks`; default = `type`. È anche il `WorkItem.TaskName` |
+| `name` | string | Nome dell'istanza, referenziato da `jobs[].properties.task` e da `workers[].tasks`; **obbligatorio**, senza fallback sul `type`. È anche il `WorkItem.TaskName` |
 | `type` | string | Task type registrato con `runner.Register[T]("...")` |
 | `properties` | map | Configurazione applicativa, mappata sui campi `prop:` della struct del runner |
 
@@ -1773,7 +1779,7 @@ type IData interface {
 | **Concorrenza** | cap **derivato dalla config**: somma dei `limit` dei job attivi (pavimento 100) | `limit` item dispatchati, concorrenza controllata dal pool size |
 | **Scaling** | verticale (un processo) | orizzontale (N worker process × M goroutine) |
 | **Config pool** | non necessaria — il cap si dimensiona da sé sui `limit` | `[]worker.Config` per task type |
-| **Deadline della task** | l'orphan timeout del job (`lock-timeout`), portato dalla `DispatchRequest` | nessuno: `DispatchRequest.Timeout` **non attraversa il filo** (il proto non ha il campo) |
+| **Deadline della task** | l'orphan timeout del job (`lock-timeout`), portato dalla `DispatchRequest` | lo stesso, portato da `TaskMessage.TimeoutMs` — relativo, perché lo applica il worker col proprio orologio |
 | **Se il dispatch è rifiutato** | `Release` dell'item: PENDING subito, `retry` invariato | idem |
 
 In locale il cap di concorrenza è **derivato dalla config**: la somma dei `limit` dei job attivi,

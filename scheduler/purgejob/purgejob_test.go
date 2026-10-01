@@ -93,6 +93,10 @@ func TestRisolvi_ConfigInvalida(t *testing.T) {
 		"senza older-than": {"status": "DONE"},
 		"older-than zero":  {"status": "DONE", "older-than": "0s"},
 		"limit non valido": {"status": "DONE", "older-than": "24h", "limit": 0},
+		// Uno stato attivo cancellerebbe lavoro non fatto o in corso.
+		"status PENDING":     {"status": "PENDING", "older-than": "24h"},
+		"status IN_PROGRESS": {"status": "IN_PROGRESS", "older-than": "24h"},
+		"status sconosciuto": {"status": "done", "older-than": "24h"},
 	}
 	for nome, props := range cases {
 		t.Run(nome, func(t *testing.T) {

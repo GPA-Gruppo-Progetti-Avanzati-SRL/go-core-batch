@@ -64,7 +64,7 @@ func (r *Router) DistribuiteTask(ctx context.Context, s *proto.TaskMessage) (*pr
 	} else {
 		ctx, cancel = context.WithCancel(base)
 	}
-	t := worker.GenerateTask(s.TaskId, s.JobId, s.TaskName, s.ObjectId, ctx, cancel)
+	t := worker.GenerateTask(s.TaskId, s.JobId, s.TaskName, s.WorkItemId, ctx, cancel)
 	t.DispatchToken = s.LockToken
 
 	ch := r.workers.GetChannel(s.TaskName)

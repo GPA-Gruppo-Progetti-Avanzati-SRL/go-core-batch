@@ -127,3 +127,55 @@ func TestLocalDispatcher(t *testing.T) {
 		t.Fatal("dispatch dopo stop: atteso errore, ottenuto nil")
 	}
 }
+
+// countingRunner conta le esecuzioni iniziate.
+type countingRunner struct{ runs atomic.Int64 }
+
+func (r *countingRunner) Run(context.Context, *store.WorkItem) error {
+	r.runs.Add(1)
+	return nil
+}
+
+// Dispatch concorrenti con l'arresto: nessuna task può partire DOPO che il drain è finito. Prima il
+// controllo di stopping e il wg.Go erano due passi separati, e un dispatch entrato fra le due righe
+// di OnStop aggiungeva al WaitGroup una task che il drain non aspettava.
+func TestLocalDispatcher_NessunaTaskDopoLArresto(t *testing.T) {
+	for range 50 {
+		cr := &countingRunner{}
+		mux := runner.NewMux([]*runner.TaskRunner{runner.New("T", cr)})
+		lc := fxtest.NewLifecycle(t)
+		d := New(lc, nil, mux, fakeStore{}, &fakeData{})
+		lc.RequireStart()
+
+		stop := make(chan struct{})
+		var accepted atomic.Int64
+		done := make(chan struct{})
+		for range 4 {
+			go func() {
+				defer func() { done <- struct{}{} }()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					req := distributedjob.DispatchRequest{JobId: "j", TaskId: "t", TaskName: "T",
+						Item: &store.WorkItem{Id: "obj", TaskName: "T"}, Timeout: time.Minute}
+					if d.DispatchTask(context.Background(), req) == nil {
+						accepted.Add(1)
+					}
+				}
+			}()
+		}
+		lc.RequireStop()
+		afterDrain := cr.runs.Load()
+		close(stop)
+		for range 4 {
+			<-done
+		}
+		// Ogni dispatch accettato è stato eseguito ENTRO il drain: dopo, nessuno ne parte.
+		if got := cr.runs.Load(); got != afterDrain || got != accepted.Load() {
+			t.Fatalf("esecuzioni: %d al termine del drain, %d alla fine, %d dispatch accettati", afterDrain, got, accepted.Load())
+		}
+	}
+}

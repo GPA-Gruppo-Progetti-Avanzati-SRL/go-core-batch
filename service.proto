@@ -16,8 +16,9 @@ message TaskMessage {
 
   string TaskId = 1 ;
   string JobId = 2;
-  // ObjectId porta il WorkItem.Id (non il suo ObjectId): è la chiave con cui il worker lo ricarica.
-  string ObjectId = 3;
+  // WorkItemId è il WorkItem.Id, la chiave con cui il worker ricarica l'item. Si chiamava ObjectId
+  // pur non portando il WorkItem.ObjectId: rinominato a tag invariato, quindi sul filo non cambia nulla.
+  string WorkItemId = 3;
   string TaskName = 4;
   // LockToken è il fencing token del claim che ha prodotto questo dispatch. Il worker finalizza
   // con QUESTO token e non con quello che rilegge dal DB: se nel frattempo l'item è stato

@@ -10,15 +10,12 @@ import (
 	corelock "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-locker"
 	gocron "github.com/go-co-op/gocron/v2"
 	"github.com/rs/zerolog/log"
-	"go.opentelemetry.io/otel"
 	"go.uber.org/fx"
 )
 
 type Scheduler struct {
 	gocron.Scheduler
 }
-
-var tracer = otel.Tracer("Scheduler")
 
 // schedulerParams raccoglie le dipendenze di newScheduler. Jobs arriva dal value group
 // batch_jobs: fx risolve tutti i contributori del gruppo prima di costruire lo scheduler,
@@ -35,6 +32,10 @@ type schedulerParams struct {
 // malformata (scheduler non inizializzabile, job type sconosciuto, build job fallito) fa fallire
 // lo startup dell'app in modo pulito (fail-fast) invece di terminare il processo dalla libreria.
 func newScheduler(p schedulerParams) (*Scheduler, error) {
+	// Prima di costruire qualunque cosa: una config di job sbagliata ferma l'avvio e basta.
+	if err := CheckJobs(p.Config); err != nil {
+		return nil, err
+	}
 	sm := NewSchedulerMetrics()
 	opts := make([]gocron.SchedulerOption, 0)
 	// NewLogger(-1) era sotto ogni livello di gocron, quindi i suoi log erano spenti — e

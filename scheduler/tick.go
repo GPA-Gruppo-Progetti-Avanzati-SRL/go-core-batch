@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/batchmetrics"
@@ -37,8 +38,10 @@ type ClaimingTick struct {
 	OrphanTimeout time.Duration
 	// Backlog abilita le gauge di coda (una query in più per tick).
 	Backlog bool
-	// Feed, se valorizzata, gira PRIMA del claim e popola nuovi work item.
-	Feed func(ctx context.Context, jobID string)
+	// Feed, se valorizzata, gira PRIMA del claim e popola nuovi work item. Un suo errore non ferma
+	// il tick — gli item già in coda si lavorano lo stesso — ma ne è l'esito: prima era un Warn, e un
+	// feed rotto da giorni si presentava come una serie di tick riusciti senza lavoro.
+	Feed func(ctx context.Context, jobID string) error
 	// Process lavora il batch claimato. È l'unica parte specifica della famiglia di job.
 	Process func(ctx context.Context, jobID string, batch []*store.WorkItem) error
 }
@@ -63,8 +66,13 @@ func (t ClaimingTick) Run(items store.IWorkItemStore) error {
 	)
 	defer span.End()
 
+	var feedErr error
 	if t.Feed != nil {
-		t.Feed(spanCtx, jobID)
+		if feedErr = t.Feed(spanCtx, jobID); feedErr != nil {
+			span.RecordError(feedErr)
+			span.SetStatus(codes.Error, "feed failed")
+			log.Error().Err(feedErr).Msgf("[%s] feed fallito, si lavora la coda esistente", jobID)
+		}
 	}
 
 	batch, orphans, fresh, appErr := store.ClaimBatch(
@@ -73,7 +81,7 @@ func (t ClaimingTick) Run(items store.IWorkItemStore) error {
 		span.RecordError(appErr)
 		span.SetStatus(codes.Error, "claim failed")
 		log.Error().Err(appErr).Msgf("[%s] ClaimPending failed", jobID)
-		return appErr
+		return errors.Join(feedErr, appErr)
 	}
 	if appErr != nil {
 		log.Error().Err(appErr).Msgf("[%s] ClaimPending failed, si lavorano i %d orfani già recuperati", jobID, len(batch))
@@ -91,7 +99,7 @@ func (t ClaimingTick) Run(items store.IWorkItemStore) error {
 
 	if len(batch) == 0 {
 		log.Trace().Msgf("[%s] no pending items", jobID)
-		return nil
+		return feedErr
 	}
 
 	batchmetrics.JobClaimed(t.JobName, t.TaskName, len(batch))
@@ -100,7 +108,7 @@ func (t ClaimingTick) Run(items store.IWorkItemStore) error {
 	if err := t.Process(spanCtx, jobID, batch); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "process failed")
-		return err
+		return errors.Join(feedErr, err)
 	}
-	return nil
+	return feedErr
 }

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"runtime/pprof"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
@@ -37,12 +36,16 @@ const (
 // record status via store.IWorkItemStore. Le task in volo sono tracciate da un WaitGroup e
 // drenate su OnStop; la concorrenza è limitata da un semaforo.
 type LocalDispatcher struct {
-	mux         *runner.MuxRunner
-	items       store.IWorkItemStore
-	data        store.IData
-	sem         chan struct{}  // cap di concorrenza (non-bloccante)
-	wg          sync.WaitGroup // task in volo, per il drain su OnStop
-	stopping    atomic.Bool    // dopo OnStop rifiuta nuovi dispatch
+	mux   *runner.MuxRunner
+	items store.IWorkItemStore
+	data  store.IData
+	sem   chan struct{}  // cap di concorrenza (non-bloccante)
+	wg    sync.WaitGroup // task in volo, per il drain su OnStop
+	// mu rende atomici "non sto fermandomi" e "aggiungo una task al WaitGroup". Con un atomic.Bool
+	// letto e poi un wg.Go separato, un dispatch entrato fra le due righe di OnStop aggiungeva una
+	// task DOPO l'inizio del drain: girava oltre l'arresto, con un WaitGroup riusato durante Wait.
+	mu          sync.Mutex
+	stopping    bool // dopo OnStop rifiuta nuovi dispatch; protetto da mu
 	taskTimeout time.Duration
 }
 
@@ -68,7 +71,9 @@ func New(lc fx.Lifecycle, jobs []scheduler.Config, mux *runner.MuxRunner, items 
 		OnStop: func(ctx context.Context) error {
 			// Niente nuovi dispatch, poi il drain delle task in volo fino al deadline del
 			// context di stop di fx — stesso contratto del worker pool, ed è la stessa funzione.
-			d.stopping.Store(true)
+			d.mu.Lock()
+			d.stopping = true
+			d.mu.Unlock()
 			lifecycle.Drain(ctx, &d.wg, "localdispatcher")
 			return nil
 		},
@@ -102,7 +107,9 @@ func capacita(jobs []scheduler.Config) int {
 // lavorano lo stesso item. Prima era una costante di 30 minuti, tre volte l'orphan timeout di
 // default.
 func (d *LocalDispatcher) DispatchTask(ctx context.Context, req distributedjob.DispatchRequest) error {
-	if d.stopping.Load() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.stopping {
 		return errors.New("localdispatcher: shutting down, dispatch rejected")
 	}
 	select {

@@ -36,7 +36,7 @@ func TestBridge_ItemRiclaimatoNonEseguito(t *testing.T) {
 	}
 	items := oneItem{item: &store.WorkItem{Id: "i1", LockToken: "nuovo"}}
 
-	task := &worker.Task{ObjectId: "i1", Context: t.Context(), DispatchToken: "vecchio"}
+	task := &worker.Task{WorkItemId: "i1", Context: t.Context(), DispatchToken: "vecchio"}
 	if err := run(task, items); !errors.Is(err, store.ErrHandled) {
 		t.Fatalf("atteso ErrHandled (nessun Mark*), ottenuto %v", err)
 	}
@@ -44,7 +44,7 @@ func TestBridge_ItemRiclaimatoNonEseguito(t *testing.T) {
 		t.Fatal("il runner non doveva girare su un item ri-claimato")
 	}
 
-	task = &worker.Task{ObjectId: "i1", Context: t.Context(), DispatchToken: "nuovo"}
+	task = &worker.Task{WorkItemId: "i1", Context: t.Context(), DispatchToken: "nuovo"}
 	if err := run(task, items); err != nil || r.runs != 1 {
 		t.Fatalf("token coincidente: err=%v runs=%d", err, r.runs)
 	}
@@ -57,7 +57,7 @@ func TestRouter_DeadlineDalDispatch(t *testing.T) {
 	r := &Router{workers: workersWith("t", ch), taskServices: newRunnerService([]*runner.TaskRunner{{TaskName: "t", Runner: &countingRunner{}}})}
 
 	rpcCtx, cancelRPC := context.WithCancel(context.Background())
-	if _, err := r.DistribuiteTask(rpcCtx, &proto.TaskMessage{TaskId: "x", TaskName: "t", ObjectId: "i1", LockToken: "tok", TimeoutMs: 60_000}); err != nil {
+	if _, err := r.DistribuiteTask(rpcCtx, &proto.TaskMessage{TaskId: "x", TaskName: "t", WorkItemId: "i1", LockToken: "tok", TimeoutMs: 60_000}); err != nil {
 		t.Fatal(err)
 	}
 	cancelRPC() // la RPC è finita: l'esecuzione deve proseguire

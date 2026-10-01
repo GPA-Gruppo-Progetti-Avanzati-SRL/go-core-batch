@@ -159,7 +159,7 @@ func Run(semaphore chan struct{}, t *Task, services ITaskService, data store.IDa
 		// Nessuna RunTask ha caricato l'item: lo si recupera per poterlo comunque finalizzare
 		// (MarkFailed) in modo fenced, evitando un orphan-loop sul tipo sconosciuto.
 		if t.Item == nil && items != nil {
-			if it, e := items.GetById(t.Context, t.ObjectId); e == nil {
+			if it, e := items.GetById(t.Context, t.WorkItemId); e == nil {
 				t.Item = it
 			}
 		}

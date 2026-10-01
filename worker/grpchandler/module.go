@@ -62,7 +62,7 @@ func (s *runnerService) GetTaskExecutions(taskName string) (worker.RunTask, bool
 	// Solo adattamento: carica il WorkItem ed esegue il runner. La finalizzazione del
 	// lifecycle (store.ApplyResult) è centralizzata in worker.Run, che riceve questo errore.
 	return func(t *worker.Task, items store.IWorkItemStore) error {
-		item, appErr := items.GetById(t.Context, t.ObjectId)
+		item, appErr := items.GetById(t.Context, t.WorkItemId)
 		if appErr != nil {
 			return appErr
 		}

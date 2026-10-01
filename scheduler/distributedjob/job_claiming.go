@@ -42,8 +42,8 @@ func makeClaimingFactory(dispatcher ITaskDispatcher, items store.IWorkItemStore,
 			},
 		}
 		if feed != nil {
-			tick.Feed = func(ctx context.Context, jobID string) {
-				runFeedPhase(ctx, feed, items, jobID, taskName, config.Properties, limit)
+			tick.Feed = func(ctx context.Context, jobID string) error {
+				return runFeedPhase(ctx, feed, items, jobID, taskName, config.Properties, limit)
 			}
 		}
 		return scheduler.LabeledTask(name, config.Type, func() error {

@@ -2,6 +2,7 @@ package distributedjob
 
 import (
 	"context"
+	"fmt"
 	"time"
 	"uuid"
 
@@ -52,19 +53,22 @@ func (f *queryStoreFeed) Feed(ctx context.Context, taskName string, props proper
 }
 
 // runFeedPhase executes the feed phase: generates WorkItems from the feed source
-// and inserts those not already active into the store.
-func runFeedPhase(ctx context.Context, feed IFeedSource, items store.IWorkItemStore, jobId, taskName string, props properties.Properties, limit int) {
+// and inserts those not already active into the store. L'errore lo registra ClaimingTick, che ne
+// fa l'esito del tick.
+func runFeedPhase(ctx context.Context, feed IFeedSource, items store.IWorkItemStore, jobId, taskName string, props properties.Properties, limit int) error {
 	workItems, err := feed.Feed(ctx, taskName, props, limit)
 	if err != nil {
-		log.Warn().Err(err).Msgf("[%s] feed query failed", jobId)
-		return
+		return fmt.Errorf("feed: lettura della sorgente: %w", err)
 	}
 	if len(workItems) == 0 {
-		return
+		return nil
 	}
-	if n, insertErr := items.InsertIfNotActive(ctx, workItems); insertErr != nil {
-		log.Warn().Err(insertErr).Msgf("[%s] feed insert failed", jobId)
-	} else if n > 0 {
+	n, insertErr := items.InsertIfNotActive(ctx, workItems)
+	if insertErr != nil {
+		return fmt.Errorf("feed: accodamento: %w", insertErr)
+	}
+	if n > 0 {
 		log.Info().Msgf("[%s] fed %d new workitem(s) from external source", jobId, n)
 	}
+	return nil
 }

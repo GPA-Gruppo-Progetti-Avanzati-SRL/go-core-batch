@@ -25,7 +25,7 @@
 //	    singleton: true
 //	    lock-timeout: 10m
 //	    properties:
-//	      status:     DONE      # DONE | FAILED (o qualunque stato) — obbligatoria
+//	      status:     DONE      # DONE | FAILED — obbligatoria; uno stato attivo è un errore
 //	      older-than: 168h      # obbligatoria
 //	      limit:      5000      # facoltativa, default 1000
 //	      task-logs:  true      # facoltativa: cancella anche le righe di task_logs più vecchie
@@ -33,6 +33,7 @@ package purgejob
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
@@ -47,8 +48,11 @@ const JobType = "PurgeWorkItems"
 
 // Properties del job. Sono INFRASTRUTTURALI: le legge il framework.
 const (
-	// PropStatus è lo stato degli item da cancellare (DONE, FAILED, …). Obbligatoria e senza
-	// default: "quali item cancellare" non è una domanda a cui la libreria possa rispondere.
+	// PropStatus è lo stato degli item da cancellare: DONE o FAILED. Obbligatoria e senza default:
+	// "quali item cancellare" non è una domanda a cui la libreria possa rispondere. Uno stato attivo
+	// (PENDING, IN_PROGRESS) è un errore di configurazione: cancellerebbe lavoro non ancora fatto — o
+	// in corso, e il suo esecutore non troverebbe più l'item da finalizzare — e l'indice della purge
+	// copre solo gli stati terminali, quindi la query scandirebbe la collection intera.
 	PropStatus = "status"
 	// PropOlderThan è l'età minima (durata) oltre la quale un item è cancellabile, misurata
 	// sull'update_time. Obbligatoria.
@@ -102,6 +106,10 @@ func risolvi(name string, config scheduler.Config) (parametri, error) {
 	var err error
 	if out.status, err = j.RequiredString(PropStatus, "non si sa quali item cancellare"); err != nil {
 		return out, err
+	}
+	if out.status != store.StatusDone && out.status != store.StatusFailed {
+		return out, fmt.Errorf("job %q: %s = %q: la retention cancella solo item terminali (%s, %s)",
+			name, PropStatus, out.status, store.StatusDone, store.StatusFailed)
 	}
 	if out.olderThan, err = j.RequiredPositiveDuration(PropOlderThan, "non si sa da quanto un item sia cancellabile"); err != nil {
 		return out, err

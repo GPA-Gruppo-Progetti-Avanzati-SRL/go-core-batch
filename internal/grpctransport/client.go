@@ -36,14 +36,14 @@ func NewClient(config *batchgrpc.ClientConfig) (*Client, error) {
 	return &Client{client: proto.NewDistributionChannelClient(conn)}, nil
 }
 
-func (g *Client) DistribuiteTask(ctx context.Context, jobId, taskId, objectId, taskName, lockToken string, timeout time.Duration) (string, error) {
+func (g *Client) DistribuiteTask(ctx context.Context, jobId, taskId, workItemId, taskName, lockToken string, timeout time.Duration) (string, error) {
 	t, err := g.client.DistribuiteTask(ctx, &proto.TaskMessage{
-		TaskId:    taskId,
-		JobId:     jobId,
-		ObjectId:  objectId,
-		TaskName:  taskName,
-		LockToken: lockToken,
-		TimeoutMs: timeout.Milliseconds(),
+		TaskId:     taskId,
+		JobId:      jobId,
+		WorkItemId: workItemId,
+		TaskName:   taskName,
+		LockToken:  lockToken,
+		TimeoutMs:  timeout.Milliseconds(),
 	})
 	if err != nil {
 		log.Error().Err(err).Msgf("Errore chiamata gRPC DistribuiteTask: %s", err.Error())
