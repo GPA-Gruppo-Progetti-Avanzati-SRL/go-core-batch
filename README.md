@@ -8,11 +8,11 @@ Framework per batch processing distribuito. Gestisce job schedulati, claiming at
 
 ## Orchestratore — `batch.Module` (wiring consigliato)
 
-Il package **root** `batch` espone un unico entry-point che sostituisce la sfilza di `*.Module()` da chiamare a mano negli `init()`. È il modo **consigliato** di cablare il sottosistema batch: una `batch.Config` unificata + una sola chiamata a `batch.Module(...)` con opzioni dichiarative.
+Il package **root** `batch` espone l'unico entry-point del sottosistema batch: una `batch.Config` unificata + una sola chiamata a `batch.Module(...)` con opzioni dichiarative.
 
 ### `batch.Config` — config unificata
 
-Raccoglie i sotto-config di tutti i pezzi cablati da `Module`. L'app tipicamente la embedda nella propria `Config` come campo `BatchConfig batch.Config` e la carica come singola sezione YAML: sono i `Module()` dei singoli package a fare il `core.Supply` interno, quindi l'app non deve suppliere nulla a Fx.
+Raccoglie i sotto-config di tutti i pezzi cablati da `Module`. L'app tipicamente la embedda nella propria `Config` come campo `BatchConfig batch.Config` e la carica come singola sezione YAML: è `batch.Module` a supplire a fx i sotto-config che servono ai componenti, quindi l'app non deve supplire nulla.
 
 | Campo | Tipo | Tag yaml/mapstructure/json |
 |---|---|---|
@@ -53,65 +53,142 @@ Raccoglie i sotto-config di tutti i pezzi cablati da `Module`. L'app tipicamente
 
 ### `batch.Module(cfg *batch.Config, register func(), opts ...batch.Option)`
 
-Wira ogni componente **esplicitamente** e lo gate **solo** tramite i suoi modes: è il `core.Mode` a runtime a decidere cosa viene effettivamente costruito, non un `if` sul valore del config. I backend (store, dispatcher, feed, job Kafka, worker pool) **non sono selezionati da enum ma iniettati dall'app come `batch.ModuleFunc` per riferimento diretto** (niente closure). Così il package `batch` non importa nessun package di backend — solo i loro `Config`, struct leggere — e ogni app trascina in `go.mod` **solo** le dipendenze di ciò che passa: un'app mongo-only non si porta dietro `uptrace/bun`; una senza Kafka non si porta dietro **nessun client Kafka** — `kafkajob` nomina il solo seam `producer.IProducer` di go-core-kafka, e quale client giri lo decide l'import dell'app (`driver/franz` o `driver/confluent`).
+**I job sono della libreria, l'app scrive i task.** I job type (`SingleTask`, `DistribuiteTask*`,
+`FeedTask`, `PurgeWorkItems`, `NotificationKafka`) li fornisce go-core-batch, e la macchina che li
+esegue — scheduler, registry dei job type, tick di claiming, dispatcher, worker pool — sta in
+`internal/`: un'app non ne scrive di nuovi. Il suo unico punto di estensione è il **task**
+(`runner.Register[T]` / `runner.RegisterFile[T]`), che i job della libreria eseguono.
 
-`ModuleFunc` è la firma comune di tutti i `Module()` componibili — `func(modes ...string)`, ormai **modes-only**: il config non è più un parametro ma viene iniettato da fx, ed è `batch.Module` a fornirlo con `core.Supply` della Config unificata. I config dei backend (grpc client/server, s3, worker) sono suppliti **solo se valorizzati**: se un componente attivo richiede un config non impostato, fx fallisce subito con un chiaro "missing dependency" invece di far girare il backend con valori vuoti. Il **lock distribuito** non è un'opzione di batch: lo Scheduler dipende dal `corelock.Locker` di **go-core-locker** come da qualsiasi altra dipendenza fx, e la scelta del backend si fa una volta sola dove il lock vive. Se manca, l'avvio fallisce con un `missing type`.
+**Cosa si wira lo dicono i `jobs:`.** `batch.Module` legge i job attivi (non `disabled`) e wira da sé
+i componenti che servono, gate-ati sui loro modes:
+
+| condizione in config | componente wirato da batch | modes |
+|---|---|---|
+| un job `SingleTask` | job SingleTask (esecuzione in linea) | scheduler |
+| un job `FeedTask` | job FeedTask (accoda, nessun runner) | scheduler |
+| un job `PurgeWorkItems` | job di retention | scheduler |
+| un job `DistribuiteTask*` **senza** `grpc.client.url` | dispatcher in-process (`internal/localdispatcher`) | scheduler |
+| un job `DistribuiteTask*` **con** `grpc.client.url` | dispatcher gRPC (`internal/grpcdispatcher`) | scheduler |
+| un job `DistribuiteTask` / `DistribuiteTaskByQuery` | la loro `JobRegistration` (il query store resta dell'app, vedi sotto) | scheduler |
+| `workers:` non vuota **+** `grpc.server.port` | worker pool gRPC (`internal/grpchandler`) | worker |
+
+`workers:` senza `grpc.server.port` in un worker mode è un **errore di avvio**: il worker pool riceve
+i task solo via gRPC. Il criterio "automatico" è misurato con `go list -deps`: questi componenti non
+aggiungono dipendenze (il gRPC aggiunge otelgrpc e protobuf, con grpc-go già presente via
+go-core-app). Restano invece **dell'app**, passati con `WithModule`, i soli backend che portano
+dipendenze pesanti — ed è ciò che preserva la modularità compile-time: un'app mongo-only non si porta
+dietro `uptrace/bun`, una senza Kafka non si porta dietro go-core-kafka, una senza S3 l'SDK AWS.
+
+| backend (`WithModule`) | serve a | dipendenza |
+|---|---|---|
+| `djmongo.Module` / `djsql.Module` (`scheduler/distributedjob/{mongostore,sqlstore}`) | query store di `DistribuiteTaskByQuery` | driver Mongo / bun |
+| `s3feed.Module` (`scheduler/distributedjob/s3feed`) | job `DistribuiteTaskByS3File` | SDK AWS |
+| `kafkajob.Module` (`scheduler/kafkajob`) | job `NotificationKafka` (il producer lo wira l'app) | go-core-kafka |
+
+**Regola: ogni package pubblico sotto `scheduler/` è un guscio di registrazione** da passare a
+`batch.WithModule` — un solo file con la sola `func Module(modes ...string)` — ed esiste come package
+separato **solo** perché porta una dipendenza pesante (go-core-kafka, mongo-driver, bun, SDK AWS).
+Le implementazioni stanno in `internal/kafkajob`, `internal/querystore/{mongostore,sqlstore}` e
+`internal/s3feed`; gli import path dei gusci sono quelli di sempre.
+
+Un job type in config il cui backend non è passato (`DistribuiteTaskByS3File` senza `s3feed`,
+`NotificationKafka` senza `kafkajob`) ferma l'avvio con `type ... non registrato`; un query store
+mancante con un `missing type` di fx.
+
+`ModuleFunc` è la firma dei `Module()` che l'app passa — `func(modes ...string)`, **modes-only**: il
+config non è un parametro, lo fornisce `batch.Module` con `core.Supply` della Config unificata. I
+config dei componenti (grpc client/server, s3, worker) sono suppliti **solo se valorizzati**: un
+componente attivo che ne richieda uno non impostato fa fallire fx con un "missing dependency" invece
+di girare con valori vuoti.
 
 **Opzioni:**
 
 | Opzione | Effetto |
 |---|---|
-| `WithSchedulerModes(...string)` | gate dei componenti lato scheduler (dispatcher, feed, kafkajob, query store) e dello Scheduler ai `core.Mode` indicati; vuoto = sempre attivi |
-| `WithWorkerModes(...string)` | gate dei componenti lato worker (worker pool gRPC) ai `core.Mode` indicati; vuoto = sempre attivo |
-| `WithStore(m batch.ModuleFunc)` | **obbligatorio** (panic se assente); wirato **sempre** (no mode gate, serve sia a scheduler che a worker): `storemongo.Module` / `storesql.Module` (copre `IData`/`IWorkItemStore`) |
-| `WithModule(m ...batch.ModuleFunc)` | componenti lato **scheduler** (gate scheduler modes), accumula su più chiamate: `grpcdispatcher.Module`/`localdispatcher.Module`, `djmongo.Module`(o `djsql.Module`) **+** `queryfeed.Module`, `s3feed.Module`, `kafkajob.Module` |
-| `WithWorkerModule(m ...batch.ModuleFunc)` | componenti lato **worker** (gate worker modes): tipicamente `grpchandler.Module` |
+| `WithSchedulerModes(...string)` | gate di Scheduler, job type, dispatcher e backend di `WithModule` ai `core.Mode` indicati; vuoto = sempre attivi |
+| `WithWorkerModes(...string)` | gate del worker pool gRPC ai `core.Mode` indicati; vuoto = sempre attivo |
+| `WithStore(m batch.ModuleFunc)` | **obbligatorio** (panic se assente); wirato **sempre** (serve sia a scheduler che a worker): `storemongo.Module` / `storesql.Module` (copre `IData`/`IWorkItemStore`) |
+| `WithLocker(m corelock.ModuleFunc)` | **obbligatorio** (panic se assente): backend del lock distribuito di go-core-locker, wirato a root |
+| `WithModule(m ...batch.ModuleFunc)` | i soli backend pesanti (tabella sopra), gate scheduler modes, accumula su più chiamate |
 
-**Nessun default implicito:** `WithStore` è obbligatorio ed esplicito; non esistono coppie store/dispatch mutuamente esclusive né un default Mongo/local: si passano esplicitamente i `Module` desiderati.
+**Ordine di registrazione indifferente.** I job type confluiscono nel value group fx `batch_jobs` e
+lo scheduler li consuma dal gruppo: fx risolve tutti i contributori prima di costruirlo. Tutte le
+registrazioni di `Module` sono raggruppate in un `core.ModuleClosed("batch")`: batch è un
+**sottosistema chiuso** — consuma i seam dell'app (gli `ITaskRunner`) e non le espone nulla in
+cambio, quindi config, dispatcher, feed, query store, worker pool e scheduler sono privati al
+modulo. Fanno eccezione, per scelta, il **seam pubblico** `store.IWorkItemStore`/`store.IData`
+(wirato a root, così il data layer dell'app può accodare WorkItem dal lato API) e il `corelock.Locker`.
+I runner restano forniti a root e i value group aggregano come prima.
 
-**Ordine di registrazione indifferente.** I job type confluiscono nel value group fx `batch_jobs` (`scheduler.ProvideJob`) e `newScheduler` li consuma dal gruppo: fx risolve tutti i contributori prima di costruire lo scheduler, a prescindere dall'ordine di registrazione. Tutte le registrazioni di `Module` sono inoltre raggruppate in un `core.ModuleClosed("batch")`: batch è un **sottosistema chiuso** — consuma i seam dell'app (gli `ITaskRunner`) e non le espone nulla in cambio, quindi config dei backend, dispatcher, feed, query store, worker pool e `*Scheduler` sono privati al modulo. Fa eccezione, per scelta, il **seam pubblico** `store.IWorkItemStore`/`store.IData`: `WithStore` è wirato a root, fuori dallo scope, così il data layer dell'app può accodare WorkItem dal lato API. I runner restano forniti a root e i value group (`batch_runners`, `batch_jobs`) aggregano come prima.
+**La funzione `register`** è il gemello di quella di `corekafka.Module`: `batch.Module` la esegue
+**sincronamente**, con la config già nota. Le `runner.Register[T]` chiamate al suo interno forniscono
+a fx **una istanza di runner per ogni task eseguito in questo processo**, ciascuna con le proprie
+properties. "Eseguito qui" vuol dire:
 
-> In precedenza lo Scheduler doveva essere registrato **per ultimo** perché `newScheduler` leggeva una mappa globale `scheduler.Jobs` alla costruzione (popolata dai `Register()` dei componenti); registrarlo prima dava `"Job Type ... not found"`. Con il value group `batch_jobs` questo vincolo non esiste più.
+- in uno **scheduler mode**: il `task` dei job che eseguono in linea — `SingleTask` sempre, i
+  `DistribuiteTask*` solo col dispatch in-process;
+- in un **worker mode** col worker pool wirato: i `workers[].tasks`.
 
-**La funzione `register`** è il gemello di quella di `corekafka.Module`: `batch.Module` la esegue **sincronamente**, con la config già nota. Le `runner.Register[T]` chiamate al suo interno forniscono a fx **una istanza di runner per ogni task attivo** — cioè per ogni voce di `tasks:` referenziata da un job o da un worker — ciascuna con le proprie properties. Un task che nessuno referenzia non viene istanziato: le sue dipendenze non entrano nel grafo e non vengono mai connesse.
+Un task nominato da un `FeedTask` (che accoda e non esegue), o consegnato via gRPC a un worker
+remoto, **non** diventa runner qui: le sue dipendenze non entrano nel grafo. I nomi citati da
+`jobs:`/`workers:` sono comunque tutti **validati** (un nome che non esiste in `tasks:` ferma
+l'avvio in ogni processo), e un task eseguito qui il cui type nessun runner registra in questo
+binario ferma l'avvio invece di fallire item per item.
 
-`register` è `nil` solo per un'app che non registra task runner: **registrare in un `init()` non è più supportato** (panic — lì la sezione `tasks:` non è nota). Non esiste una seconda forma: `runner.Register[T]` (e `runner.RegisterFile[T]` per l'altro contratto) è l'unica, uguale per ogni famiglia di job.
+`register` è `nil` solo per un'app che non registra task runner: **registrare in un `init()` non è
+supportato** (panic — lì la sezione `tasks:` non è nota). `runner.Register[T]` (e
+`runner.RegisterFile[T]` per l'altro contratto) è l'unica forma, uguale per ogni famiglia di job.
 
-**Il gate per-task: `runner.Register[T]("IMPORT", engine.Worker)`.** I `core.Mode` in coda limitano
-*quel* runner ai mode indicati (nessuno = ogni mode), ed è la stessa forma di
-`corekafka.RegisterHandler`. Sta **sotto** `WithSchedulerModes`/`WithWorkerModes`, che spengono
-l'intero sottosistema: serve quando un solo YAML alimenta più processi dello stesso deployment e solo
-alcuni eseguono davvero quel runner — senza, in un processo scheduler entrano nel grafo fx anche i
-runner che soltanto il worker eseguirà, con tutte le loro dipendenze. Un task escluso dal mode **non
-è un errore di avvio**: non viene istanziato, con un log Info, esattamente come un task dichiarato e
-non referenziato.
+**Il gate per-task: `runner.Register[T]("IMPORT", engine.Worker)`.** I `core.Mode` in coda sono un
+filtro **in AND** sulla config, nella stessa forma di `corekafka.RegisterHandler`: possono solo
+**spegnere**, mai accendere ciò che la config non esegue qui.
 
-⚠️ Il gate non è verificato al boot contro i `jobs:`. Se un job **locale** (`SingleTask`,
-`localdispatcher`) referenzia in questo processo un task che i modes hanno escluso, l'assenza del
-runner si manifesta **per item a runtime**: `MuxRunner` non trova la route, scrive `MarkFailed` e
-ritorna `no runner registered for task name`. Non è una regressione — è ciò che già accade allo
-scheduler che dispatcha via gRPC verso un worker in un altro binario — ma con i modes diventa una
-configurazione che si può scrivere per sbaglio.
+| la config lo esegue qui | modes del register | risultato |
+|---|---|---|
+| sì | assenti, o MODE fra quelli indicati | istanziato |
+| sì | MODE escluso | **errore di avvio** — un job o un worker di qui lo eseguirebbe senza runner |
+| no | qualsiasi | non istanziato |
 
-**Restano a carico dell'app:** fornire il driver DB (`coremongo.Module(&cfg.Mongo)` o `coresql.Module(&cfg.Sql, pgdialect.New())`). Il **simplejob NON è coperto** dall'orchestratore: resta wiring separato (vedi la sezione dedicata).
+```
+batch: i task import-in (type "IMPORT") sono eseguiti in questo processo da un job o da un worker pool,
+ma runner.Register li limita ai MODE [WORKER] e il MODE corrente è "SCHEDULER": togliere il task dal
+job/worker di questo MODE, oppure aggiungere il MODE al register
+```
+
+Resta un errore **per item a runtime** (`no runner registered for task name`) solo un item il cui
+`TaskName` nessun job di questo processo nomina — per esempio accodato a mano su una coda servita da
+un altro binario.
+
+**Restano a carico dell'app:** fornire il driver DB (`coremongo.Module(&cfg.Mongo)` o `coresql.Module(&cfg.Sql, pgdialect.New())`).
+
+> **Breaking — cosa togliere dal wiring.** `batch.WithWorkerModule` non esiste più, e dalle
+> `batch.WithModule(...)` vanno tolti `localdispatcher.Module`, `grpcdispatcher.Module`,
+> `queryfeed.Module`, `simplejob.Module`, `feedjob.Module`, `purgejob.Module` e
+> `grpchandler.Module`: li wira batch dai `jobs:`, e i loro package non sono più importabili
+> (`internal/`). `scheduler/distributedjob/queryfeed` è eliminato. Lasciano la superficie anche
+> `runner.MuxRunner`/`NewMux` (→ `internal/mux`), `runner.TaskRunner`/`New`/`FileTaskRunner`/
+> `NewFile`/`Group`/`FileGroup` (→ `internal/taskrunner`), `task.ActiveSet`/`Apply`/`Instances`/
+> `InApply` (→ `internal/taskreg`), `s3feed.S3Feed`/`New`/`S3Payload` (→ `internal/s3feed`) e
+> `grpc/proto` (→ `internal/grpcproto`). Pubblici restano `batch`, `runner` (`Register`,
+> `RegisterFile`, `ITaskRunner`, `IFileRunner`), `store` (+ `mongostore`/`sqlstore`/`storetest`),
+> `task` (`Config`), `kafka`, `grpc`, `s3`, i `Config` di `scheduler` e `worker`, e i quattro gusci
+> della tabella dei backend. Chi sceglieva il dispatcher passando il Module ora lo sceglie con
+> `grpc.client.url`.
 
 ### Esempio — distribuito (gRPC + Mongo)
 
 ```go
 import (
     "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch"
+    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/runner"
     storemongo "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store/mongostore"
-    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/grpcdispatcher"
     djmongo "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/mongostore"
-    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/queryfeed"
     "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/kafkajob"
-    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/worker/grpchandler"
-    corelock "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-locker"
-    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-locker/mongostore"
+    lockmongo "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-locker/mongostore"
 )
 
 func Register() {
-    runner.Register[mioTaskRunner]("MIO_TASK")   // un runner per ogni istanza in `tasks:`
+    runner.Register[mioTaskRunner]("MIO_TASK")   // un runner per ogni istanza eseguita qui
 }
 
 batch.Module(&cfg.BatchConfig, Register,
@@ -119,45 +196,34 @@ batch.Module(&cfg.BatchConfig, Register,
     batch.WithWorkerModes(engine.Worker, engine.Batch),
     batch.WithStore(storemongo.Module),          // obbligatorio
     batch.WithLocker(lockmongo.Module),          // obbligatorio
-    batch.WithModule(                            // gate scheduler modes, riferimento diretto
-        grpcdispatcher.Module,                   // dispatch via gRPC
-        djmongo.Module, queryfeed.Module,        // feed by-query (query store + feed)
+    batch.WithModule(                            // solo i backend pesanti
+        djmongo.Module,                          // query store di DistribuiteTaskByQuery
         kafkajob.Module,                         // job NotificationKafka (il producer lo wira l'app)
     ),
-    batch.WithWorkerModule(grpchandler.Module),  // gate worker modes
 )
 ```
+
+Dispatcher gRPC e worker pool non compaiono: li deducono `grpc.client.url` (lato scheduler) e
+`workers:` + `grpc.server.port` (lato worker).
 
 ### Esempio — single-instance (in-process + Mongo)
 
 ```go
-// import localdispatcher "...go-core-batch/scheduler/distributedjob/localdispatcher"
 batch.Module(&cfg.BatchConfig, Register,
     batch.WithStore(storemongo.Module),          // obbligatorio
     batch.WithLocker(lockmongo.Module),          // obbligatorio
-    batch.WithModule(
-        localdispatcher.Module,                  // dispatch in-process (niente gRPC)
-        djmongo.Module, queryfeed.Module,        // feed by-query
-    ),
+    batch.WithModule(djmongo.Module),            // query store di DistribuiteTaskByQuery
 )
 ```
 
-### Schedulare una cosa a un'ora — `feedjob`
+Senza `grpc.client.url` i `DistribuiteTask*` dispatchano in-process, ed eseguono qui i loro task.
+
+### Schedulare una cosa a un'ora — `FeedTask`
 
 Quando il workitem non arriva da fuori (API, altro processo) né da una query, ma è **uno solo e
 sempre lo stesso**, il job `FeedTask` lo crea da configurazione. Non ha runner: lo lavora il job
-che serve il task indicato, qualunque famiglia sia.
-
-```go
-batch.Module(&cfg.BatchConfig, Register,
-    batch.WithStore(storemongo.Module),
-    batch.WithLocker(lockmongo.Module),
-    batch.WithModule(
-        feedjob.Module,                          // job FeedTask (solo feed)
-        simplejob.Module,                        // chi lo lavora
-    ),
-)
-```
+che serve il task indicato, qualunque famiglia sia. Nel wiring non compare nulla: `FeedTask` e
+`SingleTask` li wira batch perché sono nei `jobs:`.
 
 ```yaml
 tasks:
@@ -172,7 +238,7 @@ jobs:
       task: import-anagrafiche
       objectId: ANAGRAFICHE
   - name: import-pickup            # lo lavora entro 30s
-    type: IMPORT
+    type: SingleTask
     cron: "*/30 * * * * *"
     singleton: true
     lock-timeout: 30m
@@ -266,7 +332,9 @@ il job chiama i `Mark*` da sé — quindi `WorkItem.Retry` veniva incrementato d
 occupava uno slot del `limit` a ogni tick, rubando capacità a quelle sane. Il controllo è applicato
 sul batch **appena claimato**, che è l'unico punto in cui copre anche il percorso degli orfani.
 
-> I singoli `*.Module()` (`localdispatcher`, `grpcdispatcher`, `queryfeed`, `s3feed`, `kafkajob`, `mongostore`/`sqlstore`, `grpchandler`, `scheduler`, …) **restano validi** per il wiring manuale: sono il livello sotto l'orchestratore, documentato nelle sezioni seguenti. Essendo modes-only, lì il config va fornito prima con `core.Supply` (es. `core.Supply(&cfg.Client); grpcdispatcher.Module()`). `batch.Module` non fa che comporli in un'unica chiamata gate-ata per mode.
+> Non esiste un wiring manuale sotto l'orchestratore: job type, dispatcher, worker pool e scheduler
+> stanno in `internal/` e li compone soltanto `batch.Module`. Le sole `Module()` pubbliche sono quelle
+> dei backend pesanti (`djmongo`/`djsql`, `s3feed`, `kafkajob`), da passare a `WithModule`.
 
 ### Configurazione dei task — sezione `tasks:`
 
@@ -299,11 +367,11 @@ batch:
       tasks: [import-in, import-bulk]
 ```
 
-**La dichiarazione è obbligatoria** (breaking change): ogni task type registrato deve avere almeno una voce in `tasks:`, e ogni task referenziato da `jobs:`/`workers:` deve esistere. Le incoerenze fanno **fallire l'avvio** con l'elenco dei nomi coinvolti — in caso contrario il job girerebbe a vuoto senza trovare un runner. Un task dichiarato ma che nessuno referenzia non viene istanziato (log Info): le sue dipendenze non entrano nel grafo fx.
+**La dichiarazione è obbligatoria** (breaking change): ogni task type registrato deve avere almeno una voce in `tasks:`, e ogni task referenziato da `jobs:`/`workers:` deve esistere. Le incoerenze fanno **fallire l'avvio** con l'elenco dei nomi coinvolti — in caso contrario il job girerebbe a vuoto senza trovare un runner. Un task dichiarato ma che nessun job o worker di **questo processo** esegue non viene istanziato (log Info): le sue dipendenze non entrano nel grafo fx.
 
-Il **`name` è obbligatorio su ogni voce e non ha fallback sul `type`**: va scritto anche quando i due coincidono, perché è la chiave di instradamento (i job lo referenziano con `properties.task`, i worker pool lo elencano in `tasks`, e finisce in `WorkItem.TaskName` — ci filtra `ClaimPending` e ci instrada il `MuxRunner`). Due istanze dello stesso `type` si distinguono solo per `name`. Una voce senza `name` fa fallire l'avvio prima che `register()` giri.
+Il **`name` è obbligatorio su ogni voce e non ha fallback sul `type`**: va scritto anche quando i due coincidono, perché è la chiave di instradamento (i job lo referenziano con `properties.task`, i worker pool lo elencano in `tasks`, e finisce in `WorkItem.TaskName` — ci filtra `ClaimPending` e ci instrada il mux in-process). Due istanze dello stesso `type` si distinguono solo per `name`. Una voce senza `name` fa fallire l'avvio prima che `register()` giri.
 
-La validazione riguarda i riferimenti **espliciti**: la property `task` di un distributedjob, di un simplejob o di un `FeedTask`, le `tasks` di un worker pool — nomi scritti a mano, quindi un nome inesistente è un typo. Quando nessuna property nomina il task, il nome è **dedotto** dal job type (è il caso del simplejob senza `task`): lì il task omonimo viene attivato se dichiarato, ma non se ne pretende l'esistenza, perché nello stesso campo stanno i job type del framework (`NotificationKafka`, `DistribuiteTask`, `DistribuiteTaskByQuery`, …) che non nominano alcun task.
+La validazione riguarda tutti i nomi scritti a mano — la property `task` di un `DistribuiteTask*`, di un `SingleTask` o di un `FeedTask`, le `tasks` di un worker pool —, in qualunque processo li esegua: un nome inesistente è un typo. Un job che un task non lo nomina (`NotificationKafka` usa `stream`, `PurgeWorkItems` nessuno dei due) non entra nel conto. Quali di quei nomi diventino runner lo decide invece dove vengono eseguiti (vedi sopra, "La funzione `register`").
 
 **Il fail-fast è gate-ato sui modes.** `register` — e con esso la validazione di `tasks:` — gira solo se `core.Mode` è tra gli scheduler modes (`WithSchedulerModes`) o tra i worker modes (`WithWorkerModes`). In un processo `MODE=API`, dove nessun runner verrebbe costruito, il sottosistema batch non registra e non valida nulla: una misconfig della sezione `tasks:` deve far cadere i mode che il batch lo eseguono davvero, non l'API. Lo store resta l'eccezione di sempre (wirato in ogni mode), così l'API può iniettare `store.IWorkItemStore`. Una famiglia con modes vuoti è "sempre attiva", quindi un'app che non gate-a nulla si comporta come prima.
 
@@ -331,18 +399,18 @@ un tentativo** anche se il runner non ha mai fallito. Con `max-retry: 2`, tre ri
 consecutivi mandano l'item in FAILED senza un solo fallimento applicativo.
 
 Il tetto vale **anche per gli orfani**: prima di eseguire un item, ogni percorso — `SingleTask`, il
-`MuxRunner` in-process, il bridge del worker gRPC — confronta `Retry` col tetto (`store.CheckExhausted`)
+il mux in-process (`internal/mux`), il bridge del worker gRPC — confronta `Retry` col tetto (`store.CheckExhausted`)
 e, superato, lo manda in FAILED senza eseguirlo (`OutcomeExhausted`). Prima il tetto lo leggeva solo
 `ApplyResult`, cioè dopo che il runner era tornato: un item la cui esecuzione **non ritorna mai** (OOM,
 pod ucciso) veniva ri-claimato da `RecoverOrphans` a ogni giro, per sempre.
 
-⚠️ **`max-retry` ha effetto solo dalla versione corrente.** Fino a prima, `task.Instances`
+⚠️ **`max-retry` ha effetto solo dalla versione corrente.** Fino a prima, `Instances` (il registro dei task, ora `internal/taskreg`)
 ricostruiva la voce di `tasks:` campo per campo e dimenticava `MaxRetry`: il valore veniva letto
 dallo YAML, validato, documentato — e poi buttato, quindi **ogni task ritentava all'infinito**
 qualunque cosa fosse scritto. Ora la voce passa intera. Chi aggiorna deve rileggere i propri
 `max-retry:` come se li scrivesse adesso: un `max-retry: 2` scritto anni fa e mai applicato
 comincia a mandare item in FAILED, e va riletto insieme all'avvertenza qui sopra sugli orfani.
-La stessa lacuna c'era su `runner.RegisterFile` (il `FileTaskRunner` non portava affatto il campo,
+La stessa lacuna c'era su `runner.RegisterFile` (il wrapper dei file runner, oggi in `internal/taskrunner`, non portava affatto il campo,
 e `s3feed` lo perdeva avvolgendolo): anche lì il tetto ora arriva a destinazione.
 
 ### Nomenclatura: name, non type
@@ -355,14 +423,14 @@ work item al suo runner **è un nome di istanza**, non un tipo:
 | `WorkItem.Type` (`bson:"type"`, `bun:"type"`) | `WorkItem.TaskName` (`bson:"taskName"`, `bun:"task_name"`) | il nome del task che deve eseguire l'item |
 | `TaskLog.Type` (`bson:"type"`) | `TaskLog.TaskName` (`bson:"taskName"`, `bun:"task_name"`) | idem, sul log di esecuzione |
 | `worker.Task.Type` | `worker.Task.TaskName` | idem, nel pool |
-| parametri `workType` / `taskType` | `taskName` | in `IWorkItemStore`, `IData`, `ITaskDispatcher`, `IFeed`, `MuxRunner.Run` |
+| parametri `workType` / `taskType` | `taskName` | in `IWorkItemStore`, `IData`, `ITaskDispatcher`, `IFeed`, il `Run` del mux in-process |
 | property di job `workType` (simplejob) | `task` | chiave unica: la stessa che usa distributedjob |
 | label pprof `batch_task_type` | `batch_task_name` | goroutine del worker pool e del localdispatcher |
 | proto `TaskMessage.TaskType` | `TaskMessage.TaskName` | field number 4 invariato → **compatibile a livello binario** |
 | `task.Config.TaskName()` | `.Name` | il metodo era diventato un getter banale dopo la rimozione della fallback |
 
-Restano `taskType` e `SimpleTaskRunner.TaskType` dove il tipo è davvero un tipo: il parametro di
-`runner.Register[T]`, cioè il task type registrato dal codice.
+Resta `taskType` dove il tipo è davvero un tipo: il parametro di `runner.Register[T]`, cioè il task
+type registrato dal codice.
 
 **Il rename dei campi persistiti richiede una migrazione dei dati.** Mongo:
 
@@ -454,7 +522,7 @@ Le properties sono risolte **al boot**: un valore non convertibile o un `validat
 
 ## Modalità (job families)
 
-Cinque famiglie di job, ciascuna un modulo Fx self-contained che registra la propria `scheduler.JobRegistration` nel value group `batch_jobs` (via `scheduler.ProvideJob`). Condividono lo scheduler (gocron + **distributed job lock** pluggable, applicato a *ogni* job) e lo store `work_items`.
+Cinque famiglie di job, tutte **della libreria**: ciascuna registra la propria `JobRegistration` nel value group `batch_jobs`, e `batch.Module` wira quelle che compaiono nei `jobs:`. Condividono lo scheduler (gocron + **distributed job lock** pluggable, applicato a *ogni* job) e lo store `work_items`. L'app non ne aggiunge: scrive task, e sceglie da quale famiglia farli eseguire con una riga di `jobs:`.
 
 Il dettaglio di come una lavorazione arriva dal cron al runner — scheduler, tick, dispatcher,
 worker pool — sta in **[Anatomia dell'esecuzione](#anatomia-dellesecuzione--scheduler-job-dispatcher-worker)**.
@@ -463,11 +531,11 @@ Tre CONSUMANO workitem, una li PRODUCE e una li CANCELLA: `feedjob` e `purgejob`
 
 | Famiglia | Job type / registrazione | Quando usarla |
 |---|---|---|
-| **distributedjob** | `DistribuiteTask` · `DistribuiteTaskByQuery` · `DistribuiteTaskByS3File` — `localdispatcher`/`grpcdispatcher.Module()` + `runner.Register[T]` | **Molti** workitem da distribuire: claiming atomico anti-doppione, recovery orfani, `task_logs`, scaling orizzontale gRPC |
-| **simplejob** | `SingleTask` — `simplejob.Module()` + `runner.Register[T]` | **Una lavorazione alla volta** in-process: `RecoverOrphans`→`ClaimPending(1)`→`Run(item)`, eseguito dentro il tick. Niente gRPC/task_logs |
-| **kafkajob** | tipo libero — invia i WorkItem su un topic Kafka col producer di go-core-kafka | Notifiche/outbox verso Kafka |
-| **feedjob** | `FeedTask` — `feedjob.Module()`, nessun runner | **Schedulare una cosa a un'ora**: crea UN workitem per tick, descritto nelle properties del job (`task`, `objectId`, `payload`). Non reclama e non dispatcha: a lavorarlo è il job che serve quel task |
-| **purgejob** | `PurgeWorkItems` — `purgejob.Module()`, nessun runner | **Retention**: cancella gli item in uno stato terminale più vecchi di una finestra, e su richiesta anche le righe di `task_logs`. Senza, le due collection crescono per sempre e con esse gli indici su cui gira il claim di ogni tick |
+| **distributedjob** | `DistribuiteTask` · `DistribuiteTaskByQuery` · `DistribuiteTaskByS3File` — dispatcher dedotto da `grpc.client.url` + `runner.Register[T]` | **Molti** workitem da distribuire: claiming atomico anti-doppione, recovery orfani, `task_logs`, scaling orizzontale gRPC |
+| **simplejob** | `SingleTask` — `runner.Register[T]` | **Una lavorazione alla volta** in-process: `RecoverOrphans`→`ClaimPending(1)`→`Run(item)`, eseguito dentro il tick. Niente gRPC/task_logs |
+| **kafkajob** | `NotificationKafka` — `WithModule(kafkajob.Module)`; invia i WorkItem su un topic Kafka col producer di go-core-kafka | Notifiche/outbox verso Kafka |
+| **feedjob** | `FeedTask` — nessun runner | **Schedulare una cosa a un'ora**: crea UN workitem per tick, descritto nelle properties del job (`task`, `objectId`, `payload`). Non reclama e non dispatcha: a lavorarlo è il job che serve quel task |
+| **purgejob** | `PurgeWorkItems` — nessun runner | **Retention**: cancella gli item in uno stato terminale più vecchi di una finestra, e su richiesta anche le righe di `task_logs`. Senza, le due collection crescono per sempre e con esse gli indici su cui gira il claim di ogni tick |
 
 ```mermaid
 flowchart LR
@@ -512,7 +580,7 @@ flowchart TD
         D -- "gRPC\n(grpcdispatcher)" --> REMOTE
 
         subgraph LOCAL["LocalDispatcher"]
-            LS[IData.SetTaskStart] --> RUN["MuxRunner: ITaskRunner.Run(ctx, item)\nl'item arriva INTERO dal claim\n→ store.ApplyResult(return)"]
+            LS[IData.SetTaskStart] --> RUN["mux.Runner: ITaskRunner.Run(ctx, item)\nl'item arriva INTERO dal claim\n→ store.ApplyResult(return)"]
             RUN -- "nil → MarkDone → DONE" --> LD[IData.SetTaskDone]
             RUN -- "store.ErrHandled → invariato\n(lifecycle gestito dal runner)" --> LD
             RUN -- "store.Retry → MarkPending\nnext_run_at=now+d · retry++ → PENDING" --> LP[IData.SetTaskInError]
@@ -553,10 +621,10 @@ connessione gRPC.
 
 | Ruolo | Tipo | Che cosa fa | In quale processo |
 |---|---|---|---|
-| **Scheduler** | `scheduler.Scheduler` (gocron) | fa scattare i job al cron, tiene il lock di dedup fra repliche | scheduler modes |
-| **Job / tick** | `scheduler.ClaimingTick` | feed → recupero orfani → claim → *fase di elaborazione* | scheduler modes |
-| **Dispatcher** | `distributedjob.ITaskDispatcher` | consegna un item claimato a chi lo esegue | scheduler modes |
-| **Worker pool** | `worker.Workers` + `worker/grpchandler` | riceve i task via gRPC e li esegue | worker modes |
+| **Scheduler** | `internal/scheduler` (gocron) | fa scattare i job al cron, tiene il lock di dedup fra repliche | scheduler modes |
+| **Job / tick** | `internal/scheduler.ClaimingTick` | feed → recupero orfani → claim → *fase di elaborazione* | scheduler modes |
+| **Dispatcher** | `internal/distributedjob.ITaskDispatcher` | consegna un item claimato a chi lo esegue | scheduler modes |
+| **Worker pool** | `internal/worker` + `internal/grpchandler` | riceve i task via gRPC e li esegue | worker modes |
 | **Runner** | `store.ITaskRunner` | la business logic | dove gira il dispatcher (local) o il pool (gRPC) |
 
 I modes sono quelli di `batch.WithSchedulerModes` / `batch.WithWorkerModes`: in un processo
@@ -580,10 +648,13 @@ flowchart LR
     end
 ```
 
-Passare da ① a ② a ③ è una questione di `jobs[].type` e di quale `Module` si wira. Il runner —
+Passare da ① a ② a ③ è una questione di `jobs[].type` e di `grpc.client.url`: i componenti li
+wira `batch.Module` di conseguenza, e il wiring dell'app non cambia. Il runner —
 `Run(ctx, item) error` — è lo stesso, e si registra sempre con `runner.Register[T]` nel gruppo
-`batch_runners`: quel gruppo è letto dal `MuxRunner` (percorso in-process), dal bridge del worker
-gRPC e da `simplejob`, perché **registrare un task non dice da chi verrà eseguito**.
+`batch_runners`: quel gruppo è letto dal mux in-process (`internal/mux`), dal bridge del worker
+gRPC e da `SingleTask`, perché **registrare un task non dice da chi verrà eseguito**. Lo dice la
+config, ed è anche ciò che decide quali runner istanziare in un processo: solo quelli che un suo job
+o un suo pool eseguono.
 
 ---
 
@@ -593,16 +664,16 @@ gRPC e da `simplejob`, perché **registrare un task non dice da chi verrà esegu
 
 - un `jobs[].type` che nessun modulo ha registrato **ferma l'avvio** (`job %q: type %q non
   registrato`) — un'app non deve partire con dei job silenziosamente mancanti;
-- anche le property infrastrutturali del job sono risolte lì (`distributedjob.risolvi`,
-  `simplejob.risolvi`): un refuso in `properties.task` si vede all'avvio, quando c'è ancora
-  qualcuno che guarda, e poi a ogni tick come errore del job;
+- anche le property infrastrutturali del job sono risolte lì: per `SingleTask` e `DistribuiteTask*`
+  la `JobRegistration.Check` (interna) **ferma l'avvio** su un `task` o un `limit` mancanti; per gli
+  altri job type il refuso si vede nei log di avvio e poi a ogni tick come errore del job;
 - le `JobFactory` arrivano dal value group fx `batch_jobs`, quindi **l'ordine di registrazione dei
   moduli è indifferente**: fx risolve tutti i contributori prima di costruire lo scheduler.
 
 L'espressione cron è parsata con `gocron.CronJob(expr, true)`: il campo dei **secondi** è abilitato,
 quindi sono ammesse sei posizioni (`*/5 * * * * *` = ogni 5 secondi) oltre alle cinque classiche.
 
-Due lock, entrambi da `corelock.Locker` via `scheduler/gocronlock`:
+Due lock, entrambi da `corelock.Locker` via l'adapter interno `internal/scheduler/gocronlock`:
 
 | Opzione gocron | Effetto |
 |---|---|
@@ -714,22 +785,24 @@ esecuzione; l'esito lo emette chi esegue.
 
 ---
 
-### Il dispatch in-process — `localdispatcher`
+### Il dispatch in-process — `internal/localdispatcher`
+
+È il dispatcher dei `DistribuiteTask*` quando `grpc.client.url` **non** è valorizzato: nel wiring
+non compare nulla.
 
 ```go
 batch.Module(&cfg.Batch, Register,
     batch.WithSchedulerModes(engine.Batch),
     batch.WithStore(storemongo.Module),
     batch.WithLocker(lockmongo.Module),
-    batch.WithModule(localdispatcher.Module),   // niente gRPC, niente worker pool
-)
+)                                               // jobs: DistribuiteTask, niente grpc.client.url
 ```
 
 `LocalDispatcher.DispatchTask` **ritorna subito**: lancia una goroutine e ne traccia il ciclo di
 vita. Quattro cose che vale la pena sapere:
 
 1. **Il WorkItem non viene riletto.** `ClaimPending`/`RecoverOrphans` ritornano i record completi,
-   quindi la `DispatchRequest` porta l'`*store.WorkItem` intero fino al `MuxRunner`. La `GetById`
+   quindi la `DispatchRequest` porta l'`*store.WorkItem` intero fino al mux (`internal/mux`). La `GetById`
    che c'era qui era una query per item buttata.
 2. **Il cap di concorrenza è derivato dalla config**: la somma dei `limit` dei job attivi, con un
    pavimento di 100. Così il dispatcher assorbe per costruzione un giro completo di ogni job. Con
@@ -745,13 +818,14 @@ vita. Quattro cose che vale la pena sapere:
    di fx. Le residue vengono abbandonate: i loro item restano `IN_PROGRESS` e li recupera
    `RecoverOrphans`.
 
-Il routing è del `MuxRunner`, per `item.TaskName`. Un nome senza runner registrato **non diventa un
-orphan-loop**: l'item viene subito `MarkFailed`, perché riprovare all'infinito un task che questo
-processo non sa eseguire non porta da nessuna parte. `MuxRunner.Run` è anche il punto che applica
+Il routing è del mux in-process (`internal/mux`), per `item.TaskName`. Che ogni task nominato da un `DistribuiteTask*`
+abbia un runner qui lo verifica `batch.Module` al wiring (sono task **eseguiti qui**). Un item con un
+nome che nessun job di questo processo nomina **non diventa un orphan-loop**: l'item viene subito `MarkFailed`, perché riprovare all'infinito un task che questo
+processo non sa eseguire non porta da nessuna parte. Il suo `Run` è anche il punto che applica
 `store.ApplyResult` ed emette `ObserveTask` per questo percorso; le righe di `task_logs`
 (`SetTaskStart` / `SetTaskDone` / `SetTaskInError`) le scrive il dispatcher attorno.
 
-### Il dispatch via gRPC — `grpcdispatcher` + `worker/grpchandler`
+### Il dispatch via gRPC — `internal/grpcdispatcher` + `internal/grpchandler`
 
 Due processi, lo **stesso database**: il worker chiude il lifecycle degli item che lo scheduler ha
 claimato, quindi deve vedere lo stesso `work_items`.
@@ -763,18 +837,23 @@ batch.Module(&cfg.Batch, Register,
     batch.WithWorkerModes(engine.Worker),
     batch.WithStore(storemongo.Module),
     batch.WithLocker(lockmongo.Module),
-    batch.WithModule(grpcdispatcher.Module),        // client gRPC
-    batch.WithWorkerModule(grpchandler.Module),     // server gRPC + worker pool
 )
+```
+
+```yaml
+grpc:
+  client: {url: "worker:9000"}   # ⇒ i DistribuiteTask* dispatchano via gRPC (lato scheduler)
+  server: {port: 9000}           # ⇒ con workers: c'è il worker pool gRPC (lato worker)
+workers:
+  - {name: import, size: 8, tasks: [import-in]}
 ```
 
 Lo stesso binario serve i due ruoli: a decidere è `MODE`. `Register` è la stessa funzione e gira in
 entrambi i processi (è gate-ata sull'unione di scheduler e worker modes: in un `MODE=API` non gira
-affatto). L'insieme dei task istanziati è quello dei **referenziati** — dalla property `task` di un
-job o dalle `tasks` di un pool — ed è calcolato sull'**intera config**, non per ruolo: un task citato
-solo da `workers:` viene istanziato anche nel processo scheduler, e viceversa. Quel filtro serve a
-tenere fuori dal grafo i task dichiarati e mai usati, con le loro dipendenze; a decidere *chi esegue
-cosa* sono i modes e il routing del pool.
+affatto). L'insieme dei task istanziati **è per ruolo**: nel processo scheduler nessuno, perché i
+`DistribuiteTask*` consegnano al worker e non eseguono; nel worker i `workers[].tasks`. Un runner e
+le sue dipendenze entrano quindi solo nel grafo del processo che lo esegue, senza scrivere modes sul
+`runner.Register`.
 
 **Sul filo passa l'`Id`, non il WorkItem**, che il bridge lato worker ricarica con `GetById`. Col
 `Id` viaggiano due cose che la rilettura non può dare:
@@ -845,9 +924,10 @@ workers:
     tasks: []
 ```
 
-- `tasks` è anche ciò che rende un task **referenziato**, quindi istanziato: un task che nessun job
-  e nessun pool nomina resta dichiarato in `tasks:` ma non entra nel grafo, e le sue dipendenze
-  nemmeno. Il set è quello dell'intera config, non del singolo processo.
+- `tasks` è ciò che rende un task **eseguito** dal processo worker, quindi istanziato lì: un task che
+  nessun pool nomina non entra nel grafo del worker, e le sue dipendenze nemmeno.
+- `workers:` senza `grpc.server.port` è un errore d'avvio nei worker modes: il pool riceve solo via
+  gRPC.
 - Un task il cui nome non compare in nessun pool finisce sul pool `"Default"`; se non esiste, il
   dispatch viene rifiutato con `no worker channel for task type`.
 - `size` vale **due volte**: è la capacità del canale bufferizzato (quanti task possono attendere) e
@@ -874,7 +954,7 @@ workers:
 | Item per tick | 1 | fino a `limit` | fino a `limit` |
 | Dove gira il runner | dentro il tick | goroutine del dispatcher | goroutine del worker pool |
 | Rilettura del WorkItem | no | no | **sì** (sul filo passano `Id`, token del claim e deadline) |
-| Chi applica `ApplyResult` | `simplejob.esegui` | `runner.MuxRunner.Run` | `worker.Run` |
+| Chi applica `ApplyResult` | il job SingleTask (`internal/simplejob`) | `mux.Runner.Run` (`internal/mux`) | `worker.Run` (`internal/worker`) |
 | Righe di `task_logs` | nessuna | `ASSIGNED` + `DONE`/`ERROR` | `ASSIGNED` + `DONE`/`ERROR` |
 | Deadline dell'esecuzione | `lock-timeout` (context del tick) | orphan timeout, dalla `DispatchRequest` | orphan timeout, dal `TimeoutMs` del `TaskMessage` (relativo, applicato dal worker) |
 | Concorrenza | 1 | Σ dei `limit`, pavimento 100 | `size` del pool, × N processi |
@@ -903,7 +983,7 @@ serve solo a evitare che N repliche eseguano lo stesso tick cron contemporaneame
 (**dispatch-dedup**).
 
 È il [`corelock.Locker`](../go-core-locker) di go-core-locker, adattato a gocron da
-`scheduler/gocronlock` — l'unico punto di batch legato a gocron per il lock.
+`internal/scheduler/gocronlock` — l'unico punto di batch legato a gocron per il lock.
 
 **Lo wira `batch.Module`**, non l'applicazione: `batch.WithLocker(m)` è **obbligatoria** e prende il
 solo backend, per riferimento diretto come `WithStore`; la config è la sezione `lock:` di
@@ -932,53 +1012,44 @@ app mongo-only o sql-only usa `mongostore`/`sqlstore` e **non deploya Redis**.
 
 ## Struttura package
 
+Pubblico è ciò che l'app nomina: il wiring, i task, lo store e le config. La macchina dei job sta in
+`internal/` — i job sono della libreria, e un'app non ne scrive di nuovi.
+
 ```
 go-core-batch/
+├── config.go, module.go          # batch.Config, batch.Module + Option (deduce i componenti dai jobs:)
+├── runner/                       # Register[T](), RegisterFile[T](), ITaskRunner, IFileRunner — e nient'altro
+├── task/                         # task.Config (sezione tasks:), ResolveMaxRetry, MaxRetryUnlimited
+├── store/                        # WorkItem, IWorkItemStore, IData, TaskLog, ApplyResult, RetryError, payload
+│   ├── mongostore/ sqlstore/     # i due backend dello store (WithStore)
+│   └── storetest/                # suite di conformità comune ai due backend
 ├── scheduler/
-│   ├── scheduler.go              # NewScheduler — gocron + lock.Locker iniettato
-│   ├── gocronlock/               # Adapter lock.Locker → gocron.Locker (UNICO punto legato a gocron)
-│   ├── config.go                 # Config: Name, Type, Cron, Disabled, SingletonMode, LockTimeout, Properties
-│   ├── registry.go               # JobRegistration, JobGroup ("batch_jobs"), ProvideJob, JobFactory
-│   ├── metrics.go                # Prometheus: TaskAssigned, TaskAssignedKO, JobExecution
-│   │
-│   ├── distributedjob/           # Job type distribuiti — claiming sempre attivo
-│   │   ├── distributedjob.go     # Register / RegisterByQuery / RegisterByS3File
-│   │   ├── feed.go               # IFeedSource interface + queryStoreFeed adapter
-│   │   ├── dispatcher.go         # Interface: ITaskDispatcher
-│   │   ├── store.go              # Interface: IQueryStore (feed DB)
-│   │   ├── job_claiming.go       # jobRunWithClaiming — feed → orphans → claim → dispatch
-│   │   ├── localdispatcher/      # ITaskDispatcher in-process + Module()
-│   │   ├── grpcdispatcher/       # ITaskDispatcher via gRPC + Module()
-│   │   ├── queryfeed/            # Modulo Fx per DistribuiteTaskByQuery
-│   │   ├── s3feed/               # Modulo Fx per DistribuiteTaskByS3File (feed + runner + module)
-│   │   ├── sqlstore/             # IQueryStore su SQL
-│   │   └── mongostore/           # IQueryStore su MongoDB
-│   │
-│   ├── simplejob/                # Job SingleTask: un item per tick, eseguito in-process (no gRPC/task_logs)
-│   ├── kafkajob/                 # Job che invia WorkItem su Kafka (producer di go-core-kafka)
-│   └── feedjob/                  # Job FeedTask: crea un WorkItem per tick da configurazione (solo feed, nessun runner)
-│
-├── runner/                       # Registro AGNOSTICO dei task runner, condiviso da tutte le famiglie
-│   └── runner.go                 # ITaskRunner, TaskRunner, MuxRunner, Register[T](), RegisterFile[T]()
-│
-├── s3/                           # Client S3 multi-service (aws-sdk-go-v2)
-│   ├── config.go                 # ServiceConfig, Config
-│   ├── service.go                # Service: List, Get, Move
-│   └── registry.go               # Registry: NewRegistry, Get
-│
-├── store/
-│   ├── work_item.go              # WorkItem — outbox record (tabella work_items)
-│   ├── work_item_store.go        # IWorkItemStore: ClaimPending, RecoverOrphans, InsertIfNotActive, ...
-│   ├── errors.go                 # RetryError{After duration} — retry ritardato
-│   ├── task_log.go               # TaskLog — ciclo di vita task (tabella task_logs)
-│   ├── store.go                  # IData: SetTaskStart/Done/InError/Assigned/AssignationKO
-│   ├── sqlstore/                 # WorkItemDataSQL + BatchDataSQL
-│   └── mongostore/               # WorkItemData + BatchData
-│
-├── worker/                       # Worker pool per task distribuiti via gRPC
-│   └── grpchandler/              # Router gRPC → worker pool + Module() + Provide()
-├── grpc/                         # Client/Server gRPC
-└── kafka/                        # kafka.Message + NewWorkItem: il contratto di accodamento di una notifica
+│   ├── config.go                 # scheduler.Config: la voce di jobs: (solo il tipo)
+│   ├── kafkajob/                 # guscio (solo Module): job NotificationKafka (go-core-kafka) — WithModule
+│   └── distributedjob/
+│       ├── s3feed/               # guscio (solo Module): job DistribuiteTaskByS3File (SDK AWS) — WithModule
+│       ├── mongostore/           # guscio (solo Module): query store Mongo (mongo-driver) — WithModule
+│       └── sqlstore/             # guscio (solo Module): query store SQL (bun) — WithModule
+├── worker/config.go              # worker.Config: la voce di workers: (solo il tipo)
+├── grpc/, s3/                    # config del trasporto gRPC e dei servizi S3
+├── kafka/                        # kafka.Message + NewWorkItem: il contratto di accodamento di una notifica
+└── internal/
+    ├── scheduler/                # gocron + lock, JobRegistration/ProvideJob, ClaimingTick, NewJobID, Props
+    │   └── gocronlock/           # adapter corelock.Locker → gocron.Locker
+    ├── distributedjob/           # DistribuiteTask*: claim → dispatch, ITaskDispatcher, IQueryStore, IFeedSource
+    ├── localdispatcher/          # dispatcher in-process (default dei DistribuiteTask*)
+    ├── grpcdispatcher/           # dispatcher gRPC (con grpc.client.url)
+    ├── grpchandler/, worker/     # worker pool gRPC (con workers: + grpc.server.port)
+    ├── simplejob/ feedjob/ purgejob/   # SingleTask, FeedTask, PurgeWorkItems
+    ├── taskreg/                  # registro dei task: ActiveSet (Referenced/Executed), Apply, Instances
+    ├── taskrunner/               # TaskRunner/FileTaskRunner (nome + max-retry), Group/FileGroup
+    ├── s3feed/                   # impl di DistribuiteTaskByS3File: feed, avvolgimento dei file runner
+    ├── kafkajob/                 # impl di NotificationKafka
+    ├── querystore/mongostore/ querystore/sqlstore/   # impl degli IQueryStore
+    ├── mux/                      # instradamento per TaskName del percorso in-process
+    ├── grpcproto/                # codice generato da service.proto (package Go proto)
+    ├── batchmetrics/             # metriche Prometheus batch_* (si leggono per nome)
+    └── grpctransport/ s3client/ lifecycle/ errs/
 ```
 
 ---
@@ -1150,8 +1221,7 @@ jobs:
 batch.Module(&cfg.BatchConfig, Register,
     batch.WithStore(storemongo.Module),
     batch.WithLocker(lockmongo.Module),
-    batch.WithModule(localdispatcher.Module, purgejob.Module),
-)
+)   // PurgeWorkItems è nei jobs: ⇒ batch wira il job da sé
 ```
 
 **Non c'è un default.** La retention va scritta in `jobs:`: cancellare dati non può essere un
@@ -1163,9 +1233,11 @@ succede sempre la finestra o la cadenza del cron sono sbagliate.
 
 ---
 
-## Pattern consigliato — Module() + runner.Register[T]()
+## Pattern consigliato — batch.Module + runner.Register[T]()
 
-Il modo canonico per aggiungere task runner a un'applicazione. Ogni task type è in un file autonomo; il wiring centrale non cambia mai.
+Il modo canonico per aggiungere task runner a un'applicazione — ed è l'unico punto di estensione:
+l'app scrive task, i job sono della libreria. Ogni task type è in un file autonomo; il wiring
+centrale non cambia mai.
 
 ### Struttura app/batch/
 
@@ -1184,7 +1256,8 @@ package batch
 import "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/runner"
 
 // Register è passata a batch.Module, che la esegue con la config già nota: i runner sono
-// istanziati una volta per ogni task attivo, con le properties della loro voce di `tasks:`.
+// istanziati una volta per ogni task eseguito in questo processo, con le properties della loro
+// voce di `tasks:`.
 func Register() {
     runner.Register[mioTaskRunner]("MIO_TASK")
 }
@@ -1246,39 +1319,20 @@ jobs:
 
 ---
 
-## Modalità di registrazione a confronto
+## Feed by-query e by-S3 — cosa passa l'app
 
-### Manuale (bassa configurazione)
-
-Utile per un singolo task type o quando non si usa il pattern `app/batch/`.
-
-```go
-// main.go — l'ordine rispetto a scheduler.Module non conta (value group batch_jobs)
-scheduler.ProvideJob(func(items store.IWorkItemStore, data store.IData) scheduler.JobRegistration {
-    return distributedjob.Register(
-        localdispatcher.New(runner.NewMux([]*runner.TaskRunner{
-            runner.New("MY_TASK", &batch.MyRunner{}),
-        }), items, data),
-        items, data,
-    )
-})
-```
-
-> `distributedjob.Register`/`RegisterByQuery`/`RegisterByS3File` ora **ritornano** una `scheduler.JobRegistration` (non scrivono più una mappa globale): vanno passate a `scheduler.ProvideJob`, che le inserisce nel value group `batch_jobs`. Nel wiring normale ci pensano `localdispatcher.Module()`/`grpcdispatcher.Module()`/`queryfeed.Module()`/`s3feed.Module()`.
+Il wiring dei task non cambia fra le famiglie: cambia il job in `jobs:`, e per i due feed l'app
+passa il backend pesante che il feed richiede.
 
 ### Con feed DB — DistribuiteTaskByQuery
 
 ```go
-// app/batch/batch.go
-import (
-    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/localdispatcher"
-    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/queryfeed"
+// main.go
+batch.Module(&svc.Batch, Register,
+    batch.WithStore(storemongo.Module),
+    batch.WithLocker(lockmongo.Module),
+    batch.WithModule(djmongo.Module),   // query store (o djsql.Module); il job lo wira batch
 )
-
-func init() {
-    localdispatcher.Module()
-    queryfeed.Module()
-}
 ```
 
 ```yaml
@@ -1299,16 +1353,14 @@ scheduler:
 ### Con feed S3 — DistribuiteTaskByS3File
 
 ```go
-// app/batch/batch.go
-import (
-    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/localdispatcher"
-    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/runner"
-    "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/distributedjob/s3feed"
+// main.go
+batch.Module(&svc.Batch, Register,
+    batch.WithStore(storemongo.Module),
+    batch.WithLocker(lockmongo.Module),
+    batch.WithModule(s3feed.Module),    // job DistribuiteTaskByS3File (SDK AWS)
 )
 
-func init() {
-    localdispatcher.Module()
-    s3feed.Module()
+func Register() {
     runner.RegisterFile[myS3Runner]("S3_IMPORT")
 }
 ```
@@ -1394,7 +1446,7 @@ conosce (`older-than`, `task-logs`, `topic`, `stream`, `max-retry`, `objectId`, 
 | `lock-timeout` | duration | Dopo quanto un IN_PROGRESS è considerato orfano (default: 10m — distributedjob e simplejob). simplejob: anche timeout del context di `Run` (default: 30s) |
 | `disabled` | bool | Disabilita il job senza rimuoverlo dalla config |
 | `properties.task` | string | **Nome** del task da eseguire (una voce di `tasks:`) |
-| `properties.limit` | int | Max item per run (simplejob: default 100) |
+| `properties.limit` | int | Max item per run (`DistribuiteTask*`, `NotificationKafka`, `PurgeWorkItems`; ignorata da `SingleTask`, che ne lavora uno per tick) |
 | `properties.collection` | string | Tabella/collection sorgente (solo DistribuiteTaskByQuery) |
 | `properties.filter` | string | WHERE SQL o JSON query Mongo (solo DistribuiteTaskByQuery) |
 | `properties.sort` | string | `"col:asc,col2:desc"` (solo DistribuiteTaskByQuery) |
@@ -1412,8 +1464,10 @@ conosce (`older-than`, `task-logs`, `topic`, `stream`, `max-retry`, `objectId`, 
 | `properties.task-logs` | bool | Cancella anche le righe di `task_logs` più vecchie della finestra (solo `PurgeWorkItems`, default `false`) |
 | `properties.backlog-metrics` | bool | Abilita le gauge `batch_workitems_pending` / `batch_workitems_oldest_age_seconds` per questo job. Default `false`: è una query in più per tick, e la paga chi la vuole. Va accesa su **un solo job per coda**: la gauge misura la coda (`task`), quindi due job sulla stessa coda producono due serie identiche (label `job` diversa) e pagano la query due volte |
 
-> **Le property dei job sono validate alla COSTRUZIONE, non dentro il tick.** Un refuso in YAML
-> compare nei log di avvio (`il job fallirà a ogni tick`) ed è poi restituito da ogni esecuzione.
+> **Le property dei job sono validate alla COSTRUZIONE, non dentro il tick.** Per `SingleTask` e
+> `DistribuiteTask*` un `task` o un `limit` mancanti **fermano l'avvio**; per gli altri job type il
+> refuso compare nei log di avvio (`il job fallirà a ogni tick`) ed è poi restituito da ogni
+> esecuzione. Un task eseguito qui senza runner ferma l'avvio già al wiring, in `batch.Module`.
 
 > I valori conservano il tipo YAML (`limit: 100` è un intero, `singleton: true` un booleano). Le forme
 > virgolettate delle config esistenti (`limit: "100"`) restano valide: la conversione è automatica.
@@ -1426,20 +1480,6 @@ conosce (`older-than`, `task-logs`, `topic`, `stream`, `max-retry`, `objectId`, 
 | `name` | string | Nome dell'istanza, referenziato da `jobs[].properties.task` e da `workers[].tasks`; **obbligatorio**, senza fallback sul `type`. È anche il `WorkItem.TaskName` |
 | `type` | string | Task type registrato con `runner.Register[T]("...")` |
 | `properties` | map | Configurazione applicativa, mappata sui campi `prop:` della struct del runner |
-
----
-
-## Wiring Fx completo (services/data layer)
-
-```go
-// services/services.go
-redis.Module(&cfg.Redis)        // client Redis (solo se il lock è redis-backed)
-batch.WithLocker(lockredis.Module)   // oppure lockmongo.Module / locksql.Module / lockmem.Module
-mongostore.Module()             // store.IData + store.IWorkItemStore (unico entry-point)
-scheduler.Module(cfg.Scheduler) // fornisce la config da sé + Provide/Invoke interni
-```
-
-> Questo wiring manuale è il livello sotto l'orchestratore: `batch.Module(&cfg.BatchConfig, ...)` compone `mongostore.Module()`/`sqlstore.Module()`, il locker, dispatcher, feed, kafkajob, grpchandler e `scheduler.Module()` in un'unica chiamata, nell'ordine corretto e gate-ata per mode (vedi "Orchestratore — `batch.Module`"). Usalo a mano solo quando serve un controllo fine non coperto dalle opzioni.
 
 ---
 
@@ -1467,17 +1507,14 @@ identiche per backend — e l'unico chiamante ramificava su `sort != ""` per sce
 chiamare, cioè rifaceva a mano ciò che l'alias già faceva.
 
 La grammatica di `sort` (`colonna` o `colonna:desc`, separate da virgola) è **una sola**:
-`distributedjob.ParseSort` la interpreta per entrambi, e ai backend resta cosa farne — un `bson.D`
+`ParseSort` (in `internal/distributedjob`) la interpreta per entrambi, e ai backend resta cosa farne — un `bson.D`
 o un `ORDER BY` con l'identificatore validato. Era parsata due volte, e nulla garantiva che
 significasse la stessa cosa passando da Mongo a SQL.
 
 ```go
-// SQL (distributedjob/sqlstore) — filter = WHERE clause raw, sort = "col:asc"
-// MongoDB (distributedjob/mongostore) — filter = JSON query '{"status":"NEW"}'
-
-// Registrazione:
-fx.Annotate(djsqlstore.NewQueryDataSQL,   fx.As(new(distributedjob.IQueryStore)))
-fx.Annotate(djmongostore.NewQueryDataMongo, fx.As(new(distributedjob.IQueryStore)))
+// SQL   (guscio scheduler/distributedjob/sqlstore,   impl internal/querystore/sqlstore)   — filter = WHERE clause raw, sort = "col:asc"
+// Mongo (guscio scheduler/distributedjob/mongostore, impl internal/querystore/mongostore) — filter = JSON query '{"status":"NEW"}'
+batch.WithModule(djsql.Module)     // oppure djmongo.Module
 ```
 
 ---
@@ -1497,19 +1534,16 @@ batch.Module(&svc.Batch, Register,
     batch.WithWorkerModes(engine.Worker),
     batch.WithStore(storemongo.Module),           // obbligatorio, wirato in ogni mode
     batch.WithLocker(lockmongo.Module),           // obbligatorio, wirato in ogni mode
-    batch.WithModule(grpcdispatcher.Module),      // lato scheduler: client gRPC
-    batch.WithWorkerModule(grpchandler.Module),   // lato worker: server gRPC + pool
-)
+)   // dispatcher gRPC e worker pool li deducono grpc.client.url e workers: + grpc.server.port
 
 // Register è la STESSA funzione per i due ruoli: un task si registra una volta sola.
 func Register() { runner.Register[importRunner]("IMPORT") }
 ```
 
-`Register` gira in entrambi i ruoli e istanzia i task **referenziati** dall'intera config — la
-property `task` di un job o le `tasks` di un pool. Un task dichiarato in `tasks:` che nessuno
-referenzia non entra nel grafo, e le sue dipendenze nemmeno; uno referenziato viene istanziato in
-tutti i processi in cui il batch è attivo, e a decidere chi lo esegue sono i modes e il routing del
-pool.
+`Register` gira in entrambi i ruoli, ma istanzia in ciascuno i soli task che quel processo
+**esegue**: nello scheduler nessuno (i `DistribuiteTask*` consegnano via gRPC), nel worker le `tasks`
+dei pool. Un runner e le sue dipendenze entrano solo nel grafo del processo che lo esegue, senza modes
+sul `runner.Register`.
 
 I due processi devono vedere **lo stesso database**: è il worker a chiudere il lifecycle
 (`MarkDone`/`MarkFailed`) degli item che lo scheduler ha claimato.
@@ -1517,29 +1551,25 @@ I due processi devono vedere **lo stesso database**: è il worker a chiudere il 
 ```yaml
 grpc:
   server: { port: 50051 }                        # letto nel processo worker
-  client: { target: "worker-svc:50051" }         # letto nel processo scheduler
+  client: { url: "worker-svc:50051" }            # letto nel processo scheduler: ⇒ dispatch gRPC
 workers:
   - name: "import"
     size: 8
     tasks: ["import"]
 ```
 
-### Dipendenze fx di `grpchandler.Module()`
+### Cosa serve al worker pool
 
-Modes-only: i config non sono parametri, li inietta fx — `batch.Module` li fornisce con
-`core.Supply` della Config unificata, e nel wiring manuale li fornisce l'app **prima** della
-chiamata.
-
-- `[]worker.Config` — i pool (`workers:`)
-- `*grpctransport.Server` — costruito dal Module stesso da `grpc.server`
-- `store.IWorkItemStore`, `store.IData`
-- `[]*runner.TaskRunner` (gruppo `batch_runners`, popolato da `runner.Register[T]`)
+Il worker pool (`internal/grpchandler`) lo wira `batch.Module` quando `workers:` non è vuota e
+`grpc.server.port` è valorizzato; nei worker modes `workers:` senza porta è un errore d'avvio. Dal
+grafo prende lo store (`WithStore`), i runner del gruppo `batch_runners` — popolato da
+`runner.Register[T]` con i soli task dei pool — e i config che batch gli supplisce.
 
 ---
 
 ## simplejob — job in-process con claiming
 
-Job leggero per **lavorazioni singole/poche** eseguite in-process: claiming atomico per-item e recovery orfani come distributedjob (`RecoverOrphans` + `ClaimPending`, fino a `limit` item per tick, default 100), ma nessun dispatch gRPC e nessun `task_logs`. L'esclusività **cross-replica** resta garantita dal distributed job lock dello scheduler + `singleton: true`. Il runner riceve il `*store.WorkItem` completo (payload diretto, niente `GetById`) e il **lifecycle è gestito dal framework** in base al valore di ritorno.
+Job leggero per **lavorazioni singole/poche** eseguite in-process: claiming atomico per-item e recovery orfani come distributedjob (`RecoverOrphans` + `ClaimPending`, **un** item per tick), ma nessun dispatch gRPC e nessun `task_logs`. L'esclusività **cross-replica** resta garantita dal distributed job lock dello scheduler + `singleton: true`. Il runner riceve il `*store.WorkItem` completo (payload diretto, niente `GetById`) e il **lifecycle è gestito dal framework** in base al valore di ritorno.
 
 ```mermaid
 flowchart TD
@@ -1559,23 +1589,14 @@ flowchart TD
 
 > Stessa interfaccia (`store.ITaskRunner`) e stessa semantica di distributedjob: un runner è interscambiabile tra le due famiglie senza modifiche di logica.
 
-### Wiring — Module() + runner.Register[T]
+### Wiring — runner.Register[T]
 
 ```go
-// app/batch/batch.go
-import "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler/simplejob"
-
-func init() {
-    simplejob.Module()
-}
-
-// Register è passata a batch.Module (o chiamata a mano dopo aver caricato la config).
+// Register è passata a batch.Module. Il job SingleTask lo wira batch, perché è nei jobs:.
 func Register() {
     runner.Register[myRunner]("MY_TASK")   // T: store.ITaskRunner, campi taggati
 }
 ```
-
-In alternativa `simplejob.ProvideRunner(constructor)` (costruttore esplicito che ritorna `*simplejob.SimpleTaskRunner`, senza properties). `simplejob.Module()` raccoglie i runner dal gruppo `batch_simple_runners` ed emette una `scheduler.JobRegistration` per job type nel gruppo `batch_jobs`.
 
 Con più voci in `tasks:` dello stesso type, `runner.Register` fornisce **una istanza per voce**: la factory sceglie quella indicata dal `task` del job, che è il **nome del task** (ed è anche il `WorkItem.TaskName` su cui filtra il claiming). La property è obbligatoria e non ha ripieghi: il vecchio "omesso, vale il `type` del job" è ciò che confondeva job type e task type, e faceva sì che un refuso eseguisse in silenzio qualcos'altro.
 
@@ -1714,7 +1735,8 @@ type TaskLogWriter struct {
 // L'item serve intero: id e LockToken per i Mark* fenced, Retry per il confronto col tetto.
 func ApplyResult(ctx context.Context, items IWorkItemStore, item *WorkItem, maxRetry int, runErr error) (Outcome, *core.Error)
 
-// distributedjob.ITaskDispatcher — chiamata dal job per ogni item.
+// internal/distributedjob.ITaskDispatcher — chiamata dal job per ogni item (interno: lo
+// implementano il dispatcher in-process e quello gRPC, che sceglie batch dalla config).
 // Riceve il WorkItem INTERO (il job l'ha appena claimato: rileggerlo sul percorso in-process
 // era una query per item buttata) e il deadline del job, che è l'orphan timeout: oltre quella
 // soglia l'item è ri-claimato altrove, e una task che proseguisse ne sarebbe il secondo esecutore.
@@ -1805,10 +1827,10 @@ In gRPC, `limit` e pool size sono dimensioni ortogonali: lo scheduler può claim
 
 ## Trappole
 
-- **L'Invoke sullo `*scheduler.Scheduler`** è obbligatorio per forzarne la costruzione da Fx — lo fa già `scheduler.Module()` internamente (non serve aggiungerlo a mano).
-- **`localdispatcher.Module()` / `grpcdispatcher.Module()`** possono essere registrati in qualunque ordine rispetto allo scheduler: la `scheduler.JobRegistration` confluisce nel value group `batch_jobs`, che fx risolve prima di costruire `newScheduler`.
+- **Non si wirano a mano job type, dispatcher né worker pool**: li deduce `batch.Module` dai `jobs:`, da `grpc.client.url` e da `workers:` + `grpc.server.port`, e i loro package stanno in `internal/`. A `WithModule` vanno solo i backend pesanti (`djmongo`/`djsql`, `s3feed`, `kafkajob`).
+- **I modes di `runner.Register` possono solo spegnere**: un task che un job o un pool di questo processo esegue, spento dai modes, ferma l'avvio. Di solito non servono: un runner è già istanziato solo dove viene eseguito.
 - **`runner.Register[T]` va chiamata dentro la funzione `register` passata a `batch.Module`**: è lì che la config è nota. In un `init()` panica, e non c'è più una forma che sfugga a quella finestra — `runner.Provide`/`ProvideFile` e `grpchandler.Provide` sono state rimosse.
-- **Ogni task va dichiarato in `tasks:`**: un task type registrato senza voce, o referenziato da un job con un nome inesistente, fa fallire l'avvio.
+- **Ogni task va dichiarato in `tasks:`**: un task type registrato senza voce, un riferimento a un nome inesistente, o un task eseguito qui il cui type questo binario non registra, fanno fallire l'avvio.
 - **Un campo esportato senza tag NON è una dipendenza**: nelle struct passate a `Register` è un campo di lavorazione. Le dipendenze vanno taggate `inject:`/`from:`, le properties `prop:`.
 - **`core.In` non va usato nelle struct dei runner**: è un errore al wiring. Il marker lo porta il param object sintetizzato dalla libreria; accettarlo lascerebbe passare struct scritte per la vecchia semantica, con le dipendenze silenziosamente a nil. Resta valido nei param object dei costruttori scritti a mano passati a `core.Provide`.
 - **`jobs[].properties` è infrastrutturale, `tasks[].properties` è applicativo**: mettere la config del runner nel blocco del job non la fa arrivare ai campi `prop:`.

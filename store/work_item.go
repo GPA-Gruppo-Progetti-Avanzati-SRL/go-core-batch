@@ -18,7 +18,7 @@ const (
 // Implements both mongo.ICollection and coresql.IRecord so either backend can persist it.
 //
 // I dati specifici del lavoro stanno in Payload. L'UNICA chiave di instradamento è TaskName: ci
-// filtra il claiming, ci instrada il MuxRunner, ci si distingue una coda dall'altra e ci si
+// filtra il claiming, ci instrada il mux.Runner, ci si distingue una coda dall'altra e ci si
 // deduplica insieme a ObjectId. Non ce ne sono altre — c'erano Destination e ObjectType, due
 // filtri di claim facoltativi che nessun runner, dispatcher o worker leggeva mai: esistevano solo
 // perché il job NotificationKafka sprecava il proprio TaskName su una costante, e sono spariti
@@ -28,7 +28,7 @@ type WorkItem struct {
 	// TaskName è il nome della CODA a cui l'item appartiene, cioè ciò che un job claima. Per i job
 	// che eseguono un runner è il NOME dell'istanza di task — la voce di `tasks:` referenziata dal
 	// job (`properties.task`) o elencata da un worker pool (`workers[].tasks`) — e ci instrada il
-	// MuxRunner via TaskRunner.TaskName; per NotificationKafka, che un runner non ce l'ha, è il
+	// mux.Runner via TaskRunner.TaskName; per NotificationKafka, che un runner non ce l'ha, è il
 	// nome del flusso di notifiche (`properties.stream`).
 	//
 	// Non è un "tipo": ci filtra il claiming (ClaimPending/RecoverOrphans) e, con ObjectId, è la

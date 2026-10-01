@@ -1,7 +1,10 @@
+// Package scheduler porta il solo tipo della sezione `jobs:` di batch.Config. I job type sono della
+// libreria: la macchina che li esegue (scheduler gocron, registry dei job type, tick di claiming) sta
+// in internal/scheduler, e un'app non ne scrive di nuovi — il suo punto di estensione è il task
+// (runner.Register), che i job della libreria eseguono.
 package scheduler
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
@@ -17,7 +20,7 @@ const (
 
 type Config struct {
 	// Name è anche la chiave del lock distribuito del job (gocron la usa come chiave): per questo è
-	// obbligatorio e univoco fra i job (verificato all'avvio da CheckJobs).
+	// obbligatorio e univoco fra i job (verificato all'avvio).
 	Name          string `mapstructure:"name" validate:"required"`
 	Type          string `mapstructure:"type" validate:"required"`
 	ScheduledCron string `mapstructure:"cron"`
@@ -33,24 +36,6 @@ type Config struct {
 	// NB: viper abbassa le chiavi della config, quindi le letture passano dai getter
 	// case-insensitive di properties.Properties e non dall'indicizzazione diretta.
 	Properties properties.Properties `mapstructure:"properties"`
-}
-
-// CheckJobs verifica i vincoli che i tag `validate:` non sanno esprimere, perché riguardano la lista
-// e non la singola voce: i nomi sono univoci — due job con lo stesso nome condividono la chiave del
-// lock distribuito, quindi a ogni tick uno dei due trova il lock preso e non gira mai — e un job
-// attivo ha un `cron`.
-func CheckJobs(jobs []Config) error {
-	seen := make(map[string]bool, len(jobs))
-	for _, j := range jobs {
-		if seen[j.Name] {
-			return fmt.Errorf("job %q dichiarato due volte: il nome è la chiave del lock distribuito, e uno dei due non girerebbe mai", j.Name)
-		}
-		seen[j.Name] = true
-		if !j.Disabled && j.ScheduledCron == "" {
-			return fmt.Errorf("job %q: cron obbligatorio per un job attivo (disabled: true per spegnerlo)", j.Name)
-		}
-	}
-	return nil
 }
 
 // ResolveTimeouts deriva, con convenzione UNICA per tutte le famiglie di job (distributedjob,

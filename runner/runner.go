@@ -22,19 +22,15 @@
 package runner
 
 import (
-	"context"
 	"fmt"
-	"io"
+	"strings"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/batchmetrics"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/taskreg"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/taskrunner"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
-	"github.com/rs/zerolog/log"
 )
-
-// Group is the fx group tag used to collect all registered TaskRunners.
-const Group = "batch_runners"
 
 // ITaskRunner is the single runner contract, shared with simplejob via store.ITaskRunner.
 // A runner is interchangeable between distributedjob and simplejob without code changes.
@@ -48,96 +44,6 @@ const Group = "batch_runners"
 //	                                               e.g. MarkDone + child inserts in a TX,
 //	                                               using an fx-injected IWorkItemStore)
 type ITaskRunner = store.ITaskRunner
-
-// TaskRunner binds an ITaskRunner to the task NAME it handles — cioè al nome dell'istanza
-// dichiarata nella sezione `tasks:` (senza quella sezione il nome coincide col task type).
-// È il nome che viaggia in WorkItem.Type e che governa claiming e instradamento.
-type TaskRunner struct {
-	TaskName string
-	Runner   ITaskRunner
-	// MaxRetry è il tetto ai ritentativi dell'istanza, copiato da task.Config alla
-	// registrazione: task.Instances funziona solo dentro task.Apply, quindi dopo il boot non
-	// esiste più una lookup della config per nome e il limite deve viaggiare col runner.
-	//
-	// È un puntatore per la stessa ragione di task.Config.MaxRetry: nil vale illimitato, così
-	// nemmeno una struct costruita a mano finisce per negare ogni ritentativo.
-	MaxRetry *int
-}
-
-// ResolveMaxRetry applica la convenzione dell'assenza: nil = illimitato.
-func (t *TaskRunner) ResolveMaxRetry() int {
-	if t == nil || t.MaxRetry == nil {
-		return task.MaxRetryUnlimited
-	}
-	return *t.MaxRetry
-}
-
-// WithMaxRetry fissa il tetto ai ritentativi e restituisce il runner, per comporre con New.
-func (t *TaskRunner) WithMaxRetry(n int) *TaskRunner {
-	t.MaxRetry = &n
-	return t
-}
-
-// New returns a TaskRunner wrapping runner for the given task name.
-func New(taskName string, r ITaskRunner) *TaskRunner {
-	return &TaskRunner{TaskName: taskName, Runner: r}
-}
-
-// MuxRunner routes task execution to the registered ITaskRunner by task name.
-type MuxRunner struct {
-	// routes conserva il *TaskRunner e non il solo ITaskRunner: serve anche il tetto ai
-	// ritentativi dell'istanza, che Run passa a store.ApplyResult.
-	routes map[string]*TaskRunner
-}
-
-// NewMux builds a MuxRunner from a slice of TaskRunners (typically collected via fx.Group).
-func NewMux(runners []*TaskRunner) *MuxRunner {
-	routes := make(map[string]*TaskRunner, len(runners))
-	for _, tr := range runners {
-		routes[tr.TaskName] = tr
-	}
-	return &MuxRunner{routes: routes}
-}
-
-// Run è il punto in cui il percorso in-process (localdispatcher) emette le metriche di task:
-// è il solo che ha in mano sia il task name sia la store.Outcome, e resta uno solo anche se il
-// dispatcher cambia. Il percorso gRPC NON passa di qui (va su worker.Run), quindi non c'è
-// doppio conteggio.
-//
-// Riceve il WorkItem già claimato dal job: prima lo rileggeva con GetById, che su questo
-// percorso era una query per item buttata — l'item era già in memoria, completo, dal claim.
-func (r *MuxRunner) Run(ctx context.Context, item *store.WorkItem, items store.IWorkItemStore) error {
-	taskName := item.TaskName
-	// TaskStart prima di risolvere la route, a specchio di worker.Run che fa LogStart prima di
-	// risolvere il runner: un task che non parte è comunque un task fallito, e senza questo
-	// sarebbe invisibile alle metriche.
-	start := batchmetrics.TaskStart(taskName)
-	runner, ok := r.routes[taskName]
-	if !ok {
-		batchmetrics.ObserveTask(taskName, store.OutcomeFailed, start)
-		// L'item va finalizzato comunque, altrimenti resta IN_PROGRESS fino al recupero orfani
-		// e riprova all'infinito un task che questo processo non sa eseguire.
-		err := fmt.Errorf("no runner registered for task name %q", taskName)
-		if markErr := items.MarkFailed(ctx, item.Id, item.LockToken, err.Error()); markErr != nil {
-			return markErr
-		}
-		return err
-	}
-	runErr := store.CheckExhausted(item, runner.ResolveMaxRetry())
-	if runErr == nil {
-		runErr = runner.Runner.Run(ctx, item)
-	}
-	outcome, markErr := store.ApplyResult(ctx, items, item, runner.ResolveMaxRetry(), runErr)
-	batchmetrics.ObserveTask(taskName, outcome, start)
-	if markErr != nil {
-		return markErr
-	}
-	// Done/Handled → success (SetTaskDone); Retry/Failed → surface the error (SetTaskInError).
-	if outcome == store.OutcomeDone || outcome == store.OutcomeHandled {
-		return nil
-	}
-	return runErr
-}
 
 // Register registra il tipo struct T come task runner per il task type indicato. T deve implementare
 // ITaskRunner (via receiver a puntatore) e dichiarare i suoi campi con i tag di go-core-app:
@@ -157,17 +63,12 @@ func (r *MuxRunner) Run(ctx context.Context, item *store.WorkItem, items store.I
 //
 // Va chiamata dentro la funzione di registrazione passata a batch.Module: è lì che la config è nota.
 //
-// modes limita QUESTO task ai core.Mode indicati; vuoto = attivo in ogni mode. È il gate per-task,
-// che sta sotto WithSchedulerModes/WithWorkerModes (che spengono l'intero sottosistema): serve quando
-// un solo YAML alimenta più processi dello stesso deployment e solo alcuni eseguono davvero quel
-// runner, perché senza, in un processo scheduler entrano nel grafo fx anche i runner che solo il
-// worker eseguirà — con tutte le loro dipendenze. Stessa forma di corekafka.RegisterHandler.
-//
-// Un task escluso dal mode NON è un errore di avvio: semplicemente non viene istanziato, con un log
-// Info. Attenzione però al caso in cui un job LOCALE (simplejob, localdispatcher) referenzi in questo
-// processo un task escluso: lì l'assenza del runner si manifesta per item a runtime (MuxRunner.Run →
-// MarkFailed + "no runner registered for task name"), come già oggi accade allo scheduler che
-// dispatcha via gRPC verso un worker in un altro binario.
+// Quali istanze diventano runner lo decide la config: solo quelle eseguite in QUESTO processo, cioè
+// nominate da un job che le esegue in linea (SingleTask, DistribuiteTask* col dispatch in-process)
+// o servite da un worker pool di qui. modes è un filtro in più, nella stessa forma di
+// corekafka.RegisterHandler: limita QUESTO task ai core.Mode indicati (vuoto = nessun limite) e può
+// solo spegnere. Spegnere un task che la config esegue qui è una contraddizione e ferma l'avvio
+// (vedi activeInstances); un task che la config non esegue qui non viene costruito comunque.
 //
 //	func Register() { runner.Register[myRunner]("IMPORT", engine.Worker) }
 //
@@ -181,32 +82,39 @@ func Register[T any, PT interface {
 	ITaskRunner
 }](taskType string, modes ...string) {
 	for _, tc := range activeInstances(taskType, modes) {
-		core.ProvideStruct(func(p *T) *TaskRunner {
-			return New(tc.Name, PT(p)).WithMaxRetry(tc.ResolveMaxRetry())
+		core.ProvideStruct(func(p *T) *taskrunner.TaskRunner {
+			return taskrunner.New(tc.Name, PT(p)).WithMaxRetry(tc.ResolveMaxRetry())
 		},
-			owner(tc.Name, taskType), tc.Properties, Group)
+			owner(tc.Name, taskType), tc.Properties, taskrunner.Group)
 	}
 }
 
-// activeInstances ritorna le istanze del task type che questo processo deve costruire: quelle attive
-// in config e ammesse dai modes del register.
+// activeInstances ritorna le istanze del task type che questo processo deve costruire: quelle che la
+// config fa eseguire qui (taskreg.Instances) E che i modes del register ammettono. I modes sono un
+// filtro in più che può solo spegnere — non accende ciò che la config non esegue qui.
 //
-// task.Instances è chiamata SEMPRE, anche quando il mode esclude il task, e il gate viene DOPO: è
+// taskreg.Instances è chiamata SEMPRE, anche quando il mode esclude il task, e il gate viene DOPO: è
 // Instances ad alimentare la contabilità di task.check — marca il type come registrato e accumula i
 // type non dichiarati in `tasks:`. Gate-are prima farebbe apparire "type registrato ma non dichiarato"
-// un type registrato e solo non attivo in questo MODE, cioè trasformerebbe un gate in un errore di
-// configurazione. È lo stesso ordine che corekafka applica in provideIfActive: prima la config, poi
-// il mode.
+// un type registrato e solo non attivo in questo MODE. È lo stesso ordine che corekafka applica in
+// provideIfActive: prima la config, poi il mode.
+//
+// Un'istanza che Instances ritorna è eseguita in questo processo da un job o da un worker pool,
+// quindi spegnerla coi modes è una contraddizione: ogni item fallirebbe con "no runner registered
+// for task name". L'istanza non viene costruita, e l'avvio si ferma qui con un errore che nomina
+// task e modes invece di presentarsi item per item.
 func activeInstances(taskType string, modes []string) []task.Config {
-	all := task.Instances(taskType)
-	if core.IsMode(modes...) {
+	all := taskreg.Instances(taskType)
+	if core.IsMode(modes...) || len(all) == 0 {
 		return all
 	}
-	for _, tc := range all {
-		log.Info().Str("task", tc.Name).Str("type", taskType).Strs("modes", modes).
-			Msg("batch: task non attivo in questo MODE, non istanziato (dipendenze non istanziate)")
+	names := make([]string, len(all))
+	for i, tc := range all {
+		names[i] = tc.Name
 	}
-	return nil
+	panic(fmt.Sprintf("batch: i task %s (type %q) sono eseguiti in questo processo da un job o da un worker pool, "+
+		"ma runner.Register li limita ai MODE %v e il MODE corrente è %q: togliere il task dal job/worker di "+
+		"questo MODE, oppure aggiungere il MODE al register", strings.Join(names, ", "), taskType, modes, core.Mode))
 }
 
 // owner è l'etichetta con cui core.ProvideStruct contestualizza i suoi errori (dipendenza mancante,
@@ -215,45 +123,9 @@ func owner(taskName, taskType string) string {
 	return fmt.Sprintf("batch: task %q (type %q)", taskName, taskType)
 }
 
-// IFileRunner is the interface for file-based task runners (e.g. S3).
-// The runner receives the file key and an io.Reader with the file content.
-type IFileRunner interface {
-	Run(ctx context.Context, key string, content io.Reader) error
-}
-
-// FileTaskRunner binds an IFileRunner to the task name it handles.
-type FileTaskRunner struct {
-	TaskName string
-	Runner   IFileRunner
-	// MaxRetry è il tetto ai ritentativi dell'istanza, con la stessa semantica e la stessa ragione
-	// di TaskRunner.MaxRetry: nil = illimitato. Sta anche qui perché un file runner finisce comunque
-	// nel gruppo batch_runners — s3feed lo avvolge in un *TaskRunner — e senza il campo il tetto si
-	// perdeva nel passaggio, rendendo `max-retry:` efficace per Register e inefficace per
-	// RegisterFile: un knob che vale a metà è peggio di un knob che non vale.
-	MaxRetry *int
-}
-
-// ResolveMaxRetry applica la convenzione dell'assenza: nil = illimitato.
-func (t *FileTaskRunner) ResolveMaxRetry() int {
-	if t == nil || t.MaxRetry == nil {
-		return task.MaxRetryUnlimited
-	}
-	return *t.MaxRetry
-}
-
-// WithMaxRetry fissa il tetto ai ritentativi e restituisce il runner, per comporre con NewFile.
-func (t *FileTaskRunner) WithMaxRetry(n int) *FileTaskRunner {
-	t.MaxRetry = &n
-	return t
-}
-
-// NewFile returns a FileTaskRunner wrapping runner for the given task name.
-func NewFile(taskName string, r IFileRunner) *FileTaskRunner {
-	return &FileTaskRunner{TaskName: taskName, Runner: r}
-}
-
-// FileGroup is the fx group tag used to collect all registered FileTaskRunners.
-const FileGroup = "batch_file_runners"
+// IFileRunner è il contratto dei runner su file (es. S3): riceve la chiave del file e un io.Reader
+// col contenuto. Alias del tipo di internal/taskrunner, che è dove vive il legame runner→task name.
+type IFileRunner = taskrunner.IFileRunner
 
 // RegisterFile è l'analogo di Register per i runner su file (es. S3): T deve implementare IFileRunner.
 // Vale lo stesso contratto sui tag, la stessa istanziazione per voce della sezione `tasks:` (che va
@@ -270,9 +142,9 @@ func RegisterFile[T any, PT interface {
 	IFileRunner
 }](taskType string, modes ...string) {
 	for _, tc := range activeInstances(taskType, modes) {
-		core.ProvideStruct(func(p *T) *FileTaskRunner {
-			return NewFile(tc.Name, PT(p)).WithMaxRetry(tc.ResolveMaxRetry())
+		core.ProvideStruct(func(p *T) *taskrunner.FileTaskRunner {
+			return taskrunner.NewFile(tc.Name, PT(p)).WithMaxRetry(tc.ResolveMaxRetry())
 		},
-			owner(tc.Name, taskType), tc.Properties, FileGroup)
+			owner(tc.Name, taskType), tc.Properties, taskrunner.FileGroup)
 	}
 }

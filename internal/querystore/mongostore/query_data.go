@@ -1,0 +1,99 @@
+// Package mongostore provides a MongoDB-backed implementation of distributedjob.IQueryStore.
+// Import this package when the external feed source is a MongoDB collection.
+package mongostore
+
+import (
+	"context"
+	"encoding/json"
+	"time"
+
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo/mongoutil"
+
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/distributedjob"
+	coremongo "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+)
+
+// currentTimestampPlaceholder è sostituito ricorsivamente con time.Now() nei filtri, così i job
+// possono esprimere condizioni temporali statiche in configurazione (es. {"$lte":"CURRENT_TIMESTAMP"}).
+const currentTimestampPlaceholder = "CURRENT_TIMESTAMP"
+
+// convertDates sostituisce ricorsivamente il placeholder CURRENT_TIMESTAMP con l'orario corrente.
+func convertDates(m bson.M) bson.M {
+	now := time.Now()
+	for key, value := range m {
+		switch v := value.(type) {
+		case string:
+			if v == currentTimestampPlaceholder {
+				m[key] = now
+			}
+		case bson.M:
+			m[key] = convertDates(v)
+		case map[string]any:
+			m[key] = convertDates(bson.M(v))
+		}
+	}
+	return m
+}
+
+// queryData implements distributedjob.IQueryStore against a MongoDB collection.
+type queryData struct {
+	Service *coremongo.Service
+}
+
+func newQueryData(ms *coremongo.Service) *queryData {
+	return &queryData{Service: ms}
+}
+
+var _ distributedjob.IQueryStore = (*queryData)(nil)
+
+func (q *queryData) GetIds(ctx context.Context, collection, filter, sort string, limit int) ([]string, *core.Error) {
+	coll := q.Service.GetCollection(collection, "")
+
+	var query bson.M
+	if filter != "" {
+		if err := json.Unmarshal([]byte(filter), &query); err != nil {
+			return nil, errs.Tech(errs.CodeQuery).WithCause(err)
+		}
+		query = convertDates(query)
+	} else {
+		query = bson.M{}
+	}
+
+	opts := options.Find().SetProjection(bson.M{"_id": 1})
+	if limit > 0 {
+		opts.SetLimit(int64(limit))
+	}
+	if campi := distributedjob.ParseSort(sort); len(campi) > 0 {
+		sortDoc := make(bson.D, 0, len(campi))
+		for _, c := range campi {
+			dir := 1
+			if c.Desc {
+				dir = -1
+			}
+			sortDoc = append(sortDoc, bson.E{Key: c.Column, Value: dir})
+		}
+		opts.SetSort(sortDoc)
+	}
+
+	cursor, err := coll.Find(ctx, query, opts)
+	if err != nil {
+		return nil, errs.Tech(errs.CodeQueryCur).WithCause(err)
+	}
+	defer mongoutil.CloseCursor(ctx, cursor, "GetIds")
+
+	var ids []string
+	for cursor.Next(ctx) {
+		var doc struct {
+			Id string `bson:"_id"`
+		}
+		if err := cursor.Decode(&doc); err == nil {
+			ids = append(ids, doc.Id)
+		}
+	}
+	return ids, nil
+}

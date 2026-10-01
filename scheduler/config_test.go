@@ -26,23 +26,6 @@ func TestResolveTimeouts(t *testing.T) {
 	})
 }
 
-// Il nome è la chiave del lock distribuito: due job omonimi si contendono lo stesso lock, e uno dei
-// due non gira mai. Un job attivo senza cron non ha quando girare.
-func TestCheckJobs(t *testing.T) {
-	ok := []Config{{Name: "a", Type: "T", ScheduledCron: "* * * * * *"}, {Name: "b", Type: "T", Disabled: true}}
-	if err := CheckJobs(ok); err != nil {
-		t.Fatalf("config valida rifiutata: %v", err)
-	}
-	for nome, jobs := range map[string][]Config{
-		"nome duplicato": {{Name: "a", ScheduledCron: "* * * * * *"}, {Name: "a", ScheduledCron: "* * * * * *"}},
-		"cron mancante":  {{Name: "a"}},
-	} {
-		if err := CheckJobs(jobs); err == nil {
-			t.Errorf("%s: atteso errore", nome)
-		}
-	}
-}
-
 // I tag validate: fermano l'avvio su un job senza nome o type, o con lock-timeout negativo.
 func TestConfig_Validate(t *testing.T) {
 	for nome, c := range map[string]Config{

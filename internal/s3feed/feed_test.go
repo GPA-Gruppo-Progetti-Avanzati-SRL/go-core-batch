@@ -1,0 +1,177 @@
+package s3feed
+
+import (
+	"context"
+	"testing"
+
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/s3client"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/taskrunner"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
+)
+
+// mockService implements a minimal S3 service for testing via the s3Feed.
+// Since s3Feed calls svc.List through the registry, we need to set up
+// a registry with a real Service. Instead, we test at the Feed level
+// by verifying the output given known List results.
+
+func TestS3Feed_Feed_FiltersAndLimits(t *testing.T) {
+	// We can't easily mock s3.Service.List since it uses the real S3 client.
+	// Instead, test the filtering/limiting logic by creating an s3Feed
+	// and verifying the contract at the integration boundary.
+	// For unit testing, we test decodePayload and the WorkItem construction.
+
+	t.Run("pattern matching on base name", func(t *testing.T) {
+		// Test that path.Match works correctly for our use case
+		testCases := []struct {
+			pattern string
+			key     string
+			match   bool
+		}{
+			{"*.csv", "data/file1.csv", true},
+			{"*.csv", "data/file1.txt", false},
+			{"report-*.csv", "data/report-2024.csv", true},
+			{"report-*.csv", "data/other-2024.csv", false},
+			{"*", "data/anything.bin", true},
+		}
+		for _, tc := range testCases {
+			// Simulate what Feed does: path.Base(key) then path.Match
+			base := baseName(tc.key)
+			matched, err := matchPattern(tc.pattern, base)
+			if err != nil {
+				t.Fatalf("pattern %q: unexpected error: %v", tc.pattern, err)
+			}
+			if matched != tc.match {
+				t.Errorf("pattern=%q key=%q: got %v, want %v", tc.pattern, tc.key, matched, tc.match)
+			}
+		}
+	})
+
+	t.Run("WorkItem construction", func(t *testing.T) {
+		// Verify that a WorkItem built from an S3 object has the correct fields
+		key := "inbox/report.csv"
+		taskName := "S3_IMPORT"
+		destPath := "processed"
+		serviceName := "main"
+
+		wi := buildWorkItem(taskName, key, serviceName, destPath)
+		if wi.TaskName != taskName {
+			t.Errorf("Type = %q, want %q", wi.TaskName, taskName)
+		}
+		if wi.ObjectId != key {
+			t.Errorf("ObjectId = %q, want %q", wi.ObjectId, key)
+		}
+		if wi.Status != store.StatusPending {
+			t.Errorf("Status = %q, want %q", wi.Status, store.StatusPending)
+		}
+		payload, ok := wi.Payload.(s3Payload)
+		if !ok {
+			t.Fatalf("Payload type = %T, want s3Payload", wi.Payload)
+		}
+		if payload.Service != serviceName {
+			t.Errorf("Payload.Service = %q, want %q", payload.Service, serviceName)
+		}
+		if payload.Key != key {
+			t.Errorf("Payload.Key = %q, want %q", payload.Key, key)
+		}
+		if payload.DestPath != destPath {
+			t.Errorf("Payload.DestPath = %q, want %q", payload.DestPath, destPath)
+		}
+	})
+
+	t.Run("unknown service returns error", func(t *testing.T) {
+		reg, _ := s3client.NewRegistry(nil) // empty registry
+		feed := newFeed(reg)
+		props := properties.Properties{
+			"service": "nonexistent",
+			"path":    "inbox/",
+			"pattern": "*.csv",
+		}
+		_, err := feed.Feed(context.Background(), "TEST", props, 10)
+		if err == nil {
+			t.Fatal("expected error for unknown service")
+		}
+	})
+}
+
+// Il payload del job S3 si decodifica con store.DecodePayload, che è il decodificatore di TUTTI
+// i payload dei WorkItem. Qui resta la prova che l's3Payload sopravvive alle forme in cui i
+// backend lo restituiscono — la copertura generale sta in store/payload_test.go.
+func TestDecodePayload_S3Payload(t *testing.T) {
+	atteso := s3Payload{Service: "main", Key: "inbox/data.csv", DestPath: "processed/"}
+
+	// La forma con cui il driver Mongo restituisce un documento: una lista ORDINATA di coppie.
+	// Espressa qui per struttura e non come bson.D, che è esattamente il modo in cui
+	// store.DecodePayload la riconosce. Prima il convertitore locale di questo package passava
+	// per json.Marshal — che su una lista produce un array — e il job non decodificava mai il
+	// proprio payload quando il backend era Mongo.
+	type coppia struct {
+		Key   string
+		Value any
+	}
+	casi := map[string]any{
+		"s3Payload diretto":     atteso,
+		"puntatore a s3Payload": &atteso,
+		"map (colonna jsonb)":   map[string]any{"service": "main", "key": "inbox/data.csv", "destPath": "processed/"},
+		"lista di coppie (bson.D di Mongo)": []coppia{
+			{Key: "service", Value: "main"},
+			{Key: "key", Value: "inbox/data.csv"},
+			{Key: "destPath", Value: "processed/"},
+		},
+	}
+	for nome, raw := range casi {
+		t.Run(nome, func(t *testing.T) {
+			var out s3Payload
+			if err := store.DecodePayload(raw, &out); err != nil {
+				t.Fatalf("decodifica fallita: %v", err)
+			}
+			if out != atteso {
+				t.Errorf("got %+v, want %+v", out, atteso)
+			}
+		})
+	}
+}
+
+// helpers to extract testable logic from Feed without needing a real S3 client
+
+func baseName(key string) string {
+	return pathBase(key)
+}
+
+func matchPattern(pattern, base string) (bool, error) {
+	return pathMatch(pattern, base)
+}
+
+func buildWorkItem(taskName, key, service, destPath string) *store.WorkItem {
+	return &store.WorkItem{
+		Id:       "test-id",
+		TaskName: taskName,
+		ObjectId: key,
+		Payload: s3Payload{
+			Service:  service,
+			Key:      key,
+			DestPath: destPath,
+		},
+		Status: store.StatusPending,
+	}
+}
+
+// Il tetto ai ritentativi deve sopravvivere all'avvolgimento: è il *TaskRunner a finire nel gruppo
+// batch_runners, quindi è il suo MaxRetry quello che mux.Runner.Run passa a store.ApplyResult. Senza
+// questo passaggio `max-retry:` valeva per Register e non per RegisterFile.
+func TestWrapFileRunners_ConservaMaxRetry(t *testing.T) {
+	wrapped := wrapFileRunners(nil, []*taskrunner.FileTaskRunner{
+		taskrunner.NewFile("s3-in", nil).WithMaxRetry(3),
+		taskrunner.NewFile("s3-bulk", nil),
+	})
+	if len(wrapped) != 2 {
+		t.Fatalf("attesi 2 runner avvolti, ottenuto %d", len(wrapped))
+	}
+	if wrapped[0].TaskName != "s3-in" || wrapped[0].ResolveMaxRetry() != 3 {
+		t.Fatalf("il tetto si è perso nell'avvolgimento: %+v", wrapped[0])
+	}
+	if wrapped[1].ResolveMaxRetry() != task.MaxRetryUnlimited {
+		t.Fatalf("l'assenza deve valere illimitato, ottenuto %d", wrapped[1].ResolveMaxRetry())
+	}
+}

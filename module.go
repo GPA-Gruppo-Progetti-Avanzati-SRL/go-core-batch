@@ -4,49 +4,53 @@ import (
 	"strings"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/distributedjob"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/feedjob"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/grpcdispatcher"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/grpchandler"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/localdispatcher"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/purgejob"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/scheduler"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/simplejob"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/taskreg"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
 	corelock "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-locker"
 )
 
-// ModuleFunc è la firma comune di TUTTI i Module() componibili di go-core-batch (store,
-// dispatcher, query store, feed, job Kafka, worker pool). Ogni package espone ormai un
-// Module() modes-only `func(modes ...string)`: il config non è più un parametro, ma viene
-// iniettato da fx. È batch.Module a fornirlo (core.Supply della Config unificata). Così ogni
-// Module si passa per RIFERIMENTO DIRETTO — niente closure.
+// ModuleFunc è la firma dei Module() che l'app passa a batch per riferimento diretto: lo store
+// (WithStore) e i backend che portano dipendenze pesanti (WithModule). Sono modes-only
+// `func(modes ...string)`: il config non è un parametro, lo fornisce batch con core.Supply della
+// Config unificata.
 //
-// È questo il pattern che preserva la modularità COMPILE-TIME: il package `batch` NON importa
-// nessun package di backend (importa solo i loro Config, che sono struct leggere), quindi è
-// l'app a importare — e a trascinare in go.mod — solo i backend che effettivamente passa a
-// WithModule/WithWorkerModule. Un'app mongo-only non si porta dietro uptrace/bun, una senza
-// Kafka non si porta dietro franz-go. (grpc-go resta nelle deps ma arriva da go-core-app/OTLP,
-// non dai backend.)
+// È questo il pattern che preserva la modularità COMPILE-TIME: batch importa i soli componenti che
+// non aggiungono dipendenze (job type, dispatcher, worker pool — e li wira da sé, leggendo i
+// `jobs:`), mentre i backend li importa l'app, che trascina in go.mod solo ciò che passa. Un'app
+// mongo-only non si porta dietro uptrace/bun, una senza Kafka non si porta dietro go-core-kafka,
+// una senza S3 non si porta dietro l'SDK AWS.
 type ModuleFunc func(modes ...string)
 
-// options raccoglie le scelte di topologia non derivabili dalla Config: i modes con cui gate-are
-// le due famiglie (scheduler vs worker), lo store (sempre attivo) e i ModuleFunc dei componenti
-// iniettati dall'app, divisi per famiglia di modes.
+// options raccoglie le scelte non derivabili dalla Config: i modes con cui gate-are le due famiglie
+// (scheduler vs worker), lo store e il lock (sempre attivi) e i backend pesanti iniettati dall'app.
 type options struct {
 	schedulerModes []string
 	workerModes    []string
 	store          ModuleFunc          // obbligatorio, sempre attivo
 	locker         corelock.ModuleFunc // obbligatorio, sempre attivo
-	modules        []ModuleFunc        // gate-ati sui scheduler modes
-	workerModules  []ModuleFunc        // gate-ati sui worker modes
+	modules        []ModuleFunc        // backend pesanti, gate-ati sui scheduler modes
 }
 
 // Option configura Module.
 type Option func(*options)
 
-// WithSchedulerModes limita i componenti passati a WithModule (dispatcher, feed, job Kafka,
-// query store) e lo Scheduler ai core.Mode indicati. Vuoto = sempre attivi.
+// WithSchedulerModes limita lo Scheduler, i job type, il dispatcher e i backend di WithModule ai
+// core.Mode indicati. Vuoto = sempre attivi.
 func WithSchedulerModes(modes ...string) Option {
 	return func(o *options) { o.schedulerModes = modes }
 }
 
-// WithWorkerModes limita i componenti passati a WithWorkerModule (worker pool gRPC) ai core.Mode
-// indicati. Vuoto = sempre attivo. Tipicamente diverso dai scheduler modes (es. Worker vs Scheduler).
+// WithWorkerModes limita il worker pool gRPC (wirato da batch se `workers:` e `grpc.server` sono
+// valorizzati) ai core.Mode indicati. Vuoto = sempre attivo. Tipicamente diverso dai scheduler modes
+// (es. Worker vs Scheduler).
 func WithWorkerModes(modes ...string) Option {
 	return func(o *options) { o.workerModes = modes }
 }
@@ -82,102 +86,168 @@ func WithLocker(m corelock.ModuleFunc) Option {
 	return func(o *options) { o.locker = m }
 }
 
-// WithModule aggiunge uno o più componenti lato scheduler, gate-ati sui scheduler modes. I
-// Module() si passano per riferimento diretto (sono tutti modes-only); il loro config lo fornisce
-// batch via core.Supply della Config unificata. Chiamabile più volte (accumula).
+// WithModule aggiunge i backend che portano dipendenze pesanti, gate-ati sui scheduler modes. Sono
+// i soli componenti dello scheduler che l'app sceglie: job type, dispatcher e worker pool li wira
+// batch dai `jobs:` (vedi Module). Chiamabile più volte (accumula).
 //
 //	batch.WithModule(
-//	    grpcdispatcher.Module,          // dispatch via gRPC (in-process: localdispatcher.Module)
-//	    djmongo.Module, queryfeed.Module, // feed by-query (query store + feed)
-//	    kafkajob.Module,                 // job NotificationKafka
+//	    djmongo.Module,   // query store del job DistribuiteTaskByQuery (o djsql.Module)
+//	    s3feed.Module,    // job DistribuiteTaskByS3File (SDK AWS)
+//	    kafkajob.Module,  // job NotificationKafka (go-core-kafka; il producer lo wira l'app)
 //	)
 func WithModule(m ...ModuleFunc) Option {
 	return func(o *options) { o.modules = append(o.modules, m...) }
 }
 
-// WithWorkerModule aggiunge uno o più componenti lato worker, gate-ati sui worker modes.
-// Tipicamente il solo grpchandler.Module (worker pool gRPC).
-//
-//	batch.WithWorkerModule(grpchandler.Module)
-func WithWorkerModule(m ...ModuleFunc) Option {
-	return func(o *options) { o.workerModules = append(o.workerModules, m...) }
+// topology è ciò che batch deduce dalla Config: quali job type sono in uso (e quindi quali
+// componenti wirare) e dove si eseguono i task — cioè quali runner servono in questo processo.
+type topology struct {
+	jobTypes map[string]bool // job type dei job attivi (non disabled)
+	// grpcDispatch: i DistribuiteTask* consegnano a un worker remoto (grpc.client.url valorizzato)
+	// invece di eseguire in-process col localdispatcher.
+	grpcDispatch bool
+	// workerPool: questo deployment serve i `workers:` col worker pool gRPC (grpc.server.port).
+	workerPool bool
 }
 
-// ActiveSet costruisce la fotografia della config che il registro dei task usa durante register():
-// le istanze dichiarate in `tasks:` e i task name referenziati dai job e dai worker pool. Un task
-// non referenziato non viene istanziato, quindi le sue dipendenze non entrano nel grafo fx.
+func newTopology(cfg *Config) topology {
+	t := topology{
+		jobTypes:     make(map[string]bool),
+		grpcDispatch: cfg.Grpc.Client.Url != "",
+		workerPool:   len(cfg.WorkersConfig) > 0 && cfg.Grpc.Server.Port != 0,
+	}
+	for _, j := range cfg.JobsConfig {
+		if !j.Disabled {
+			t.jobTypes[j.Type] = true
+		}
+	}
+	return t
+}
+
+func (t topology) distributed() bool {
+	return t.jobTypes[distributedjob.JobType] || t.jobTypes[distributedjob.JobTypeByQuery] ||
+		t.jobTypes[distributedjob.JobTypeByS3File]
+}
+
+// executesLocally dice se un job di quel type esegue il proprio `task` in QUESTO processo:
+// SingleTask sempre, i DistribuiteTask* solo col dispatch in-process. FeedTask accoda e non esegue,
+// PurgeWorkItems e NotificationKafka un task non ce l'hanno.
+func (t topology) executesLocally(jobType string) bool {
+	switch jobType {
+	case simplejob.JobType:
+		return true
+	case distributedjob.JobType, distributedjob.JobTypeByQuery, distributedjob.JobTypeByS3File:
+		return !t.grpcDispatch
+	}
+	return false
+}
+
+// wire registra i componenti che la Config usa, e solo quelli. Sono i package che non aggiungono
+// dipendenze (misurato con go list -deps: i job type e il localdispatcher nessuna, grpcdispatcher e
+// worker pool otelgrpc + protobuf, con grpc-go già presente via go-core-app), quindi importarli qui
+// non costa nulla all'app; i backend pesanti restano di WithModule.
+func (t topology) wire(sched, work []string) {
+	if t.jobTypes[simplejob.JobType] {
+		simplejob.Module(sched...)
+	}
+	if t.jobTypes[feedjob.JobType] {
+		feedjob.Module(sched...)
+	}
+	if t.jobTypes[purgejob.JobType] {
+		purgejob.Module(sched...)
+	}
+	if t.distributed() {
+		if t.grpcDispatch {
+			grpcdispatcher.Module(sched...)
+		} else {
+			localdispatcher.Module(sched...)
+		}
+		if t.jobTypes[distributedjob.JobType] {
+			scheduler.ProvideJob(distributedjob.Register, sched...)
+		}
+		if t.jobTypes[distributedjob.JobTypeByQuery] {
+			// Il query store (IQueryStore) è un backend dell'app: djmongo/djsql via WithModule.
+			scheduler.ProvideJob(distributedjob.RegisterByQuery, sched...)
+		}
+		// DistribuiteTaskByS3File lo registra s3feed, che porta l'SDK AWS e resta di WithModule.
+	}
+	if t.workerPool {
+		grpchandler.Module(work...)
+	}
+}
+
+// activeSet costruisce la fotografia della config che il registro dei task usa durante register():
 //
-// I riferimenti sono di due specie, perché solo una delle due è un typo se non trova nulla:
-//
-//   - ESPLICITI — la property `task` di un SingleTask, di un distributedjob, di un FeedTask, le
-//     `tasks` di un worker pool: nomi scritti a mano, che devono esistere in `tasks:`. Da quando
-//     ogni job nomina il task che serve, è qui che finisce quasi tutto.
-//   - DEDOTTI — il job type, quando nessuna property nomina il task. Resta per i job type del
-//     framework che un task non lo nominano affatto (NotificationKafka, che reclama i work item
-//     il cui TaskName è il proprio job type): lì non si può pretendere l'esistenza, e batch non
-//     può nemmeno elencarli per escluderli, visto che non importa i package dei job (è il
-//     vincolo di modularità compile-time di ModuleFunc).
-func ActiveSet(cfg *Config) task.ActiveSet {
-	seen := make(map[string]bool)
-	var referenced, implied []string
-	add := func(dst *[]string, s string) {
+//   - Referenced: i task NOMINATI da `jobs:` (property `task`) e da `workers:` — validati: un nome
+//     che non esiste in `tasks:` è un typo e ferma l'avvio, in qualunque processo;
+//   - Executed: i task ESEGUITI in questo processo — il `task` dei job che eseguono in linea
+//     (executesLocally) se siamo in uno scheduler mode, i `workers[].tasks` se siamo in un worker
+//     mode e il worker pool è wirato. Solo questi diventano runner: un task nominato da un FeedTask,
+//     o consegnato via gRPC a un worker remoto, non porta le sue dipendenze nel grafo di qui.
+func activeSet(cfg *Config, t topology, sched, work []string) taskreg.ActiveSet {
+	var referenced, executed []string
+	seenRef, seenExe := map[string]bool{}, map[string]bool{}
+	add := func(dst *[]string, seen map[string]bool, s string) {
 		if s == "" || seen[strings.ToLower(s)] {
 			return
 		}
 		seen[strings.ToLower(s)] = true
 		*dst = append(*dst, s)
 	}
+	inSched, inWork := core.IsMode(sched...), core.IsMode(work...)
 	for _, j := range cfg.JobsConfig {
 		if j.Disabled {
 			continue
 		}
-		named := j.Properties.GetString(scheduler.PropTask, "") // distributedjob, simplejob, feedjob
-		if named != "" {
-			add(&referenced, named)
-			continue
+		named := j.Properties.GetString(scheduler.PropTask, "")
+		add(&referenced, seenRef, named)
+		if inSched && t.executesLocally(j.Type) {
+			add(&executed, seenExe, named)
 		}
-		add(&implied, j.Type) // simplejob senza taskName, oppure un job type del framework
 	}
 	for _, w := range cfg.WorkersConfig {
-		for _, t := range w.Tasks {
-			add(&referenced, t)
+		for _, name := range w.Tasks {
+			add(&referenced, seenRef, name)
+			if inWork && t.workerPool {
+				add(&executed, seenExe, name)
+			}
 		}
 	}
-	return task.ActiveSet{Tasks: cfg.TasksConfig, Referenced: referenced, Implied: implied}
+	return taskreg.ActiveSet{Tasks: cfg.TasksConfig, Referenced: referenced, Executed: executed}
 }
 
-// Module wira il sottosistema batch a partire da una singola Config, sostituendo la sfilza di
-// Module() da chiamare a mano in init(). I backend (store, dispatcher, feed, job Kafka, worker
-// pool) sono INIETTATI dall'app come ModuleFunc per riferimento diretto: così `batch` non importa
-// nessun package di backend e ogni app trascina in go.mod solo le dipendenze di ciò che passa.
+// Module wira il sottosistema batch a partire da una singola Config. L'app passa i suoi task
+// (register), lo store e il lock (obbligatori) e i soli backend che portano dipendenze pesanti
+// (WithModule): il resto lo DEDUCE dalla Config.
 //
-// Config: batch fornisce a fx i sotto-config della Config unificata via core.Supply, così i
-// Module() dei backend li trovano già iniettati (stesso pattern già usato per la RedisConfig; i
-// tipi Config sono leggeri, supplirli non introduce dipendenze pesanti). I config dei backend
-// (grpc client/server, kafka, s3, worker) sono suppliti SOLO se valorizzati: un config non
-// impostato non viene supplito e, se un componente attivo lo richiede, fx fallisce subito con un
-// chiaro "missing dependency" invece di far girare il backend con valori vuoti. Il lock distribuito
-// segue la stessa regola dello store: lo wira batch.Module a partire da cfg.Lock e dal backend
-// passato con WithLocker, e lo fornisce a root — l'applicazione non chiama più corelock.Module.
+// Cosa si wira lo dicono i `jobs:`. I job type sono della libreria, e quelli in uso decidono i
+// componenti (topology.wire): SingleTask, FeedTask e PurgeWorkItems se compaiono; per i
+// DistribuiteTask* il dispatcher in-process, o quello gRPC se `grpc.client.url` è valorizzato; il
+// worker pool gRPC se ci sono `workers:` e `grpc.server.port`. Un job type del cui componente
+// manca il backend (DistribuiteTaskByS3File senza s3feed, NotificationKafka senza kafkajob) ferma
+// l'avvio con "type non registrato".
 //
-// Gating: i componenti di WithModule e lo Scheduler girano sui scheduler modes; quelli di
-// WithWorkerModule sui worker modes. Lo store fa eccezione: è wirato sempre (serve a entrambi i lati).
-// È il core.Mode a runtime a decidere cosa viene effettivamente costruito.
+// Quali runner si costruiscono lo dice dove si eseguono i task (activeSet): solo quelli che un job
+// o un worker di QUESTO processo esegue. Un task nominato da un FeedTask, o consegnato via gRPC a un
+// worker remoto, non entra nel grafo con le sue dipendenze. I modes di runner.Register restano un
+// filtro in più, che può solo spegnere (vedi runner.Register).
 //
-// Ordine di registrazione: indifferente. I job type confluiscono nel value group batch_jobs
-// (scheduler.ProvideJob) e newScheduler li consuma dal gruppo, quindi fx risolve tutti i
-// contributori prima di costruire lo Scheduler a prescindere dall'ordine di registrazione.
-// (In precedenza lo Scheduler doveva essere registrato per ultimo perché newScheduler leggeva
-// la mappa globale scheduler.Jobs al momento della costruzione.)
+// Config: batch fornisce a fx i sotto-config della Config unificata via core.Supply, SOLO se
+// valorizzati — un componente attivo che ne richieda uno non impostato fa fallire fx con un chiaro
+// "missing dependency" invece di girare con valori vuoti. Il lock distribuito lo wira batch da
+// cfg.Lock e dal backend di WithLocker, e lo fornisce a root: l'app non chiama corelock.Module.
+//
+// Gating: Scheduler, job type, dispatcher e backend di WithModule girano sui scheduler modes, il
+// worker pool sui worker modes. Store e lock sono wirati sempre (servono a entrambi i lati).
+//
+// Ordine di registrazione: indifferente. I job type confluiscono nel value group batch_jobs, che
+// newScheduler consuma per intero.
 //
 // Registrazione dei runner: si passa la funzione register, come in corekafka.Module — dentro, le
 // runner.Register[T] (e runner.RegisterFile[T] per i runner su file) vedono la config e istanziano
-// un runner per ogni task attivo, con le sue properties (sezione `tasks:`, obbligatoria). È l'UNICA
-// forma di registrazione, uguale per ogni famiglia di job e per le due sponde del dispatch gRPC:
-// runner.Provide/ProvideFile e grpchandler.Provide — costruttori forniti a mano al value group, che
-// saltavano `tasks:` e potevano stare in un init() — sono state rimosse. register è nil solo per
-// un'app che non registra task runner; registrare fuori da questa finestra fa panicare, perché lì la
-// sezione `tasks:` non è nota.
+// un runner per ogni task eseguito qui, con le sue properties (sezione `tasks:`, obbligatoria).
+// register è nil solo per un'app che non registra task runner; registrare fuori da questa finestra
+// fa panicare, perché lì la sezione `tasks:` non è nota.
 //
 // Resta a carico dell'app la fornitura del driver DB (coremongo.Module / coresql.Module).
 func Module(cfg *Config, register func(), opts ...Option) {
@@ -195,10 +265,17 @@ func Module(cfg *Config, register func(), opts ...Option) {
 	}
 	sched := o.schedulerModes
 	work := o.workerModes
+	topo := newTopology(cfg)
+	// Un worker pool senza server gRPC non riceverebbe mai nulla: i `workers:` sono serviti solo dal
+	// worker pool gRPC. Fermato solo dove i worker girano, perché lo stesso YAML alimenta anche lo
+	// scheduler, che i `workers:` non li legge.
+	if len(cfg.WorkersConfig) > 0 && cfg.Grpc.Server.Port == 0 && core.IsMode(work...) {
+		panic("batch.Module: la sezione `workers:` richiede `grpc.server.port` — il worker pool riceve i task via gRPC")
+	}
 
 	// Registrazione dei task runner con la config già nota (gemello di corekafka.Module): dentro
-	// register() le Register/RegisterRunner vedono la sezione `tasks:` e forniscono a fx una istanza
-	// per ogni task effettivamente referenziato da jobs:/workers:, con le sue properties. Fatto fuori
+	// register() le Register/RegisterFile vedono la sezione `tasks:` e forniscono a fx una istanza
+	// per ogni task eseguito in questo processo, con le sue properties. Fatto fuori
 	// dallo scope core.Module("batch") perché i runner sono sempre stati forniti a root e il value
 	// group aggrega comunque root + modulo. register nil solo se l'app non registra task runner:
 	// registrare fuori da questa finestra (es. in un init()) è un errore, perché lì la sezione
@@ -210,7 +287,7 @@ func Module(cfg *Config, register func(), opts ...Option) {
 	// mode che il batch lo eseguono davvero, non un processo API che del sottosistema usa al più
 	// lo store (che resta wirato sempre, vedi sotto).
 	if register != nil && batchActive(sched, work) {
-		task.Apply(register, ActiveSet(cfg))
+		taskreg.Apply(register, activeSet(cfg, topo, sched, work))
 	}
 
 	// store.IData + store.IWorkItemStore: consumati sia lato scheduler che lato worker, quindi
@@ -239,7 +316,8 @@ func Module(cfg *Config, register func(), opts ...Option) {
 	// Tutte le altre registrazioni del sottosistema confluiscono in un core.ModuleClosed("batch"):
 	// batch consuma i seam dell'app (gli ITaskRunner) e non le espone nulla in cambio, quindi
 	// config dei backend, dispatcher, feed, query store, worker pool e *Scheduler sono privati al
-	// modulo (lo store e il Locker no: sono registrati a root, vedi sopra). I runner restano forniti a root: il value group
+	// modulo (lo store e il Locker no: sono registrati a root, vedi sopra). I runner restano
+	// forniti a root: il value group
 	// batch_runners li porta dentro (root → discendenti), e batch_jobs aggrega come prima. Il
 	// mode-gating resta per-registrazione dentro ogni core.Provide/Supply.
 	core.ModuleClosed("batch", func() {
@@ -259,14 +337,11 @@ func Module(cfg *Config, register func(), opts ...Option) {
 			core.Supply(cfg.WorkersConfig, work...)
 		}
 
-		// Componenti lato scheduler (dispatcher, feed, job Kafka, query store): gate-ati sched.
+		// Componenti che la config usa (job type, dispatcher, worker pool), poi i backend pesanti
+		// passati dall'app: gate-ati sched, tranne il worker pool (work).
+		topo.wire(sched, work)
 		for _, m := range o.modules {
 			m(sched...)
-		}
-
-		// Componenti lato worker (worker pool gRPC): gate-ati work.
-		for _, m := range o.workerModules {
-			m(work...)
 		}
 
 		// Scheduler: i job confluiscono nel value group batch_jobs, quindi l'ordine di

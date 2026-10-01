@@ -1,111 +1,13 @@
 package runner
 
 import (
-	"context"
 	"strings"
 	"testing"
-	"time"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/taskreg"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
 )
-
-// recordingStore registra quale Mark* è stato invocato. L'interfaccia è EMBEDDATA e nil: ogni metodo
-// non sovrascritto panica se qualcuno lo chiama, che è esattamente ciò che vogliamo sapere.
-type recordingStore struct {
-	store.IWorkItemStore
-	done    bool
-	failed  bool
-	pending bool
-	reason  string
-	after   time.Duration
-}
-
-func (s *recordingStore) MarkDone(context.Context, []string, string) *core.Error {
-	s.done = true
-	return nil
-}
-
-func (s *recordingStore) MarkFailed(_ context.Context, _, _, reason string) *core.Error {
-	s.failed, s.reason = true, reason
-	return nil
-}
-
-func (s *recordingStore) MarkPending(_ context.Context, _, _ string, after time.Duration) *core.Error {
-	s.pending, s.after = true, after
-	return nil
-}
-
-// retryRunner chiede sempre un ritentativo: è il solo esito su cui il tetto ha effetto.
-type retryRunner struct{}
-
-func (retryRunner) Run(context.Context, *store.WorkItem) error { return store.Retry(time.Minute) }
-
-func itemAtRetry(n int) *store.WorkItem {
-	return &store.WorkItem{Id: "id-1", LockToken: "tok", TaskName: "import-in", Retry: n}
-}
-
-func runWith(t *testing.T, tr *TaskRunner, item *store.WorkItem) *recordingStore {
-	t.Helper()
-	items := &recordingStore{}
-	_ = NewMux([]*TaskRunner{tr}).Run(context.Background(), item, items)
-	return items
-}
-
-// Il tetto configurato in `tasks[].max-retry` deve arrivare fino a store.ApplyResult. È il giro che
-// NON funzionava: task.Instances ricostruiva la Config senza MaxRetry, quindi ogni task ritentava
-// all'infinito qualunque cosa dicesse lo YAML, e nessun test copriva il percorso.
-func TestMaxRetry_ArrivaFinoAdApplyResult(t *testing.T) {
-	tr := New("import-in", retryRunner{}).WithMaxRetry(3)
-
-	// Tentativi già consumati < tetto: si ritenta.
-	if items := runWith(t, tr, itemAtRetry(2)); !items.pending || items.failed {
-		t.Fatalf("atteso MarkPending sotto il tetto, ottenuto pending=%v failed=%v", items.pending, items.failed)
-	}
-
-	// Raggiunto il tetto: l'item è esaurito, non si ritenta più.
-	items := runWith(t, tr, itemAtRetry(3))
-	if !items.failed || items.pending {
-		t.Fatalf("atteso MarkFailed al tetto, ottenuto pending=%v failed=%v", items.pending, items.failed)
-	}
-	if !strings.Contains(items.reason, "3") {
-		t.Fatalf("il motivo deve nominare il tetto raggiunto, ottenuto %q", items.reason)
-	}
-}
-
-// L'assenza del campo vale illimitato, che è la condotta storica: lo zero value di un int è 0, cioè
-// "nessun ritentativo", e come default silenzioso sarebbe il peggiore possibile.
-func TestMaxRetry_AssenzaValeIllimitato(t *testing.T) {
-	tr := New("import-in", retryRunner{})
-	if got := tr.ResolveMaxRetry(); got != task.MaxRetryUnlimited {
-		t.Fatalf("atteso %d, ottenuto %d", task.MaxRetryUnlimited, got)
-	}
-	if items := runWith(t, tr, itemAtRetry(99)); !items.pending || items.failed {
-		t.Fatalf("senza tetto si ritenta sempre, ottenuto pending=%v failed=%v", items.pending, items.failed)
-	}
-
-	var nilRunner *TaskRunner
-	if got := nilRunner.ResolveMaxRetry(); got != task.MaxRetryUnlimited {
-		t.Fatalf("receiver nil: atteso %d, ottenuto %d", task.MaxRetryUnlimited, got)
-	}
-}
-
-// Stessa semantica sul contratto dei file runner: senza il campo, `max-retry` valeva per Register e
-// non per RegisterFile — un knob che vale a metà è peggio di un knob che non vale.
-func TestFileTaskRunner_PortaIlTetto(t *testing.T) {
-	fr := NewFile("s3-in", nil)
-	if got := fr.ResolveMaxRetry(); got != task.MaxRetryUnlimited {
-		t.Fatalf("assenza: atteso %d, ottenuto %d", task.MaxRetryUnlimited, got)
-	}
-	if got := fr.WithMaxRetry(5).ResolveMaxRetry(); got != 5 {
-		t.Fatalf("atteso 5, ottenuto %d", got)
-	}
-	var nilFile *FileTaskRunner
-	if got := nilFile.ResolveMaxRetry(); got != task.MaxRetryUnlimited {
-		t.Fatalf("receiver nil: atteso %d, ottenuto %d", task.MaxRetryUnlimited, got)
-	}
-}
 
 func withMode(t *testing.T, mode string) {
 	t.Helper()
@@ -114,37 +16,61 @@ func withMode(t *testing.T, mode string) {
 	t.Cleanup(func() { core.Mode = prev })
 }
 
-func declared() task.ActiveSet {
-	return task.ActiveSet{
+func declared() taskreg.ActiveSet {
+	return taskreg.ActiveSet{
 		Tasks:      []task.Config{{Name: "import-in", Type: "IMPORT"}},
 		Referenced: []string{"import-in"},
+		Executed:   []string{"import-in"},
 	}
 }
 
-// Il gate per-task: senza modes il comportamento è quello storico (attivo ovunque); con modes solo
-// nei mode indicati.
-func TestActiveInstances_GatePerMode(t *testing.T) {
+// Il gate per-task è un filtro in AND sulla config: senza modes, o col MODE fra quelli indicati,
+// il task eseguito qui viene istanziato.
+func TestActiveInstances_ModesAmmettono(t *testing.T) {
 	withMode(t, "WORKER")
 
-	var senzaModes, modeGiusto, modeSbagliato []task.Config
-	task.Apply(func() {
+	var senzaModes, modeGiusto []task.Config
+	taskreg.Apply(func() {
 		senzaModes = activeInstances("IMPORT", nil)
 		modeGiusto = activeInstances("IMPORT", []string{"WORKER"})
-		modeSbagliato = activeInstances("IMPORT", []string{"SCHEDULER"})
 	}, declared())
 
-	if len(senzaModes) != 1 {
-		t.Fatalf("senza modes il task è attivo in ogni mode, ottenuto %d istanze", len(senzaModes))
-	}
-	if len(modeGiusto) != 1 {
-		t.Fatalf("mode corrispondente: attesa 1 istanza, ottenuto %d", len(modeGiusto))
-	}
-	if len(modeSbagliato) != 0 {
-		t.Fatalf("mode non corrispondente: attese 0 istanze, ottenuto %d", len(modeSbagliato))
+	if len(senzaModes) != 1 || len(modeGiusto) != 1 {
+		t.Fatalf("attesa 1 istanza in entrambi i casi, ottenuto %d e %d", len(senzaModes), len(modeGiusto))
 	}
 }
 
-// L'ORDINE è l'invariante: task.Instances va chiamata SEMPRE, anche quando il mode esclude il task,
+// I modes non accendono ciò che la config non esegue qui.
+func TestActiveInstances_ModesNonAccendono(t *testing.T) {
+	withMode(t, "WORKER")
+	nonEseguito := declared()
+	nonEseguito.Executed = nil
+	taskreg.Apply(func() {
+		if got := activeInstances("IMPORT", []string{"WORKER"}); len(got) != 0 {
+			t.Fatalf("task non eseguito qui: attese 0 istanze, ottenuto %d", len(got))
+		}
+	}, nonEseguito)
+}
+
+// Spegnere coi modes un task che un job o un worker di questo processo esegue è una contraddizione:
+// ogni item fallirebbe a runtime, quindi l'avvio si ferma nominando task e modes.
+func TestActiveInstances_ModesCheSpengonoUnTaskEseguitoQui(t *testing.T) {
+	withMode(t, "WORKER")
+	var msg string
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				msg, _ = r.(string)
+			}
+		}()
+		taskreg.Apply(func() { activeInstances("IMPORT", []string{"SCHEDULER"}) }, declared())
+	}()
+	if !strings.Contains(msg, "import-in") || !strings.Contains(msg, "SCHEDULER") || !strings.Contains(msg, "WORKER") {
+		t.Fatalf("atteso un errore d'avvio che nomini task, modes e MODE corrente, ottenuto %q", msg)
+	}
+}
+
+// L'ORDINE è l'invariante: taskreg.Instances va chiamata SEMPRE, anche quando il mode esclude il task,
 // perché è lei ad alimentare la contabilità di task.check. Un type non dichiarato in `tasks:` deve
 // quindi far fallire l'avvio anche se il mode lo esclude — altrimenti il gate mascherebbe un errore
 // di configurazione.
@@ -160,38 +86,9 @@ func TestActiveInstances_InstancesChiamataAncheQuandoIlModeEsclude(t *testing.T)
 				}
 			}
 		}()
-		task.Apply(func() { activeInstances("MAI_DICHIARATO", []string{"SCHEDULER"}) }, declared())
+		taskreg.Apply(func() { activeInstances("MAI_DICHIARATO", []string{"SCHEDULER"}) }, declared())
 	}()
 	if !strings.Contains(msg, "non dichiarati") {
 		t.Fatalf("atteso il fail-fast sui type non dichiarati, ottenuto %q", msg)
-	}
-}
-
-// Il caso opposto: un type DICHIARATO ed escluso dal mode non è un errore di configurazione, è solo
-// un runner che questo processo non istanzia.
-func TestActiveInstances_TypeDichiaratoEsclusoDalModeNonEUnErrore(t *testing.T) {
-	withMode(t, "WORKER")
-	task.Apply(func() {
-		if got := activeInstances("IMPORT", []string{"SCHEDULER"}); len(got) != 0 {
-			t.Fatalf("attese 0 istanze, ottenuto %d", len(got))
-		}
-	}, declared())
-}
-
-// neverRunner fallisce il test se viene eseguito.
-type neverRunner struct{ t *testing.T }
-
-func (n neverRunner) Run(context.Context, *store.WorkItem) error {
-	n.t.Error("il runner non doveva essere eseguito: l'item aveva già esaurito i ritentativi")
-	return nil
-}
-
-// Un orfano recuperato oltre il tetto (il runner di prima è morto senza ritornare, e RecoverOrphans
-// ha incrementato il contatore) va in FAILED senza rieseguire il runner: prima il tetto si
-// applicava solo al ritorno del runner, e un runner che fa morire il processo girava per sempre.
-func TestMaxRetry_OrfanoOltreIlTettoNonRieseguito(t *testing.T) {
-	items := runWith(t, New("import-in", neverRunner{t}).WithMaxRetry(3), itemAtRetry(4))
-	if !items.failed || items.pending || items.done {
-		t.Fatalf("atteso MarkFailed senza esecuzione, ottenuto done=%v pending=%v failed=%v", items.done, items.pending, items.failed)
 	}
 }

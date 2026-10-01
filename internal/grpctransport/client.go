@@ -10,7 +10,7 @@ import (
 	"time"
 
 	batchgrpc "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/grpc"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/grpc/proto"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/grpcproto"
 
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"

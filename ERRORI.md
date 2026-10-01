@@ -40,9 +40,9 @@ da **"l'ho fatto e non riesco a scriverne l'esito"**: nel secondo caso il WorkIt
 
 | Codice | HTTP | Costante | Origine | Significato |
 |---|---|---|---|---|
-| `BATCH-QUERY` | 500 | `errs.CodeQuery` | `scheduler/distributedjob/mongostore/query_data.go:62`, `sqlstore/query_data.go:85` | query di feed fallita |
+| `BATCH-QUERY` | 500 | `errs.CodeQuery` | `internal/querystore/mongostore`, `internal/querystore/sqlstore` | query di feed fallita |
 | `BATCH-QUERY-CUR` | 500 | `errs.CodeQueryCur` | `mongostore/query_data.go:89` | lettura del cursore del feed fallita |
-| `BATCH-QUERY-IDENT` | 500 | `errs.CodeQueryIdent` | `sqlstore/query_data.go:29,34` | nome di tabella/colonna che non è un identificatore SQL valido. È il **guard anti SQL-injection** sui pezzi di query che arrivano dalla config: nessun escape, si rifiuta |
+| `BATCH-QUERY-IDENT` | 500 | `errs.CodeQueryIdent` | `internal/querystore/sqlstore` | nome di tabella/colonna che non è un identificatore SQL valido. È il **guard anti SQL-injection** sui pezzi di query che arrivano dalla config: nessun escape, si rifiuta |
 
 ### Producer Kafka
 
@@ -53,15 +53,19 @@ go-core-kafka (`corekafka.IProducer`), quindi gli errori di produzione arrivano 
 
 Restano di questa libreria gli errori del **lifecycle** dell'item: un payload che non si riesce a
 tradurre in record Kafka non produce un `ApplicationError` ma un `MarkFailed` di quel singolo item
-(`scheduler/kafkajob/notification.go`), e un errore di produzione rimette i claimati in `PENDING`.
+(`internal/kafkajob`), e un errore di produzione rimette i claimati in `PENDING`.
 
 ### Job
 
 | Codice | HTTP | Costante | Origine | Significato |
 |---|---|---|---|---|
-| `BATCH-JOB-PROPS` | 500 | `errs.CodeJobProperties` | `scheduler.Props`, per conto di `kafkajob` (`destination`, `object`, `topic`, `limit`), `distributedjob` (`task`, `limit`), `simplejob` (`task`), `feedjob` (`task`, `objectId`), `purgejob` (`status`, `older-than`, `limit`) | property infrastrutturale mancante o non valida in `jobs[].properties`. Il messaggio nomina job, job type, property e il motivo: `job "import" (type "DistribuiteTask"): property "task" mancante: non si sa quale task eseguire`. Emesso alla COSTRUZIONE del job, non al primo tick. Prima `simplejob` emetteva un `fmt.Errorf` senza codice |
+| `BATCH-JOB-PROPS` | 500 | `errs.CodeJobProperties` | `internal/scheduler.Props`, per conto di `kafkajob` (`destination`, `object`, `topic`, `limit`), `distributedjob` (`task`, `limit`), `simplejob` (`task`), `feedjob` (`task`, `objectId`), `purgejob` (`status`, `older-than`, `limit`) | property infrastrutturale mancante o non valida in `jobs[].properties`. Il messaggio nomina job, job type, property e il motivo: `job "import" (type "DistribuiteTask"): property "task" mancante: non si sa quale task eseguire`. Emesso alla COSTRUZIONE del job, non al primo tick. Prima `simplejob` emetteva un `fmt.Errorf` senza codice |
 
-**Quando si manifesta.** La validazione avviene alla **costruzione** del job, non dentro il tick:
+**Quando si manifesta.** La validazione avviene alla **costruzione** del job, non dentro il tick.
+Per `SingleTask` e `DistribuiteTask*` è un **errore d'avvio** (`JobRegistration.Check` di
+`internal/scheduler`, chiamata dallo scheduler prima di costruire il job), limitato alle property
+(`task`, `limit`). Che un task eseguito in questo processo abbia un runner lo verifica prima ancora
+`batch.Module` al wiring (sezione 4). Per gli altri job type
 l'errore compare nei log di avvio (`il job fallirà a ogni tick`) ed è poi restituito da ogni
 esecuzione. Prima `distributedjob` e `kafkajob` verificavano le loro property dentro il tick,
 quindi un refuso in YAML non si vedeva all'avvio e si presentava come un errore di runtime.
@@ -104,16 +108,16 @@ Sentinelle correlate:
 | `store.ErrHandled` | `store/errors.go:12` | vedi tabella sopra |
 | `store.RetryError` | `store/errors.go:21` | guasto transitorio; `Unwrap()` espone la `Cause` |
 | `s3client.ErrObjectNotFound` | `internal/s3client/service.go:23` | oggetto S3 assente nel feed da file |
-| `lock.ErrNotAcquired` / `lock.ErrLockLost` | `go-core-app/lock`, via `scheduler/gocronlock` | un'altra replica tiene il lock del tick: gocron **salta l'esecuzione**. È dispatch-dedup, non correttezza — quella la garantisce il claiming sul DB |
+| `lock.ErrNotAcquired` / `lock.ErrLockLost` | `go-core-app/lock`, via `internal/scheduler/gocronlock` | un'altra replica tiene il lock del tick: gocron **salta l'esecuzione**. È dispatch-dedup, non correttezza — quella la garantisce il claiming sul DB |
 
 ## 3. Errori di runtime senza codice
 
 | Messaggio | Origine | Quando |
 |---|---|---|
-| `execution type not found: <TaskName>` | `worker/workers.go` | il worker pool ha ricevuto un WorkItem il cui `TaskName` non corrisponde a nessun runner registrato → `OutcomeFailed` → `MarkFailed` |
-| `simplejob: job %q: nessun task %q fra le istanze registrate` | `scheduler/simplejob/simplejob.go` | il job non trova il runner per il task nominato da `properties.task` |
-| `localdispatcher: max concurrency reached (N)` | `scheduler/distributedjob/localdispatcher/local.go` | il cap di concorrenza in-process è saturo. **Non è un errore dell'item**: il chiamante lo rilascia con `Release` (nessun ritentativo consumato) e il tick successivo lo riprende. Il cap è derivato dalla somma dei `limit` dei job attivi |
-| `no runner registered for task name %q` | `runner/runner.go` | il `TaskName` dell'item non corrisponde a nessun runner registrato in questo processo. L'item viene comunque finalizzato con `MarkFailed`, così non entra in un orphan-loop |
+| `execution type not found: <TaskName>` | `internal/worker/workers.go` | il worker pool ha ricevuto un WorkItem il cui `TaskName` non corrisponde a nessun runner registrato → `OutcomeFailed` → `MarkFailed` |
+| `job %q (type "SingleTask"): nessun runner per il task %q in questo processo` | `internal/simplejob/simplejob.go` | il job non trova il runner per il task nominato da `properties.task`. In pratica non raggiungibile dal wiring di `batch.Module`, che ferma prima l'avvio (sezione 4) |
+| `localdispatcher: max concurrency reached (N)` | `internal/localdispatcher/local.go` | il cap di concorrenza in-process è saturo. **Non è un errore dell'item**: il chiamante lo rilascia con `Release` (nessun ritentativo consumato) e il tick successivo lo riprende. Il cap è derivato dalla somma dei `limit` dei job attivi |
+| `no runner registered for task name %q` | `internal/mux` | il `TaskName` dell'item non corrisponde a nessun runner registrato in questo processo. L'item viene comunque finalizzato con `MarkFailed`, così non entra in un orphan-loop. Un task che un job o un pool di questo processo esegue senza runner ferma già l'avvio (sezione 4): a runtime resta raggiungibile solo da un item accodato con un `TaskName` che nessun job di questo processo nomina |
 
 ## 4. Fail-fast all'avvio (panic — l'app non parte)
 
@@ -123,9 +127,11 @@ Errori di **configurazione o di wiring**, deliberatamente non recuperabili:
 |---|---|---|
 | `batch.Module: WithStore è obbligatorio` | `module.go` | manca il backend dello store (`storemongo.Module` / `storesql.Module`) |
 | `batch.Module: WithLocker è obbligatorio` | `module.go` | manca il backend del lock distribuito di go-core-locker (`mongostore` / `sqlstore` / `redisstore`, o `memstore` a replica singola). Senza, N repliche eseguono lo stesso tick cron insieme |
-| `batch: task <type> registrato fuori dalla funzione passata a batch.Module` | `task/task.go:108` | `runner.Register`/`runner.RegisterFile` in un `init()`: lì la sezione `tasks:` non è ancora nota |
-| `batch: la sezione tasks: richiede un name su ogni voce` | `task/task.go:167` | voce senza `name`. Il nome è la **chiave di routing** (`WorkItem.TaskName`) e non ha fallback sul `type` |
-| `batch: <problemi>` | `task/task.go` | riferimenti incoerenti: `jobs[].properties.task` o `workers[].tasks` che nominano un task non dichiarato, task type registrato senza voce in `tasks:` |
+| `batch: task <type> registrato fuori dalla funzione passata a batch.Module` | `internal/taskreg` (`Instances`) | `runner.Register`/`runner.RegisterFile` in un `init()`: lì la sezione `tasks:` non è ancora nota |
+| `batch: la sezione tasks: richiede un name su ogni voce` | `internal/taskreg` (`checkNames`) | voce senza `name`. Il nome è la **chiave di routing** (`WorkItem.TaskName`) e non ha fallback sul `type` |
+| `batch: <problemi>` | `internal/taskreg` (`check`) | riferimenti incoerenti: `jobs[].properties.task` o `workers[].tasks` che nominano un task non dichiarato, task type registrato senza voce in `tasks:`, task **eseguito in questo processo** (da un `SingleTask`, da un `DistribuiteTask*` in-process o da un pool) il cui type nessun runner registra in questo binario |
+| `batch: i task <nomi> (type %q) sono eseguiti in questo processo … ma runner.Register li limita ai MODE …` | `runner/runner.go` (`activeInstances`) | i modes di `runner.Register` spengono un task che la config fa eseguire qui: i modes sono un filtro che può solo spegnere, e spegnere ciò che un job o un pool di qui esegue farebbe fallire ogni item |
+| `batch.Module: la sezione workers: richiede grpc.server.port` | `module.go` | in un worker mode, `workers:` senza server gRPC: il pool riceve i task solo via gRPC |
 | `batch.Module: task-log %q non valido` | `module.go`, `store.ParseTaskLogLevel` | `batch.task-log` diverso da `all`, `errors`, `off`. Un valore non previsto è un errore e non un ripiego silenzioso su `all`: indovinare male significherebbe scrivere (o non scrivere) dati senza che nulla lo dica |
 
 Il fail-fast è **gate-ato sui modes**: in un processo `MODE=API` né `register` né la
