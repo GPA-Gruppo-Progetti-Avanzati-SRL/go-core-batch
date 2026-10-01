@@ -42,6 +42,7 @@ package feedjob
 
 import (
 	"context"
+	pub "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"strings"
 	"time"
 	"uuid"
@@ -55,7 +56,7 @@ import (
 )
 
 // JobType è il `type` da scrivere nella voce di `jobs:`.
-const JobType = "FeedTask"
+const JobType = pub.JobTypeFeedTask
 
 // Properties del job. Sono INFRASTRUTTURALI — le legge il framework, non il runner — come
 // quelle di ogni altro job type.
@@ -66,9 +67,9 @@ const JobType = "FeedTask"
 const (
 	// PropObjectId è il WorkItem.ObjectId: identifica COSA accodare ed è la chiave su cui
 	// l'indice unico parziale impedisce il duplicato.
-	PropObjectId = "objectId"
+	PropObjectId = pub.PropObjectId
 	// PropPayload è il payload applicativo del work item, facoltativo. Copiato così com'è.
-	PropPayload = "payload"
+	PropPayload = pub.PropPayload
 )
 
 // Register costruisce la JobRegistration del job FeedTask. È un costruttore fx: il risultato

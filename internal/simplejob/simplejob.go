@@ -45,6 +45,7 @@ package simplejob
 
 import (
 	"context"
+	pub "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"time"
 
 	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
@@ -59,7 +60,7 @@ import (
 
 // JobType è il `type` da scrivere nella voce di `jobs:`. È un JOB type, non un task type: quale
 // task eseguire lo dice `properties.task`.
-const JobType = "SingleTask"
+const JobType = pub.JobTypeSingleTask
 
 // PropTask e PropLimit sono scheduler.PropTask / scheduler.PropLimit: sono le stesse chiavi dello
 // stesso YAML che leggono distributedjob e feedjob.

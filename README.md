@@ -91,6 +91,16 @@ separato **solo** perché porta una dipendenza pesante (go-core-kafka, mongo-dri
 Le implementazioni stanno in `internal/kafkajob`, `internal/querystore/{mongostore,sqlstore}` e
 `internal/s3feed`; gli import path dei gusci sono quelli di sempre.
 
+**Il vocabolario del YAML è pubblico** (`scheduler/definitions.go`): i `type` dei job della
+libreria (`scheduler.JobTypeSingleTask`, `JobTypeDistribuiteTask*`, `JobTypeFeedTask`,
+`JobTypePurgeWorkItems`, `JobTypeNotificationKafka`) e le chiavi delle loro `properties`
+(`PropTask`, `PropLimit`, `PropBacklogMetrics`, `PropObjectId`, `PropPayload`, `PropStatus`,
+`PropOlderThan`, `PropTaskLogs`, `PropStream`, `PropTopic`, `PropMaxRetry`). Non sono macchina
+dei job ma il contratto della config: un'app che legge i propri `jobs:` (per esempio per sapere
+quali definizioni accoda un `FeedTask`) confronta questi nomi invece di riscriverne le stringhe,
+e la macchina in `internal/` li prende da qui, quindi la fonte è una e un rename rompe la
+compilazione invece di lasciare una stringa che non corrisponde più a nulla.
+
 Un job type in config il cui backend non è passato (`DistribuiteTaskByS3File` senza `s3feed`,
 `NotificationKafka` senza `kafkajob`) ferma l'avvio con `type ... non registrato`; un query store
 mancante con un `missing type` di fx.
@@ -171,7 +181,7 @@ un altro binario.
 > `InApply` (→ `internal/taskreg`), `s3feed.S3Feed`/`New`/`S3Payload` (→ `internal/s3feed`) e
 > `grpc/proto` (→ `internal/grpcproto`). Pubblici restano `batch`, `runner` (`Register`,
 > `RegisterFile`, `ITaskRunner`, `IFileRunner`), `store` (+ `mongostore`/`sqlstore`/`storetest`),
-> `task` (`Config`), `kafka`, `grpc`, `s3`, i `Config` di `scheduler` e `worker`, e i quattro gusci
+> `task` (`Config`), `kafka`, `grpc`, `s3`, i `Config` di `scheduler` e `worker`, il vocabolario YAML di `scheduler` (`JobType*`, `Prop*`), e i quattro gusci
 > della tabella dei backend. Chi sceglieva il dispatcher passando il Module ora lo sceglie con
 > `grpc.client.url`.
 
@@ -1428,9 +1438,10 @@ obbligatorio in un job, con default 100 in un altro e 1000 in un terzo. **I defa
 chiamante** — quelli sì che sono specifici — ma una property scritta e non convertibile è sempre un
 errore e non ricade mai sul default.
 
-Le chiavi comuni a più job type sono dichiarate una volta sola (`scheduler.PropTask`,
-`PropLimit`, `PropBacklogMetrics`); restano locali al proprio package quelle che un solo job type
-conosce (`older-than`, `task-logs`, `topic`, `stream`, `max-retry`, `objectId`, `payload`, …).
+Tutte le chiavi sono dichiarate una volta sola, nel vocabolario pubblico `scheduler/definitions.go`
+(`scheduler.PropTask`, `PropLimit`, `PropBacklogMetrics` comuni a più job type; `PropObjectId`,
+`PropPayload`, `PropStatus`, `PropOlderThan`, `PropTaskLogs`, `PropStream`, `PropTopic`,
+`PropMaxRetry` dei singoli job type), da cui le prendono i job in `internal/`.
 
 > Qui c'erano anche `destination` e `objectType` — la stessa colonna che `NotificationKafka`
 > chiamava `object` e `FeedTask` `objectType`, due nomi in YAML per un filtro che nessuno leggeva

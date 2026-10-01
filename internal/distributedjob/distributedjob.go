@@ -25,13 +25,14 @@ package distributedjob
 
 import (
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/scheduler"
+	pub "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 )
 
 const (
-	JobType         = "DistribuiteTask"
-	JobTypeByQuery  = "DistribuiteTaskByQuery"
-	JobTypeByS3File = "DistribuiteTaskByS3File"
+	JobType         = pub.JobTypeDistribuiteTask
+	JobTypeByQuery  = pub.JobTypeDistribuiteTaskByQuery
+	JobTypeByS3File = pub.JobTypeDistribuiteTaskByS3File
 )
 
 // Register builds the DistribuiteTask job registration.

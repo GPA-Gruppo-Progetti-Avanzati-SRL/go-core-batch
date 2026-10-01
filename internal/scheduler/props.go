@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"fmt"
+	pub "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"time"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
@@ -24,12 +25,12 @@ import (
 const (
 	// PropTask nomina l'istanza di task su cui il job lavora: una voce di `tasks:`. È anche il
 	// WorkItem.TaskName degli item che il job claima.
-	PropTask = "task"
+	PropTask = pub.PropTask
 	// PropLimit è il tetto al lavoro che un tick prende in carico.
-	PropLimit = "limit"
+	PropLimit = pub.PropLimit
 	// PropBacklogMetrics abilita le gauge di coda su un job claim-based. Di default sono spente:
 	// sono una query in più per tick, e la paga chi la vuole.
-	PropBacklogMetrics = "backlog-metrics"
+	PropBacklogMetrics = pub.PropBacklogMetrics
 )
 
 // Props legge le property infrastrutturali di un job applicando UNA regola — presente, non vuota,

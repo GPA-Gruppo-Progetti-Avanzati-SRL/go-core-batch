@@ -6,11 +6,12 @@ package kafkajob
 
 import (
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/scheduler"
+	pub "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-kafka/producer"
 )
 
-const jobType = "NotificationKafka"
+const jobType = pub.JobTypeNotificationKafka
 
 // register costruisce la JobRegistration del job NotificationKafka. Consuma il producer di
 // go-core-kafka (il seam producer.IProducer, wirato dall'app) e lo store.

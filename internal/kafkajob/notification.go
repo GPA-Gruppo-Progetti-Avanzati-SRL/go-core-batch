@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	pub "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"time"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/batchmetrics"
@@ -37,11 +38,11 @@ const (
 	// per distinguere i flussi servivano due filtri in più (`destination` e `object`, spariti con
 	// questa property) e la deduplica finiva in un namespace unico — due flussi diversi sullo
 	// stesso objectId collidevano, e InsertIfNotActive scartava il secondo in silenzio.
-	propStream = "stream"
+	propStream = pub.PropStream
 	// propTopic è il topic di DEFAULT su cui pubblicare: vale per i record che non ne portano uno
 	// proprio (kafka.Message.Topic). È facoltativa, ma se manca ogni item deve nominare il suo,
 	// altrimenti quel singolo item è un payload inutilizzabile.
-	propTopic = "topic"
+	propTopic = pub.PropTopic
 	// propMaxRetry è il tetto ai ritentativi di un item, con la stessa convenzione di
 	// task.Config.MaxRetry: assente = illimitato, che è la condotta storica.
 	//
@@ -49,7 +50,7 @@ const (
 	// da sé — quindi WorkItem.Retry veniva incrementato (da MarkPending e da RecoverOrphans) e
 	// non letto da nessuno: una notifica irrecuperabile ritentava per sempre e occupava uno slot
 	// del `limit` a ogni tick, rubando capacità a quelle sane.
-	propMaxRetry = "max-retry"
+	propMaxRetry = pub.PropMaxRetry
 )
 
 type parametri struct {

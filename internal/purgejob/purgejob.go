@@ -34,6 +34,7 @@ package purgejob
 import (
 	"context"
 	"fmt"
+	pub "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"time"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/scheduler"
@@ -44,7 +45,7 @@ import (
 )
 
 // JobType è il `type` da scrivere nella voce di `jobs:`.
-const JobType = "PurgeWorkItems"
+const JobType = pub.JobTypePurgeWorkItems
 
 // Properties del job. Sono INFRASTRUTTURALI: le legge il framework.
 const (
@@ -53,12 +54,12 @@ const (
 	// (PENDING, IN_PROGRESS) è un errore di configurazione: cancellerebbe lavoro non ancora fatto — o
 	// in corso, e il suo esecutore non troverebbe più l'item da finalizzare — e l'indice della purge
 	// copre solo gli stati terminali, quindi la query scandirebbe la collection intera.
-	PropStatus = "status"
+	PropStatus = pub.PropStatus
 	// PropOlderThan è l'età minima (durata) oltre la quale un item è cancellabile, misurata
 	// sull'update_time. Obbligatoria.
-	PropOlderThan = "older-than"
+	PropOlderThan = pub.PropOlderThan
 	// PropTaskLogs, se true, cancella anche le righe di task_logs più vecchie di older-than.
-	PropTaskLogs = "task-logs"
+	PropTaskLogs = pub.PropTaskLogs
 )
 
 const defaultLimit = 1000
