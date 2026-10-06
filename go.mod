@@ -7,7 +7,7 @@ require (
 	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-kafka v0.0.0-20261001085819-6772d985c486
 	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-locker v0.0.0-20261001085823-7be1de08229e
 	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-mongo v0.0.20-0.20261001085807-dfd196d9ccf9
-	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-sql v0.0.2-0.20261001085812-19150dfd11af
+	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-sql v0.0.2-0.20261006122707-e9abb49fbc2b
 	github.com/GPA-Gruppo-Progetti-Avanzati-SRL/tpm-mongo-common v1.0.24-0.20260806095729-fb30bfd3074b
 	github.com/aws/aws-sdk-go-v2 v1.47.1
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.6
