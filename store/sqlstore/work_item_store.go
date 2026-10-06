@@ -342,7 +342,7 @@ func (d *workItemDataSQL) List(ctx context.Context, taskName, status string, pag
 		}
 	}
 	if offset >= 0 {
-		q = q.Offset(offset).Limit(paging.PageSize)
+		q = q.Offset(int64(offset)).Limit(int64(paging.PageSize))
 	}
 
 	var items []*store.WorkItem

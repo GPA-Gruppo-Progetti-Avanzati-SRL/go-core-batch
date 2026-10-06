@@ -72,7 +72,7 @@ func (q *queryDataSQL) GetIds(ctx context.Context, table, filter, sort string, l
 		query = query.OrderExpr("? "+dir, bun.Ident(c.Column))
 	}
 	if limit > 0 {
-		query = query.Limit(limit)
+		query = query.Limit(int64(limit))
 	}
 	var ids []string
 	if err := query.Scan(ctx, &ids); err != nil {
