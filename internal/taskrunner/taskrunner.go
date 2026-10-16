@@ -17,7 +17,7 @@ const Group = "batch_runners"
 
 // TaskRunner binds an ITaskRunner to the task NAME it handles — cioè al nome dell'istanza
 // dichiarata nella sezione `tasks:` (senza quella sezione il nome coincide col task type).
-// È il nome che viaggia in WorkItem.Type e che governa claiming e instradamento.
+// È il nome che viaggia in WorkItem.TaskName e che governa claiming e instradamento.
 type TaskRunner struct {
 	TaskName string
 	Runner   store.ITaskRunner

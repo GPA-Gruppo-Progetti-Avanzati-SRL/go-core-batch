@@ -30,7 +30,7 @@ type Config struct {
 	// considered orphaned and re-claimed by RecoverOrphans. Configurable per job.
 	LockTimeout time.Duration `mapstructure:"lock-timeout" validate:"gte=0"`
 	// Properties è la configurazione INFRASTRUTTURALE del job type (`task`, `limit`, `collection`,
-	// `topic`, `taskName`, …): la legge il framework, non l'applicazione. La configurazione
+	// `topic`, `stream`, …): la legge il framework, non l'applicazione. La configurazione
 	// applicativa del runner sta nella sezione `tasks:` (vedi package task).
 	//
 	// NB: viper abbassa le chiavi della config, quindi le letture passano dai getter

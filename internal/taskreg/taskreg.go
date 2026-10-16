@@ -114,7 +114,7 @@ func (a ActiveSet) executes(name string) bool {
 
 // checkNames pretende un `name` su ogni voce di `tasks:`. Il name è la chiave di instradamento —
 // lo referenziano i job (`properties.task`) e i worker pool (`workers[].tasks`), viaggia in
-// WorkItem.Type, ci filtra il claiming e ci instrada il mux.Runner — quindi una voce senza name non
+// WorkItem.TaskName, ci filtra il claiming e ci instrada il mux.Runner — quindi una voce senza name non
 // è raggiungibile da nessuno. Non c'è fallback sul type: prima c'era, e nascondeva la chiave di
 // routing rendendo invisibile il caso di due istanze dello stesso type. Girando prima di register()
 // l'errore arriva sulla config, non su un runner costruito a metà.
@@ -126,7 +126,7 @@ func checkNames(a ActiveSet) {
 		}
 	}
 	if len(anonymous) > 0 {
-		panic("batch: la sezione `tasks:` richiede un `name` su ogni voce (è la chiave referenziata da jobs:/workers: e usata come WorkItem.Type; scrivilo anche quando coincide col `type`). Voci senza name: " +
+		panic("batch: la sezione `tasks:` richiede un `name` su ogni voce (è la chiave referenziata da jobs:/workers: e usata come WorkItem.TaskName; scrivilo anche quando coincide col `type`). Voci senza name: " +
 			strings.Join(anonymous, ", "))
 	}
 }

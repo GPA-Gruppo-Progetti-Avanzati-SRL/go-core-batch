@@ -35,7 +35,7 @@ import "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
 // Config è una voce della sezione `tasks:`: un'istanza di task type, con la sua configurazione
 // applicativa. Le Properties sono mappate sui campi `prop:` della struct del runner (properties.BindProps).
 type Config struct {
-	// Name identifica l'istanza ed è ciò che job e worker referenziano; è anche il WorkItem.Type
+	// Name identifica l'istanza ed è ciò che job e worker referenziano; è anche il WorkItem.TaskName
 	// usato da claiming e instradamento. È OBBLIGATORIO e va scritto anche quando coincide col
 	// Type: è la chiave di routing, e due istanze dello stesso Type si distinguono solo per Name.
 	Name string `yaml:"name" mapstructure:"name" json:"name"`
