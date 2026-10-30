@@ -32,8 +32,9 @@ da **"l'ho fatto e non riesco a scriverne l'esito"**: nel secondo caso il WorkIt
 | `BATCH-DELETE` | 500 | `errs.CodeDelete` | `mongostore:291`, `sqlstore:244` |
 | `BATCH-GET` | 500 | `errs.CodeGet` | `mongostore:303` |
 | `BATCH-HASACTIVE` | 500 | `errs.CodeHasActive` | `mongostore:316`, `sqlstore:261` |
-| `BATCH-INSERT` | 500 | `errs.CodeInsert` | `mongostore:336`, `sqlstore:279` — `InsertIfNotActive` |
+| `BATCH-INSERT` | 500 | `errs.CodeInsert` | `mongostore`, `sqlstore` — `Insert` / `InsertIfNotActive` (su Oracle anche il fallimento di un INSERT che non sia la violazione di `uk_workitem_active`) |
 | `BATCH-LIST` | 500 | `errs.CodeList` | `sqlstore:293,318` |
+| `BATCH-SQL-DIALECT` | 500 | `errs.CodeDialect` | `store/sqlstore`, `store/oraclestore`, `scheduler/distributedjob/{sqlstore,oraclestore}` — costruttori e `EnsureIndexes` | lo store scelto non è quello del database: `sqlstore` è PostgreSQL, `oraclestore` è Oracle 19c+ (il feed `distributedjob/sqlstore` accetta anche gli altri dialetti di bun, non Oracle). Il messaggio nomina il package giusto. È un errore di **avvio**: prima uno store su MySQL/SQLite partiva e falliva al primo claim |
 | `NOT-FOUND` | 404 | — | `mongostore:301` — WorkItem inesistente, causa `mongo.ErrNoDocuments` |
 
 ### Feed by-query (distributedjob)

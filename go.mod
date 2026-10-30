@@ -18,7 +18,9 @@ require (
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
 	github.com/rs/zerolog v1.35.1
+	github.com/sijms/go-ora/v2 v2.9.0
 	github.com/uptrace/bun v1.3.0
+	github.com/uptrace/bun/dialect/oracledialect v1.3.0
 	github.com/uptrace/bun/dialect/pgdialect v1.3.0
 	github.com/uptrace/bun/driver/pgdriver v1.3.0
 	go.mongodb.org/mongo-driver/v2 v2.8.0

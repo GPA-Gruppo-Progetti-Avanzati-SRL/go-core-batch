@@ -39,13 +39,23 @@ func validateIdent(kind, s string, allowDot bool) *core.Error {
 	return nil
 }
 
+// Ident scrive un identificatore (tabella o colonna di sort) nella query. È la sola cosa che
+// cambia fra i database, e la sceglie il guscio pubblico: Quoted per PostgreSQL & co., Unquoted
+// per Oracle — così il guscio Postgres non porta il caso Oracle, e viceversa.
+type Ident func(name string) any
+
+// Quoted quota l'identificatore col dialetto (anche schema-qualified / parole riservate).
+func Quoted(name string) any { return bun.Ident(name) }
+
+// Unquoted lo scrive così com'è. Serve dove un nome quotato è case-sensitive e le tabelle hanno
+// nomi non quotati (Oracle: `my_table` quotato cercherebbe "my_table" e non troverebbe MY_TABLE).
+// Non apre a un'injection: validateIdent ha già ridotto il nome a un identificatore semplice.
+func Unquoted(name string) any { return bun.Safe(name) }
+
 // queryDataSQL implements distributedjob.IQueryStore against a SQL database.
 type queryDataSQL struct {
-	DB *bun.DB
-}
-
-func newQueryDataSQL(db *bun.DB) *queryDataSQL {
-	return &queryDataSQL{DB: db}
+	DB    *bun.DB
+	ident Ident
 }
 
 var _ distributedjob.IQueryStore = (*queryDataSQL)(nil)
@@ -54,8 +64,7 @@ func (q *queryDataSQL) GetIds(ctx context.Context, table, filter, sort string, l
 	if err := validateIdent("table", table, true); err != nil {
 		return nil, err
 	}
-	// bun.Ident quota correttamente l'identificatore (anche schema-qualified / parole riservate).
-	query := q.DB.NewSelect().TableExpr("?", bun.Ident(table)).ColumnExpr("id")
+	query := q.DB.NewSelect().TableExpr("?", q.ident(table)).ColumnExpr("id")
 	if filter != "" {
 		// filter è una clausola WHERE grezza: NON parametrizzabile qui, TRUSTED CONFIG ONLY
 		// (deve provenire dalle Properties del job, mai da input esterno). Vedi IQueryStore.
@@ -69,7 +78,7 @@ func (q *queryDataSQL) GetIds(ctx context.Context, table, filter, sort string, l
 		if c.Desc {
 			dir = "DESC"
 		}
-		query = query.OrderExpr("? "+dir, bun.Ident(c.Column))
+		query = query.OrderExpr("? "+dir, q.ident(c.Column))
 	}
 	if limit > 0 {
 		query = query.Limit(int64(limit))

@@ -27,6 +27,7 @@ const (
 	CodeHasActive   = "BATCH-HASACTIVE"    // HasActive fallita
 	CodeInsert      = "BATCH-INSERT"       // InsertIfNotActive fallita
 	CodeList        = "BATCH-LIST"         // List fallita
+	CodeDialect     = "BATCH-SQL-DIALECT"  // sqlstore su un dialetto SQL non supportato (né PostgreSQL né Oracle)
 
 	CodeQuery      = "BATCH-QUERY"       // query di feed fallita
 	CodeQueryCur   = "BATCH-QUERY-CUR"   // lettura del cursore del feed fallita

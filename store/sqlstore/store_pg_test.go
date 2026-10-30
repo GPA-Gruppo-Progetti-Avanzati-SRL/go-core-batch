@@ -16,8 +16,8 @@ import (
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store/storetest"
 )
 
-// Lo store è PostgreSQL-specifico (FOR UPDATE SKIP LOCKED, NULLS FIRST, gli indici parziali), quindi
-// la suite gira solo contro un Postgres vero: PG_URL, es.
+// Lo store PostgreSQL (CTE UPDATE … RETURNING, ON CONFLICT, gli indici parziali) si verifica solo
+// contro un Postgres vero: PG_URL, es.
 // postgres://postgres:pg@localhost:5432/batch?sslmode=disable. Senza, i test sono saltati.
 var pgService = sync.OnceValues(func() (*coresql.Service, error) {
 	var svc *coresql.Service
@@ -52,7 +52,11 @@ func newPgStore(t *testing.T) store.IWorkItemStore {
 	if _, err := svc.DB().ExecContext(context.Background(), "TRUNCATE work_items"); err != nil {
 		t.Fatalf("TRUNCATE: %v", err)
 	}
-	return newWorkItemDataSQL(svc)
+	st, err := newWorkItemStore(svc)
+	if err != nil {
+		t.Fatalf("newWorkItemStore: %v", err)
+	}
+	return st
 }
 
 func TestStore_Postgres(t *testing.T) {

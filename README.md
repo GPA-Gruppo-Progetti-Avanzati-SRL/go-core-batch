@@ -1156,6 +1156,63 @@ ordine, fencing dei `Mark*`, `Release` che non conta, recupero degli orfani, ded
 database vero: `PG_URL` (`postgres://…?sslmode=disable`) per `sqlstore`, `MONGO_URL` per
 `mongostore`. Senza le variabili i test sono saltati, come la conformance di go-core-locker.
 
+## Oracle (19c+)
+
+Lo store relazionale ha **un package per database**, e l'import dell'app è la scelta:
+`store/sqlstore` è PostgreSQL, `store/oraclestore` è Oracle dalla 19c (lo stesso vale per il feed
+`scheduler/distributedjob/{sqlstore,oraclestore}` e per il lock, `go-core-locker/{sqlstore,oraclestore}`).
+I due package non si importano a vicenda: le operazioni comuni stanno in `internal/sqlbackend`, i due
+dialetti in `internal/sqlbackend/{pgbackend,oraclebackend}`, quindi **un'app Postgres non compila il
+codice Oracle e viceversa** — lo verifica `store/isolation_test.go` sul grafo dei package. Passare lo
+store sbagliato per il database è un **errore di avvio** (`BATCH-SQL-DIALECT`, che nomina il package
+giusto): prima lo store partiva e falliva al primo claim. Il driver lo sceglie l'app (go-ora, puro Go,
+o godror) insieme al dialetto.
+
+```go
+import (
+    _ "github.com/sijms/go-ora/v2"
+    "github.com/uptrace/bun/dialect/oracledialect"
+    storeora "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store/oraclestore"
+    lockora  "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-locker/oraclestore"
+)
+
+coresql.Module(&svc.Sql, oracledialect.New())
+batch.Module(&svc.Batch, Register,
+    batch.WithStore(storeora.Module),
+    batch.WithLocker(lockora.Module))
+```
+
+Cosa cambia rispetto a PostgreSQL, ed è tutto del database:
+
+- **`oraclestore.EnsureIndexes` crea anche le tabelle.** Su Oracle `CreateTable` di bun non è usabile (emette
+  `IF NOT EXISTS`, che arriva con la 23ai, e il tipo `jsonb` del modello). Le colonne temporali sono
+  `TIMESTAMP WITH TIME ZONE`, il payload un `CLOB`, gli identificatori **minuscoli quotati**
+  (`"work_items"`, `"task_name"`) — cioè quelli che bun scrive dal modello. L'idempotenza è per
+  codice d'errore (`ORA-00955`, `ORA-01408`, `ORA-01430`). Una tabella creata a mano deve usare gli
+  stessi nomi quotati: `work_items` non quotato è `WORK_ITEMS`, e lo store non la troverebbe.
+- **Niente indici parziali.** `uk_workitem_active` è **function-based** (`CASE WHEN status IN
+  ('PENDING','IN_PROGRESS') THEN … END`: una chiave tutta NULL non entra nell'indice, quindi è
+  l'equivalente dell'unico parziale); gli altri sono composti pieni, con gli stessi nomi.
+- **Il claim è una transazione in tre passi** (`SELECT … FOR UPDATE SKIP LOCKED` letto dal cursore
+  fino a `limit` → `UPDATE` col token → rilettura per token), perché Oracle non ha l'`UPDATE …
+  RETURNING` multi-riga e non ammette `FETCH FIRST` insieme a `FOR UPDATE`. L'orologio è
+  `SYSTIMESTAMP`.
+- **`InsertIfNotActive` è un INSERT per item**: `ORA-00001` su `uk_workitem_active` è la deduplica.
+  N round-trip invece di uno.
+- **Work item e task log si scrivono con i bind del driver**, non col builder di bun: bun interpola
+  gli argomenti nel testo SQL, e un letterale Oracle oltre i 4000 byte fallisce (`ORA-01704`) — il
+  payload non avrebbe avuto un tetto ragionevole. Il motivo di `MarkFailed`, che passa ancora dal
+  builder, è troncato a 3000 byte; il testo intero resta in `task_logs`.
+
+La suite `storetest` gira anche su Oracle con `ORACLE_URL` (`oracle://user:pw@host:1521/SERVICE`),
+**una alla volta** con `PG_URL`: il fixture passa dal registry di go-core-app, che è uno per
+processo. Il database di prova deve essere una 19c o una 21c (`gvenzl/oracle-xe:21-slim`), non una
+23ai, che accetta sintassi che la 19c rifiuta.
+
+Il feed `DistribuiteTaskByQuery` su Oracle (`scheduler/distributedjob/oraclestore`) scrive tabella e colonne di sort **non quotate**
+(validate comunque da `validateIdent`): le tabelle di un feed sono di schemi che l'app non ha
+creato, coi nomi maiuscoli, e quotate non si troverebbero.
+
 ## Indici — obbligatori, e non creati da soli
 
 Il claim di **ogni job a ogni tick** è una query per `(task_name, status, next_run_at)` ordinata
@@ -1169,7 +1226,7 @@ verifiche di avvio che ne segnalano l'assenza — e prima erano quattro elenchi 
 confronto e il messaggio di warning sono anch'essi condivisi (`store.WarnMissingIndexes`): al
 backend resta il solo modo di sapere quali indici esistono (`Indexes().List` contro `pg_indexes`).
 
-`EnsureIndexes` (mongo e sql) li crea tutti:
+`EnsureIndexes` (mongo e sql) li crea tutti (su Oracle con le differenze dette sopra):
 
 | Indice | Serve a | Senza |
 |---|---|---|
