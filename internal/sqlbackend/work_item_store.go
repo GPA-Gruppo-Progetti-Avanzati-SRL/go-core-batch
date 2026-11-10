@@ -2,6 +2,8 @@ package sqlbackend
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"sync"
 	"time"
 
@@ -25,7 +27,7 @@ import (
 //
 // Gli identificatori delle query di questo file sono QUOTATI ("work_items", "status"): su
 // PostgreSQL quotato e non quotato coincidono, su Oracle no — bun quota ciò che scrive dal modello
-// (INSERT, GetById), e un nome non quotato diventerebbe maiuscolo e non troverebbe la colonna. Le
+// (INSERT), e un nome non quotato diventerebbe maiuscolo e non troverebbe la colonna. Le
 // query che differiscono fra i due database stanno nei Dialect (pgbackend, oraclebackend).
 
 // WorkItemStore implements store.IWorkItemStore using a SQL database via bun.
@@ -211,7 +213,18 @@ func (d *WorkItemStore) DeleteIfPending(ctx context.Context, id string) (bool, *
 }
 
 func (d *WorkItemStore) GetById(ctx context.Context, id string) (*store.WorkItem, *core.Error) {
-	return d.Sql.GetById[store.WorkItem](ctx, id)
+	// Non passa da coresql.GetById: quella scrive la colonna senza virgolette (WHERE id = ?), che
+	// su Oracle diventa ID e non trova la colonna "id" di una tabella a identificatori quotati
+	// (ORA-00904). Qui l'identificatore è quotato come nel resto del file.
+	var item store.WorkItem
+	err := d.DB.NewSelect().TableExpr(`"work_items"`).Where(`"id" = ?`, id).Scan(ctx, &item)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, errs.NotFound().WithCause(err)
+		}
+		return nil, errs.Tech(errs.CodeGet).WithCause(err)
+	}
+	return &item, nil
 }
 
 func (d *WorkItemStore) HasActive(ctx context.Context, taskName, objectId string) (bool, *core.Error) {
