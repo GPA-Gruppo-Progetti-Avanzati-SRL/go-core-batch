@@ -82,7 +82,7 @@ func TestS3Feed_Feed_FiltersAndLimits(t *testing.T) {
 
 	t.Run("unknown service returns error", func(t *testing.T) {
 		reg, _ := s3client.NewRegistry(nil) // empty registry
-		feed := newFeed(reg)
+		feed := newFeed(reg, nil)
 		props := properties.Properties{
 			"service": "nonexistent",
 			"path":    "inbox/",
@@ -93,6 +93,47 @@ func TestS3Feed_Feed_FiltersAndLimits(t *testing.T) {
 			t.Fatal("expected error for unknown service")
 		}
 	})
+}
+
+type fakeGate struct {
+	open   bool
+	err    error
+	task   string
+	listed int
+}
+
+func (g *fakeGate) Listed(_ context.Context, _ string, files int) error {
+	g.listed = files
+	return nil
+}
+
+func (g *fakeGate) Open(_ context.Context, taskName string) (bool, error) {
+	g.task = taskName
+	return g.open, g.err
+}
+
+// Un gate chiuso ferma il feed prima ancora di toccare S3 (il servizio inesistente non e' un errore);
+// un gate aperto lascia proseguire; un errore del gate e' l'esito del tick.
+func TestS3Feed_Feed_Gate(t *testing.T) {
+	reg, _ := s3client.NewRegistry(nil)
+	props := properties.Properties{"service": "nonexistent", "path": "in/", "pattern": "*"}
+
+	closed := &fakeGate{open: false}
+	items, err := newFeed(reg, closed).Feed(context.Background(), "CFLOW", props, 1)
+	if err != nil || len(items) != 0 {
+		t.Fatalf("gate chiuso: items=%d err=%v, want nessun item e nessun errore", len(items), err)
+	}
+	if closed.task != "CFLOW" {
+		t.Errorf("il gate ha ricevuto il task %q, want CFLOW", closed.task)
+	}
+
+	if _, err := newFeed(reg, &fakeGate{open: true}).Feed(context.Background(), "CFLOW", props, 1); err == nil {
+		t.Fatal("gate aperto: il feed deve proseguire e fallire sul servizio inesistente")
+	}
+
+	if _, err := newFeed(reg, &fakeGate{err: context.DeadlineExceeded}).Feed(context.Background(), "CFLOW", props, 1); err == nil {
+		t.Fatal("errore del gate: atteso un errore")
+	}
 }
 
 // Il payload del job S3 si decodifica con store.DecodePayload, che è il decodificatore di TUTTI

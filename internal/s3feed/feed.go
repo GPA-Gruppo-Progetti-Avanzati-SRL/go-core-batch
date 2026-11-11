@@ -20,14 +20,27 @@ type s3Payload struct {
 	DestPath string `json:"destPath" bson:"destPath"`
 }
 
-// s3Feed implements distributedjob.IFeedSource by listing objects in an S3 bucket.
-type s3Feed struct {
-	reg *s3client.Registry
+// Gate decide, a ogni tick, se il feed deve elencare i file del bucket. È facoltativo: senza un Gate
+// nel grafo fx il feed elenca sempre. Con un Gate che risponde false il tick non accoda nulla, ma i
+// work item già accodati continuano a essere reclamati ed eseguiti: il gate governa solo l'ingresso.
+// Serve a far partire l'elaborazione dei file solo quando un sistema esterno lo chiede.
+type Gate interface {
+	Open(ctx context.Context, taskName string) (bool, error)
+	// Listed è chiamato dopo ogni elenco del bucket andato a buon fine, con il numero di file che
+	// corrispondono al pattern (al più limit). Zero significa che non resta nulla da elaborare: è il
+	// segnale con cui chi apre il cancello lo richiude. Un errore diventa l'esito del tick.
+	Listed(ctx context.Context, taskName string, files int) error
 }
 
-// newFeed creates an s3Feed backed by the given registry.
-func newFeed(reg *s3client.Registry) *s3Feed {
-	return &s3Feed{reg: reg}
+// s3Feed implements distributedjob.IFeedSource by listing objects in an S3 bucket.
+type s3Feed struct {
+	reg  *s3client.Registry
+	gate Gate
+}
+
+// newFeed creates an s3Feed backed by the given registry. gate può essere nil.
+func newFeed(reg *s3client.Registry, gate Gate) *s3Feed {
+	return &s3Feed{reg: reg, gate: gate}
 }
 
 // Feed lists S3 objects matching the configured pattern and returns WorkItems.
@@ -42,6 +55,16 @@ func (f *s3Feed) Feed(ctx context.Context, taskName string, props properties.Pro
 	prefix := props.GetString("path", "")
 	pattern := props.GetString("pattern", "")
 	destPath := props.GetString("dest-path", "")
+
+	if f.gate != nil {
+		open, err := f.gate.Open(ctx, taskName)
+		if err != nil {
+			return nil, fmt.Errorf("s3feed: gate: %w", err)
+		}
+		if !open {
+			return nil, nil
+		}
+	}
 
 	svc, ok := f.reg.Get(serviceName)
 	if !ok {
@@ -82,6 +105,11 @@ func (f *s3Feed) Feed(ctx context.Context, taskName string, props properties.Pro
 			CreateTime: now,
 			NextRunAt:  &now,
 		})
+	}
+	if f.gate != nil {
+		if err := f.gate.Listed(ctx, taskName, len(items)); err != nil {
+			return nil, fmt.Errorf("s3feed: gate: %w", err)
+		}
 	}
 	return items, nil
 }

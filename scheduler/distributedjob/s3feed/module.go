@@ -12,6 +12,11 @@ package s3feed
 
 import "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/s3feed"
 
+// Gate è il cancello facoltativo del feed: se l'app ne fornisce uno nel grafo fx, a ogni tick il feed
+// elenca il bucket solo quando Open risponde true. I work item già accodati proseguono comunque.
+// Serve ai processori che devono partire solo su richiesta esterna (es. TWS) e non a ogni tick.
+type Gate = s3feed.Gate
+
 // Module registra il job DistribuiteTaskByS3File. Si passa a batch.WithModule, che lo gate-a sui
 // scheduler modes e gli fornisce la s3.Config (sezione `s3:`).
 func Module(modes ...string) { s3feed.Module(modes...) }

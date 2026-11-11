@@ -39,9 +39,18 @@ func wrappedRunnersProvide() any {
 	)
 }
 
-func registerS3(d distributedjob.ITaskDispatcher, items store.IWorkItemStore, data store.IData, reg *s3client.Registry) scheduler.JobRegistration {
-	feed := newFeed(reg)
-	return distributedjob.RegisterByS3File(d, items, feed, data)
+type registerParams struct {
+	fx.In
+	Dispatcher distributedjob.ITaskDispatcher
+	Items      store.IWorkItemStore
+	Data       store.IData
+	Registry   *s3client.Registry
+	Gate       Gate `optional:"true"`
+}
+
+func registerS3(p registerParams) scheduler.JobRegistration {
+	feed := newFeed(p.Registry, p.Gate)
+	return distributedjob.RegisterByS3File(p.Dispatcher, p.Items, feed, p.Data)
 }
 
 // Module registra il job DistribuiteTaskByS3File: il Registry S3, il feed, la JobRegistration e
