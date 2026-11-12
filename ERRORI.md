@@ -45,6 +45,18 @@ da **"l'ho fatto e non riesco a scriverne l'esito"**: nel secondo caso il WorkIt
 | `BATCH-QUERY-CUR` | 500 | `errs.CodeQueryCur` | `mongostore/query_data.go:89` | lettura del cursore del feed fallita |
 | `BATCH-QUERY-IDENT` | 500 | `errs.CodeQueryIdent` | `internal/querystore/sqlstore` | nome di tabella/colonna che non è un identificatore SQL valido. È il **guard anti SQL-injection** sui pezzi di query che arrivano dalla config: nessun escape, si rifiuta |
 
+### Feed S3
+
+| Codice | HTTP | Costante | Origine | Significato |
+|---|---|---|---|---|
+| `BATCH-S3-LIST` | 500 | `errs.CodeS3List` | `internal/s3feed` (`scan`) — tick di `FeedS3Task`, `Feeder.Feed`, feed di `DistribuiteTaskByS3File` | elenco del bucket fallito. Nel job è l'esito del tick; dall'API arriva al chiamante, che non deve leggerlo come `NOTHINGTODO` |
+| `BATCH-S3-FEED` | 500 | `errs.CodeS3Feed` | `internal/s3feed` (`Feeder.Feed`) | il nome passato al `Feeder` non è una voce `FeedS3Task` di `jobs:`. Il messaggio elenca le voci dichiarate |
+
+Una property mancante o non valida di `FeedS3Task` (`task`, `service`, `dest-path`, `limit`,
+`pattern`, servizio non dichiarato in `s3.services`) è `BATCH-JOB-PROPS`, emesso al boot dello
+scheduler e alla costruzione del `Feeder`. Lo stesso codice segnala un `DistribuiteTaskByS3File`
+senza `s3feed` passato a `batch.WithS3`.
+
 ### Producer Kafka
 
 go-core-batch **non ha più un producer Kafka**: il job `NotificationKafka` produce con quello di
@@ -60,7 +72,7 @@ tradurre in record Kafka non produce un `ApplicationError` ma un `MarkFailed` di
 
 | Codice | HTTP | Costante | Origine | Significato |
 |---|---|---|---|---|
-| `BATCH-JOB-PROPS` | 500 | `errs.CodeJobProperties` | `internal/scheduler.Props`, per conto di `kafkajob` (`destination`, `object`, `topic`, `limit`), `distributedjob` (`task`, `limit`), `simplejob` (`task`), `feedjob` (`task`, `objectId`), `purgejob` (`status`, `older-than`, `limit`) | property infrastrutturale mancante o non valida in `jobs[].properties`. Il messaggio nomina job, job type, property e il motivo: `job "import" (type "DistribuiteTask"): property "task" mancante: non si sa quale task eseguire`. Emesso alla COSTRUZIONE del job, non al primo tick. Prima `simplejob` emetteva un `fmt.Errorf` senza codice |
+| `BATCH-JOB-PROPS` | 500 | `errs.CodeJobProperties` | `internal/scheduler.Props`, per conto di `kafkajob` (`destination`, `object`, `topic`, `limit`), `distributedjob` (`task`, `limit`), `simplejob` (`task`), `feedjob` (`task`, `objectId`), `s3feed` (`FeedS3Task`: `task`, `service`, `dest-path`, `limit`, `pattern`), `purgejob` (`status`, `older-than`, `limit`) | property infrastrutturale mancante o non valida in `jobs[].properties`. Il messaggio nomina job, job type, property e il motivo: `job "import" (type "DistribuiteTask"): property "task" mancante: non si sa quale task eseguire`. Emesso alla COSTRUZIONE del job, non al primo tick. Prima `simplejob` emetteva un `fmt.Errorf` senza codice |
 
 **Quando si manifesta.** La validazione avviene alla **costruzione** del job, non dentro il tick.
 Per `SingleTask` e `DistribuiteTask*` è un **errore d'avvio** (`JobRegistration.Check` di

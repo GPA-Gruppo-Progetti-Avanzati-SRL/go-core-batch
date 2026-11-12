@@ -23,11 +23,12 @@ func TestActiveSet_ReferencedTuttiINomi(t *testing.T) {
 		JobsConfig: []scheduler.Config{
 			job("DistribuiteTaskByQuery", properties.Properties{"task": "BonifyInit"}),
 			job("FeedTask", properties.Properties{"task": "hello-nightly"}),
+			job("FeedS3Task", properties.Properties{"task": "cflow"}),
 		},
 		WorkersConfig: []worker.Config{{Name: "Default", Tasks: []string{"BonifyInit", "AggiornaLimiti"}}},
 	}
 	a := activeSet(cfg, newTopology(cfg), nil, nil)
-	for _, want := range []string{"BonifyInit", "hello-nightly", "AggiornaLimiti"} {
+	for _, want := range []string{"BonifyInit", "hello-nightly", "cflow", "AggiornaLimiti"} {
 		if !slices.Contains(a.Referenced, want) {
 			t.Fatalf("%q deve essere un riferimento, ottenuto %v", want, a.Referenced)
 		}
@@ -48,6 +49,7 @@ func TestActiveSet_Executed(t *testing.T) {
 		job("SingleTask", properties.Properties{"task": "single"}),
 		job("DistribuiteTask", properties.Properties{"task": "dist", "limit": 10}),
 		job("FeedTask", properties.Properties{"task": "accodato"}),
+		job("FeedS3Task", properties.Properties{"task": "accodato-da-s3"}), // accoda, non esegue
 		job("NotificationKafka", properties.Properties{"stream": "notifiche"}),
 		{Name: "spento", Type: "SingleTask", Disabled: true, Properties: properties.Properties{"task": "spento"}},
 	}

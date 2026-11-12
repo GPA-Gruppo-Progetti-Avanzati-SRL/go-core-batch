@@ -24,6 +24,7 @@
 package distributedjob
 
 import (
+	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/scheduler"
 	pub "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
@@ -50,11 +51,33 @@ func RegisterByQuery(dispatcher ITaskDispatcher, items store.IWorkItemStore, qs 
 	return registration(JobTypeByQuery, dispatcher, items, NewQueryFeed(qs), data)
 }
 
+// S3FeedName è il nome con cui s3feed fornisce a fx il feed di DistribuiteTaskByS3File. Il job lo
+// wira batch.Module, che non importa s3feed (porta l'SDK AWS): il feed gli arriva dal grafo.
+const S3FeedName = "s3feed"
+
+// ByS3FileParams sono le dipendenze del job DistribuiteTaskByS3File. Il feed è opzionale perché il
+// job lo registra batch dai `jobs:`, mentre il feed lo porta s3feed: senza, il Check ferma l'avvio
+// dicendo cosa manca, invece di un "missing type" anonimo o — peggio — di un DistribuiteTask che
+// gira senza feed.
+type ByS3FileParams struct {
+	core.In
+	Dispatcher ITaskDispatcher
+	Items      store.IWorkItemStore
+	Data       store.IData
+	Feed       IFeedSource `name:"s3feed" optional:"true"`
+}
+
 // RegisterByS3File builds the DistribuiteTaskByS3File job registration.
-// On each run, the provided IFeedSource lists S3 objects matching a pattern;
+// On each run, the S3 feed lists objects matching a pattern;
 // new workitems are created for keys not already active, then claiming proceeds.
-func RegisterByS3File(dispatcher ITaskDispatcher, items store.IWorkItemStore, feed IFeedSource, data store.IData) scheduler.JobRegistration {
-	return registration(JobTypeByS3File, dispatcher, items, feed, data)
+func RegisterByS3File(p ByS3FileParams) scheduler.JobRegistration {
+	r := registration(JobTypeByS3File, p.Dispatcher, p.Items, p.Feed, p.Data)
+	if p.Feed == nil {
+		r.Check = func(name string, config scheduler.Config) error {
+			return scheduler.JobProps(name, config).Invalid("il feed S3 non è wirato: passare s3feed.Module a batch.WithS3")
+		}
+	}
+	return r
 }
 
 func registration(jobType string, dispatcher ITaskDispatcher, items store.IWorkItemStore, feed IFeedSource, data store.IData) scheduler.JobRegistration {

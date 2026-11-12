@@ -22,6 +22,10 @@ const (
 	JobTypeDistribuiteTaskByS3File = "DistribuiteTaskByS3File"
 	// JobTypeFeedTask accoda un work item per tick sul task nominato da `task`; non esegue nulla.
 	JobTypeFeedTask = "FeedTask"
+	// JobTypeFeedS3Task controlla un bucket S3 e accoda un work item per file sul task nominato da
+	// `task`; non esegue nulla (s3feed, da passare a batch.WithS3). Lo stesso feed lo chiama l'app
+	// da API col Feeder di s3feed.
+	JobTypeFeedS3Task = "FeedS3Task"
 	// JobTypePurgeWorkItems cancella i work item terminali più vecchi di `older-than`.
 	JobTypePurgeWorkItems = "PurgeWorkItems"
 	// JobTypeNotificationKafka pubblica su Kafka i work item della coda `stream` (kafkajob, da
@@ -48,6 +52,19 @@ const (
 	PropObjectId = "objectId"
 	// PropPayload è il payload applicativo del work item, facoltativo. Copiato così com'è.
 	PropPayload = "payload"
+)
+
+// Chiavi dei job su S3: FeedS3Task e DistribuiteTaskByS3File.
+const (
+	// PropService è il servizio S3 logico: una chiave di `s3.services`.
+	PropService = "service"
+	// PropPath è il prefisso elencato. L'elenco S3 è per prefisso e non per cartella: `in/`
+	// comprende anche `in/sub/x.csv`.
+	PropPath = "path"
+	// PropPattern è il glob confrontato col basename della chiave (es. "*.csv"); assente = tutti.
+	PropPattern = "pattern"
+	// PropDestPath è il prefisso in cui il file viene spostato dopo un'elaborazione riuscita.
+	PropDestPath = "dest-path"
 )
 
 // Chiavi di PurgeWorkItems.

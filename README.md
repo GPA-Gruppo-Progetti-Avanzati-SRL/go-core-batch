@@ -82,8 +82,12 @@ dietro `uptrace/bun`, una senza Kafka non si porta dietro go-core-kafka, una sen
 | backend (`WithModule`) | serve a | dipendenza |
 |---|---|---|
 | `djmongo.Module` / `djsql.Module` (`scheduler/distributedjob/{mongostore,sqlstore}`) | query store di `DistribuiteTaskByQuery` | driver Mongo / bun |
-| `s3feed.Module` (`scheduler/distributedjob/s3feed`) | job `DistribuiteTaskByS3File` | SDK AWS |
 | `kafkajob.Module` (`scheduler/kafkajob`) | job `NotificationKafka` (il producer lo wira l'app) | go-core-kafka |
+
+I flussi su file S3 hanno un'opzione a sé, **`batch.WithS3(s3feed.Module)`**
+(`scheduler/distributedjob/s3feed`, SDK AWS): oltre ai job registra il `Feeder`, che l'app inietta
+per eseguire il feed da API, quindi va a root e non dentro il sottosistema chiuso — vedi
+[Flussi su file S3](#flussi-su-file-s3--feeds3task-api-e-esecuzione).
 
 **Regola: ogni package pubblico sotto `scheduler/` è un guscio di registrazione** da passare a
 `batch.WithModule` — un solo file con la sola `func Module(modes ...string)` — ed esiste come package
@@ -93,17 +97,19 @@ Le implementazioni stanno in `internal/kafkajob`, `internal/querystore/{mongosto
 
 **Il vocabolario del YAML è pubblico** (`scheduler/definitions.go`): i `type` dei job della
 libreria (`scheduler.JobTypeSingleTask`, `JobTypeDistribuiteTask*`, `JobTypeFeedTask`,
-`JobTypePurgeWorkItems`, `JobTypeNotificationKafka`) e le chiavi delle loro `properties`
-(`PropTask`, `PropLimit`, `PropBacklogMetrics`, `PropObjectId`, `PropPayload`, `PropStatus`,
-`PropOlderThan`, `PropTaskLogs`, `PropStream`, `PropTopic`, `PropMaxRetry`). Non sono macchina
+`JobTypeFeedS3Task`, `JobTypePurgeWorkItems`, `JobTypeNotificationKafka`) e le chiavi delle loro
+`properties` (`PropTask`, `PropLimit`, `PropBacklogMetrics`, `PropObjectId`, `PropPayload`,
+`PropService`, `PropPath`, `PropPattern`, `PropDestPath`, `PropStatus`, `PropOlderThan`,
+`PropTaskLogs`, `PropStream`, `PropTopic`, `PropMaxRetry`). Non sono macchina
 dei job ma il contratto della config: un'app che legge i propri `jobs:` (per esempio per sapere
 quali definizioni accoda un `FeedTask`) confronta questi nomi invece di riscriverne le stringhe,
 e la macchina in `internal/` li prende da qui, quindi la fonte è una e un rename rompe la
 compilazione invece di lasciare una stringa che non corrisponde più a nulla.
 
-Un job type in config il cui backend non è passato (`DistribuiteTaskByS3File` senza `s3feed`,
-`NotificationKafka` senza `kafkajob`) ferma l'avvio con `type ... non registrato`; un query store
-mancante con un `missing type` di fx.
+Un job type in config il cui backend non è passato (`FeedS3Task` senza `s3feed`, `NotificationKafka`
+senza `kafkajob`) ferma l'avvio con `type ... non registrato`; un query store mancante con un
+`missing type` di fx. `DistribuiteTaskByS3File` lo wira batch dai `jobs:`, e senza `s3feed` si ferma
+sul controllo del job, con un `BATCH-JOB-PROPS` che dice di passare `s3feed.Module` a `batch.WithS3`.
 
 `ModuleFunc` è la firma dei `Module()` che l'app passa — `func(modes ...string)`, **modes-only**: il
 config non è un parametro, lo fornisce `batch.Module` con `core.Supply` della Config unificata. I
@@ -120,6 +126,7 @@ di girare con valori vuoti.
 | `WithStore(m batch.ModuleFunc)` | **obbligatorio** (panic se assente); wirato **sempre** (serve sia a scheduler che a worker): `storemongo.Module` / `storesql.Module` (copre `IData`/`IWorkItemStore`) |
 | `WithLocker(m corelock.ModuleFunc)` | **obbligatorio** (panic se assente): backend del lock distribuito di go-core-locker, wirato a root |
 | `WithModule(m ...batch.ModuleFunc)` | i soli backend pesanti (tabella sopra), gate scheduler modes, accumula su più chiamate |
+| `WithS3(m batch.ModuleFunc)` | flussi su file S3: `s3feed.Module`. Registrato **a root e senza mode gate** (è tutto lazy), perché il `Feeder` lo inietta anche un processo API |
 
 **Ordine di registrazione indifferente.** I job type confluiscono nel value group fx `batch_jobs` e
 lo scheduler li consuma dal gruppo: fx risolve tutti i contributori prima di costruirlo. Tutte le
@@ -544,6 +551,7 @@ Tre CONSUMANO workitem, una li PRODUCE e una li CANCELLA: `feedjob` e `purgejob`
 | **distributedjob** | `DistribuiteTask` · `DistribuiteTaskByQuery` · `DistribuiteTaskByS3File` — dispatcher dedotto da `grpc.client.url` + `runner.Register[T]` | **Molti** workitem da distribuire: claiming atomico anti-doppione, recovery orfani, `task_logs`, scaling orizzontale gRPC |
 | **simplejob** | `SingleTask` — `runner.Register[T]` | **Una lavorazione alla volta** in-process: `RecoverOrphans`→`ClaimPending(1)`→`Run(item)`, eseguito dentro il tick. Niente gRPC/task_logs |
 | **kafkajob** | `NotificationKafka` — `WithModule(kafkajob.Module)`; invia i WorkItem su un topic Kafka col producer di go-core-kafka | Notifiche/outbox verso Kafka |
+| **s3feed** | `FeedS3Task` — nessun runner; `WithS3(s3feed.Module)` | **Alimentare da un bucket**: a cron (o da API col `Feeder`) accoda un workitem per file su `task`; a eseguirli è un `SingleTask`/`DistribuiteTask` col runner di `runner.RegisterFile` |
 | **feedjob** | `FeedTask` — nessun runner | **Schedulare una cosa a un'ora**: crea UN workitem per tick, descritto nelle properties del job (`task`, `objectId`, `payload`). Non reclama e non dispatcha: a lavorarlo è il job che serve quel task |
 | **purgejob** | `PurgeWorkItems` — nessun runner | **Retention**: cancella gli item in uno stato terminale più vecchi di una finestra, e su richiesta anche le righe di `task_logs`. Senza, le due collection crescono per sempre e con esse gli indici su cui gira il claim di ogni tick |
 
@@ -1037,11 +1045,11 @@ go-core-batch/
 │   ├── config.go                 # scheduler.Config: la voce di jobs: (solo il tipo)
 │   ├── kafkajob/                 # guscio (solo Module): job NotificationKafka (go-core-kafka) — WithModule
 │   └── distributedjob/
-│       ├── s3feed/               # guscio (solo Module): job DistribuiteTaskByS3File (SDK AWS) — WithModule
+│       ├── s3feed/               # guscio (Module + Feeder): FeedS3Task, DistribuiteTaskByS3File (SDK AWS) — WithS3
 │       ├── mongostore/           # guscio (solo Module): query store Mongo (mongo-driver) — WithModule
 │       └── sqlstore/             # guscio (solo Module): query store SQL (bun) — WithModule
 ├── worker/config.go              # worker.Config: la voce di workers: (solo il tipo)
-├── grpc/, s3/                    # config del trasporto gRPC e dei servizi S3
+├── grpc/, s3/                    # config del trasporto gRPC e dei servizi S3; s3.FeedResult e i suoi esiti
 ├── kafka/                        # kafka.Message + NewWorkItem: il contratto di accodamento di una notifica
 └── internal/
     ├── scheduler/                # gocron + lock, JobRegistration/ProvideJob, ClaimingTick, NewJobID, Props
@@ -1053,7 +1061,7 @@ go-core-batch/
     ├── simplejob/ feedjob/ purgejob/   # SingleTask, FeedTask, PurgeWorkItems
     ├── taskreg/                  # registro dei task: ActiveSet (Referenced/Executed), Apply, Instances
     ├── taskrunner/               # TaskRunner/FileTaskRunner (nome + max-retry), Group/FileGroup
-    ├── s3feed/                   # impl di DistribuiteTaskByS3File: feed, avvolgimento dei file runner
+    ├── s3feed/                   # feed S3, FeedS3Task, Feeder, avvolgimento dei file runner
     ├── kafkajob/                 # impl di NotificationKafka
     ├── querystore/mongostore/ querystore/sqlstore/   # impl degli IQueryStore
     ├── mux/                      # instradamento per TaskName del percorso in-process
@@ -1386,10 +1394,10 @@ jobs:
 
 ---
 
-## Feed by-query e by-S3 — cosa passa l'app
+## Feed by-query — cosa passa l'app
 
-Il wiring dei task non cambia fra le famiglie: cambia il job in `jobs:`, e per i due feed l'app
-passa il backend pesante che il feed richiede.
+Il wiring dei task non cambia fra le famiglie: cambia il job in `jobs:`, e per il feed l'app passa
+il backend pesante che richiede. Il feed da S3 ha una sezione sua, sotto.
 
 ### Con feed DB — DistribuiteTaskByQuery
 
@@ -1417,30 +1425,120 @@ scheduler:
       sort:       "created_at:asc"
 ```
 
-### Con feed S3 — DistribuiteTaskByS3File
+## Flussi su file S3 — FeedS3Task, API e esecuzione
+
+**Chi alimenta e chi esegue sono due job distinti**, come per `FeedTask` + `SingleTask`:
+
+- **alimentazione** — `FeedS3Task` controlla a cron un prefisso del bucket e accoda **un workitem per
+  file** (`ObjectId` = chiave, payload `{service, key, destPath}`) sul task `task`. Lo stesso giro
+  l'app lo esegue **da API** col `Feeder`, che legge le property della stessa voce di `jobs:`: cron e
+  API fanno per costruzione la stessa cosa. Un flusso alimentato solo da API dichiara la voce con
+  `disabled: true` (il Feeder la accetta, lo scheduler no);
+- **esecuzione** — un `SingleTask` (un file per tick, in sequenza) o un `DistribuiteTask` che gira ogni
+  tot, sul task registrato con `runner.RegisterFile`. Il runner **riceve il file**: chiave e contenuto.
+  A scaricarlo, e a spostarlo in `dest-path` dopo un esito riuscito, è la libreria.
+
+Un giro del feed elenca `path` fermandosi a `limit` file (default 100) che corrispondono a `pattern`
+— i segnaposto di cartella, chiavi che finiscono con `/`, non sono file —, li accoda con
+`InsertIfNotActive` (un file già in coda o in lavorazione non si duplica) e ritorna un
+`s3.FeedResult{Found, Queued}`, il cui `Outcome()` è:
+
+| Esito | Quando |
+|---|---|
+| `s3.NothingToDo` (`NOTHINGTODO`) | nessun file nel bucket. Dato che i file elaborati vengono spostati, dopo un `QUEUED` significa che il flusso è finito |
+| `s3.Queued` (`QUEUED`) | almeno un file nuovo accodato |
+| `s3.InProgress` (`INPROGRESS`) | i file ci sono, ma sono tutti già in coda o in lavorazione |
+
+Con questi esiti uno script esterno (un TWS) può chiamare l'API e ripetere finché non riceve
+`NOTHINGTODO`. Gli item escono nell'ordine dell'elenco S3, lessicografico sulla chiave, e lo
+conservano in coda: `next_run_at`/`create_time` sono scaglionati di un millisecondo per file, e il
+claim ordina per quei due campi.
+
+`dest-path` è **obbligatoria**: è lo spostamento a togliere dal prefisso un file elaborato, e senza
+il giro successivo lo riaccoderebbe. Le property sono validate al boot dello scheduler (il job) e
+alla costruzione del `Feeder` (anche le voci disabilitate).
 
 ```go
 // main.go
 batch.Module(&svc.Batch, Register,
     batch.WithStore(storemongo.Module),
     batch.WithLocker(lockmongo.Module),
-    batch.WithModule(s3feed.Module),    // job DistribuiteTaskByS3File (SDK AWS)
+    batch.WithS3(s3feed.Module),        // FeedS3Task, Feeder, avvolgimento dei file runner (SDK AWS)
 )
 
 func Register() {
-    runner.RegisterFile[myS3Runner]("S3_IMPORT")
+    runner.RegisterFile[cflowRunner]("CFLOW")
 }
 ```
 
 ```go
-// app/batch/s3_import.go
-type myS3Runner struct {
+// il runner: riceve il file, non elenca, non scarica e non sposta
+type cflowRunner struct {
     Svc mysvc.IService `inject:""`
 }
 
+func (r *cflowRunner) Run(ctx context.Context, key string, content io.Reader) error {
+    // nil → il file va in dest-path e l'item DONE; store.Retry(d) → ritentato; altro errore → FAILED,
+    // e il file resta nel prefisso
+    return nil
+}
+
+// l'API: lo stesso giro del cron
+type Business struct {
+    Feeder s3feed.Feeder // iniettato da fx
+}
+
+func (b *Business) Avvia(ctx context.Context, flusso string) (s3.Outcome, *core.Error) {
+    res, err := b.Feeder.Feed(ctx, flusso) // il nome della voce FeedS3Task
+    if err != nil {
+        return "", err
+    }
+    return res.Outcome(), nil
+}
+```
+
+```yaml
+batch:
+  s3:
+    services:
+      s3:
+        endpoint: "https://s3.example.it/"
+        region: "eu-south-1"
+        access-key: "${S3_ACCESS_KEY}"
+        secret-key: "${S3_SECRET_KEY}"
+        bucket: "logistica"
+        use-path-style: true
+  tasks:
+    - { name: cflow, type: CFLOW, max-retry: 0 }
+  jobs:
+    - name: feed-cflow                # alimentazione: a cron; disabled: true se solo da API
+      type: FeedS3Task
+      cron: "0 0 22 * * *"
+      properties: { task: cflow, service: s3, path: "cflow/todo/", pattern: "*", dest-path: "cflow/done", limit: 100 }
+    - name: cflow-exec                # esecuzione: un file per tick
+      type: SingleTask
+      cron: "*/30 * * * * *"
+      singleton: true
+      lock-timeout: 3h                # per UN file
+      properties: { task: cflow }
+```
+
+Il `Feeder` non conosce un nome che non sia una voce `FeedS3Task`: lo segnala con `BATCH-S3-FEED`,
+elencando le voci dichiarate. Un elenco del bucket fallito è `BATCH-S3-LIST`.
+
+**Il Gate non esiste più.** Era un'interfaccia fx facoltativa (`s3feed.Gate`, `Open`/`Listed`) con cui
+un'app teneva fermo il feed di `DistribuiteTaskByS3File` finché un sistema esterno non apriva una
+"finestra". Lo sostituisce questo modello: il sistema esterno chiama l'API, che esegue il feed.
+
+### Feed ed esecuzione nello stesso job — DistribuiteTaskByS3File
+
+`DistribuiteTaskByS3File` resta disponibile: a ogni tick esegue il feed (stesse property, stessa
+funzione) e poi reclama e dispatcha gli item del suo `task`. Lo wira batch dai `jobs:`, il feed lo
+porta `s3feed` via `WithS3`.
+
+```go
 func (r *myS3Runner) Run(ctx context.Context, key string, content io.Reader) error {
-    // process the file stream; return nil → l'adapter s3feed sposta il file e fa MarkDone,
-    // return err → il workitem resta pending per il retry
+    // stesso contratto: nil → la libreria sposta il file in dest-path e fa MarkDone
     return nil
 }
 ```
@@ -1508,21 +1606,21 @@ Tutte le chiavi sono dichiarate una volta sola, nel vocabolario pubblico `schedu
 | Campo | Tipo | Descrizione |
 |---|---|---|
 | `name` | string | Nome del job, **obbligatorio e univoco**: è la chiave del lock distribuito, e due job omonimi se lo contenderebbero (uno dei due non girerebbe mai). Un duplicato ferma l'avvio |
-| `type` | string | Il **job type**, sempre una stringa del framework: `"SingleTask"` · `"DistribuiteTask"` · `"DistribuiteTaskByQuery"` · `"DistribuiteTaskByS3File"` · `"FeedTask"` · `"NotificationKafka"` · `"PurgeWorkItems"`. Non è mai un task type: quale task eseguire lo dice `properties.task` |
+| `type` | string | Il **job type**, sempre una stringa del framework: `"SingleTask"` · `"DistribuiteTask"` · `"DistribuiteTaskByQuery"` · `"DistribuiteTaskByS3File"` · `"FeedTask"` · `"FeedS3Task"` · `"NotificationKafka"` · `"PurgeWorkItems"`. Non è mai un task type: quale task eseguire lo dice `properties.task` |
 | `cron` | string | Espressione cron (secondi abilitati); obbligatoria per un job attivo |
 | `singleton` | bool | distributed job lock — evita run paralleli su repliche diverse |
 | `lock-timeout` | duration | Dopo quanto un IN_PROGRESS è considerato orfano (default: 10m — distributedjob e simplejob). simplejob: anche timeout del context di `Run` (default: 30s) |
 | `disabled` | bool | Disabilita il job senza rimuoverlo dalla config |
 | `properties.task` | string | **Nome** del task da eseguire (una voce di `tasks:`) |
-| `properties.limit` | int | Max item per run (`DistribuiteTask*`, `NotificationKafka`, `PurgeWorkItems`; ignorata da `SingleTask`, che ne lavora uno per tick) |
+| `properties.limit` | int | Max item per run (`DistribuiteTask*`, `NotificationKafka`, `PurgeWorkItems`; file accodati per giro in `FeedS3Task`, default 100; ignorata da `SingleTask`, che ne lavora uno per tick) |
 | `properties.collection` | string | Tabella/collection sorgente (solo DistribuiteTaskByQuery) |
 | `properties.filter` | string | WHERE SQL o JSON query Mongo (solo DistribuiteTaskByQuery) |
 | `properties.sort` | string | `"col:asc,col2:desc"` (solo DistribuiteTaskByQuery) |
-| `properties.service` | string | Nome logico del servizio S3 (solo DistribuiteTaskByS3File) |
-| `properties.path` | string | Prefisso S3 per il listing (solo DistribuiteTaskByS3File) |
-| `properties.pattern` | string | Glob pattern sul basename del file, es. `"*.csv"` (solo DistribuiteTaskByS3File) |
-| `properties.dest-path` | string | Prefisso S3 dove spostare i file elaborati (solo DistribuiteTaskByS3File) |
-| `properties.task` | string | **Nome del task** da eseguire, che è anche il `WorkItem.TaskName` letto da `ClaimPending`/`RecoverOrphans`. Obbligatoria per `SingleTask`, `DistribuiteTask*` e `FeedTask`: nessun ripiego sul `type` del job |
+| `properties.service` | string | Nome logico del servizio S3, chiave di `s3.services` (`FeedS3Task`, obbligatoria; `DistribuiteTaskByS3File`) |
+| `properties.path` | string | Prefisso S3 per il listing: per prefisso, non per cartella (`FeedS3Task`, `DistribuiteTaskByS3File`) |
+| `properties.pattern` | string | Glob pattern sul basename del file, es. `"*.csv"`; assente = tutti (`FeedS3Task`, `DistribuiteTaskByS3File`) |
+| `properties.dest-path` | string | Prefisso S3 dove spostare i file elaborati (`FeedS3Task`, **obbligatoria**: senza, un file elaborato verrebbe riaccodato; `DistribuiteTaskByS3File`) |
+| `properties.task` | string | **Nome del task** da eseguire, che è anche il `WorkItem.TaskName` letto da `ClaimPending`/`RecoverOrphans`. Obbligatoria per `SingleTask`, `DistribuiteTask*`, `FeedTask` e `FeedS3Task` (dove è il task su cui accodare i file): nessun ripiego sul `type` del job |
 | `properties.objectId` | string | Cosa accodare (solo `FeedTask`): finisce in `WorkItem.ObjectId` ed è la chiave della deduplica |
 | `properties.stream` | string | **Nome della coda di notifiche** (solo `NotificationKafka`, obbligatoria): è il `WorkItem.TaskName` degli item accodati. Non si chiama `task` perché quello è un riferimento a una voce di `tasks:`, e una notifica un runner non ce l'ha |
 | `properties.topic` | string | Topic di **default** (solo `NotificationKafka`, facoltativa): vale per i record che non portano il proprio `topic` nel payload |
@@ -1895,7 +1993,7 @@ In gRPC, `limit` e pool size sono dimensioni ortogonali: lo scheduler può claim
 
 ## Trappole
 
-- **Non si wirano a mano job type, dispatcher né worker pool**: li deduce `batch.Module` dai `jobs:`, da `grpc.client.url` e da `workers:` + `grpc.server.port`, e i loro package stanno in `internal/`. A `WithModule` vanno solo i backend pesanti (`djmongo`/`djsql`, `s3feed`, `kafkajob`).
+- **Non si wirano a mano job type, dispatcher né worker pool**: li deduce `batch.Module` dai `jobs:`, da `grpc.client.url` e da `workers:` + `grpc.server.port`, e i loro package stanno in `internal/`. A `WithModule` vanno solo i backend pesanti (`djmongo`/`djsql`, `kafkajob`); `s3feed` va a `WithS3`.
 - **I modes di `runner.Register` possono solo spegnere**: un task che un job o un pool di questo processo esegue, spento dai modes, ferma l'avvio. Di solito non servono: un runner è già istanziato solo dove viene eseguito.
 - **`runner.Register[T]` va chiamata dentro la funzione `register` passata a `batch.Module`**: è lì che la config è nota. In un `init()` panica, e non c'è più una forma che sfugga a quella finestra — `runner.Provide`/`ProvideFile` e `grpchandler.Provide` sono state rimosse.
 - **Ogni task va dichiarato in `tasks:`**: un task type registrato senza voce, un riferimento a un nome inesistente, o un task eseguito qui il cui type questo binario non registra, fanno fallire l'avvio.

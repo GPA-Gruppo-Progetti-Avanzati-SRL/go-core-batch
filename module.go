@@ -37,6 +37,7 @@ type options struct {
 	store          ModuleFunc          // obbligatorio, sempre attivo
 	locker         corelock.ModuleFunc // obbligatorio, sempre attivo
 	modules        []ModuleFunc        // backend pesanti, gate-ati sui scheduler modes
+	s3             ModuleFunc          // flussi su file S3, a root e senza mode gate
 }
 
 // Option configura Module.
@@ -86,13 +87,27 @@ func WithLocker(m corelock.ModuleFunc) Option {
 	return func(o *options) { o.locker = m }
 }
 
+// WithS3 inietta i flussi su file S3: passare s3feed.Module (scheduler/distributedjob/s3feed), che
+// porta l'SDK AWS. Registra il job FeedS3Task, il feed di DistribuiteTaskByS3File, l'avvolgimento
+// dei runner.RegisterFile e il Feeder, con la sezione `s3:`.
+//
+// È un'opzione a parte, e non un WithModule, perché il Feeder è un seam PUBBLICO: lo inietta il data
+// layer dell'API per eseguire il feed su richiesta, anche in un MODE in cui lo scheduler non gira.
+// Per questo è registrato a ROOT e senza mode gate, come lo store — tutto ciò che registra è lazy,
+// quindi in un mode che non lo usa non si costruisce nulla. WithModule registra invece dentro il
+// sottosistema chiuso sui soli scheduler modes, dove il Feeder non sarebbe raggiungibile.
+//
+//	batch.WithS3(s3feed.Module)
+func WithS3(m ModuleFunc) Option {
+	return func(o *options) { o.s3 = m }
+}
+
 // WithModule aggiunge i backend che portano dipendenze pesanti, gate-ati sui scheduler modes. Sono
 // i soli componenti dello scheduler che l'app sceglie: job type, dispatcher e worker pool li wira
 // batch dai `jobs:` (vedi Module). Chiamabile più volte (accumula).
 //
 //	batch.WithModule(
 //	    djmongo.Module,   // query store del job DistribuiteTaskByQuery (o djsql.Module)
-//	    s3feed.Module,    // job DistribuiteTaskByS3File (SDK AWS)
 //	    kafkajob.Module,  // job NotificationKafka (go-core-kafka; il producer lo wira l'app)
 //	)
 func WithModule(m ...ModuleFunc) Option {
@@ -169,7 +184,10 @@ func (t topology) wire(sched, work []string) {
 			// Il query store (IQueryStore) è un backend dell'app: djmongo/djsql via WithModule.
 			scheduler.ProvideJob(distributedjob.RegisterByQuery, sched...)
 		}
-		// DistribuiteTaskByS3File lo registra s3feed, che porta l'SDK AWS e resta di WithModule.
+		if t.jobTypes[distributedjob.JobTypeByS3File] {
+			// Il feed (SDK AWS) lo porta s3feed via WithS3, e arriva dal grafo per nome.
+			scheduler.ProvideJob(distributedjob.RegisterByS3File, sched...)
+		}
 	}
 	if t.workerPool {
 		grpchandler.Module(work...)
@@ -304,6 +322,20 @@ func Module(cfg *Config, register func(), opts ...Option) {
 	// core.ProvideAs è lazy: in un mode che non lo usa non viene costruito comunque.
 	corelock.Module(&cfg.Lock, corelock.WithBackend(o.locker))
 
+	// Flussi su file S3: a ROOT e senza mode gate, perché il Feeder è un seam pubblico (vedi
+	// WithS3). Dentro un core.Module aperto: la s3.Config e la sezione jobs: — che il Feeder legge
+	// per risolvere il job per nome — restano private, i servizi sono esportati, e i value group
+	// (batch_jobs, batch_runners) li raccolgono lo scheduler e i runner del sottosistema.
+	if o.s3 != nil {
+		core.Module("batch-s3", func() {
+			if len(cfg.S3.Services) > 0 {
+				core.Supply(cfg.S3)
+			}
+			core.Supply(cfg.JobsConfig)
+			o.s3()
+		})
+	}
+
 	// Livello di dettaglio dei task_logs: fornito a ROOT come lo store, perché è lo store a
 	// consumarlo. Validato qui e non dentro l'implementazione: un valore non previsto è un
 	// errore di configurazione e deve fermare l'avvio, non degradare in silenzio su "all".
@@ -327,7 +359,9 @@ func Module(cfg *Config, register func(), opts ...Option) {
 		if cfg.Grpc.Client.Url != "" {
 			core.Supply(&cfg.Grpc.Client, sched...)
 		}
-		if len(cfg.S3.Services) > 0 {
+		// Con WithS3 la s3.Config la supplisce il modulo batch-s3; qui resta per s3feed passato a
+		// WithModule, la forma che precede WithS3.
+		if len(cfg.S3.Services) > 0 && o.s3 == nil {
 			core.Supply(cfg.S3, sched...)
 		}
 		if cfg.Grpc.Server.Port != 0 {

@@ -1,8 +1,9 @@
-// Package s3feed è l'implementazione del job DistribuiteTaskByS3File: un feed S3 dentro la pipeline
-// di claiming di distributedjob, e l'avvolgimento dei file runner (runner.RegisterFile) col ciclo
-// download/spostamento del file. I file runner arrivano dal gruppo batch_file_runners e, avvolti,
-// finiscono nel gruppo batch_runners, da cui li instrada il dispatcher. Il guscio pubblico che l'app
-// passa a batch.WithModule è scheduler/distributedjob/s3feed.
+// Package s3feed è l'implementazione dei flussi su file S3: il feed (elenco del bucket → un work
+// item per file), il job FeedS3Task che lo esegue a cron, il Feeder con cui l'app lo esegue da API,
+// il feed del job DistribuiteTaskByS3File e l'avvolgimento dei file runner (runner.RegisterFile) col
+// ciclo download/spostamento del file. I file runner arrivano dal gruppo batch_file_runners e,
+// avvolti, finiscono nel gruppo batch_runners, da cui li instradano SingleTask e i dispatcher. Il
+// guscio pubblico che l'app passa a batch.WithS3 è scheduler/distributedjob/s3feed.
 package s3feed
 
 import (
@@ -12,7 +13,6 @@ import (
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/taskrunner"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/s3"
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"go.uber.org/fx"
 )
 
@@ -39,26 +39,28 @@ func wrappedRunnersProvide() any {
 	)
 }
 
-type registerParams struct {
-	fx.In
-	Dispatcher distributedjob.ITaskDispatcher
-	Items      store.IWorkItemStore
-	Data       store.IData
-	Registry   *s3client.Registry
-	Gate       Gate `optional:"true"`
+// feedSourceProvide fornisce il feed del job DistribuiteTaskByS3File, col nome che il job — wirato
+// da batch.Module, che non importa l'SDK AWS — si fa iniettare.
+func feedSourceProvide() any {
+	return fx.Annotate(
+		func(reg *s3client.Registry) distributedjob.IFeedSource { return newFeed(reg) },
+		fx.ResultTags(`name:"`+distributedjob.S3FeedName+`"`),
+	)
 }
 
-func registerS3(p registerParams) scheduler.JobRegistration {
-	feed := newFeed(p.Registry, p.Gate)
-	return distributedjob.RegisterByS3File(p.Dispatcher, p.Items, feed, p.Data)
-}
-
-// Module registra il job DistribuiteTaskByS3File: il Registry S3, il feed, la JobRegistration e
-// l'avvolgimento dei file runner (download/spostamento S3) nel gruppo batch_runners, da cui li
-// instrada il dispatcher. È il corpo di scheduler/distributedjob/s3feed.Module, il guscio pubblico
-// che l'app passa a batch.WithModule; la s3.Config la supplisce batch.Module.
+// Module registra i flussi su file S3: il job FeedS3Task, il Feeder, il feed di
+// DistribuiteTaskByS3File e l'avvolgimento dei file runner. Il Registry S3 è privato al modulo: è
+// l'ingranaggio di tutti e quattro, non un servizio dell'app. È il corpo di
+// scheduler/distributedjob/s3feed.Module; la s3.Config (e la sezione jobs:, per il Feeder) la
+// supplisce batch.Module.
+//
+// Tutto è lazy: il job si costruisce solo dove gira lo scheduler, l'avvolgimento solo dove qualcuno
+// esegue i runner, il Feeder solo se l'app lo inietta. È ciò che permette a batch.WithS3 di
+// registrarlo senza mode gate.
 func Module(modes ...string) {
-	core.Provide(provideRegistry, modes...)
+	core.Private(func() { core.Provide(provideRegistry, modes...) })
 	core.Provide(wrappedRunnersProvide(), modes...)
-	scheduler.ProvideJob(registerS3, modes...)
+	core.Provide(feedSourceProvide(), modes...)
+	core.Provide(newFeeder, modes...)
+	scheduler.ProvideJob(registerFeedS3, modes...)
 }

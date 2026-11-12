@@ -57,6 +57,20 @@ func NewService(client *s3.Client, bucket string) *Service {
 // List returns all objects under the given prefix, handling pagination.
 func (s *Service) List(ctx context.Context, prefix string) ([]Object, error) {
 	var objects []Object
+	err := s.Walk(ctx, prefix, func(o Object) bool {
+		objects = append(objects, o)
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+	return objects, nil
+}
+
+// Walk percorre gli oggetti sotto prefix, nell'ordine di S3 (lessicografico sulla chiave), e
+// chiama visit per ciascuno finché visit ritorna true. Smette di chiedere pagine appena visit
+// ritorna false: chi cerca i primi N file non paga l'elenco dell'intero prefisso.
+func (s *Service) Walk(ctx context.Context, prefix string, visit func(Object) bool) error {
 	paginator := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(s.bucket),
 		Prefix: aws.String(prefix),
@@ -64,16 +78,15 @@ func (s *Service) List(ctx context.Context, prefix string) ([]Object, error) {
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("s3 list prefix=%q: %w", prefix, err)
+			return fmt.Errorf("s3 list prefix=%q: %w", prefix, err)
 		}
 		for _, obj := range page.Contents {
-			objects = append(objects, Object{
-				Key:  aws.ToString(obj.Key),
-				Size: aws.ToInt64(obj.Size),
-			})
+			if !visit(Object{Key: aws.ToString(obj.Key), Size: aws.ToInt64(obj.Size)}) {
+				return nil
+			}
 		}
 	}
-	return objects, nil
+	return nil
 }
 
 // Get returns a ReadCloser for the object at the given key.

@@ -2,8 +2,13 @@ package s3feed
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
 	"testing"
 
+	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/s3client"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/taskrunner"
@@ -11,128 +16,154 @@ import (
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
 )
 
-// mockService implements a minimal S3 service for testing via the s3Feed.
-// Since s3Feed calls svc.List through the registry, we need to set up
-// a registry with a real Service. Instead, we test at the Feed level
-// by verifying the output given known List results.
-
-func TestS3Feed_Feed_FiltersAndLimits(t *testing.T) {
-	// We can't easily mock s3.Service.List since it uses the real S3 client.
-	// Instead, test the filtering/limiting logic by creating an s3Feed
-	// and verifying the contract at the integration boundary.
-	// For unit testing, we test decodePayload and the WorkItem construction.
-
-	t.Run("pattern matching on base name", func(t *testing.T) {
-		// Test that path.Match works correctly for our use case
-		testCases := []struct {
-			pattern string
-			key     string
-			match   bool
-		}{
-			{"*.csv", "data/file1.csv", true},
-			{"*.csv", "data/file1.txt", false},
-			{"report-*.csv", "data/report-2024.csv", true},
-			{"report-*.csv", "data/other-2024.csv", false},
-			{"*", "data/anything.bin", true},
-		}
-		for _, tc := range testCases {
-			// Simulate what Feed does: path.Base(key) then path.Match
-			base := baseName(tc.key)
-			matched, err := matchPattern(tc.pattern, base)
-			if err != nil {
-				t.Fatalf("pattern %q: unexpected error: %v", tc.pattern, err)
-			}
-			if matched != tc.match {
-				t.Errorf("pattern=%q key=%q: got %v, want %v", tc.pattern, tc.key, matched, tc.match)
-			}
-		}
-	})
-
-	t.Run("WorkItem construction", func(t *testing.T) {
-		// Verify that a WorkItem built from an S3 object has the correct fields
-		key := "inbox/report.csv"
-		taskName := "S3_IMPORT"
-		destPath := "processed"
-		serviceName := "main"
-
-		wi := buildWorkItem(taskName, key, serviceName, destPath)
-		if wi.TaskName != taskName {
-			t.Errorf("Type = %q, want %q", wi.TaskName, taskName)
-		}
-		if wi.ObjectId != key {
-			t.Errorf("ObjectId = %q, want %q", wi.ObjectId, key)
-		}
-		if wi.Status != store.StatusPending {
-			t.Errorf("Status = %q, want %q", wi.Status, store.StatusPending)
-		}
-		payload, ok := wi.Payload.(s3Payload)
-		if !ok {
-			t.Fatalf("Payload type = %T, want s3Payload", wi.Payload)
-		}
-		if payload.Service != serviceName {
-			t.Errorf("Payload.Service = %q, want %q", payload.Service, serviceName)
-		}
-		if payload.Key != key {
-			t.Errorf("Payload.Key = %q, want %q", payload.Key, key)
-		}
-		if payload.DestPath != destPath {
-			t.Errorf("Payload.DestPath = %q, want %q", payload.DestPath, destPath)
-		}
-	})
-
-	t.Run("unknown service returns error", func(t *testing.T) {
-		reg, _ := s3client.NewRegistry(nil) // empty registry
-		feed := newFeed(reg, nil)
-		props := properties.Properties{
-			"service": "nonexistent",
-			"path":    "inbox/",
-			"pattern": "*.csv",
-		}
-		_, err := feed.Feed(context.Background(), "TEST", props, 10)
-		if err == nil {
-			t.Fatal("expected error for unknown service")
-		}
-	})
+// bucketFake è un objectStore in memoria: chiavi nell'ordine di S3, contenuti, spostamenti.
+type bucketFake struct {
+	keys    []string
+	content map[string]string
+	visited int   // oggetti consegnati a Walk: dice se l'elenco si è fermato in anticipo
+	listErr error // errore di Walk
+	moveErr error
+	moved   map[string]string
 }
 
-type fakeGate struct {
-	open   bool
-	err    error
-	task   string
-	listed int
-}
-
-func (g *fakeGate) Listed(_ context.Context, _ string, files int) error {
-	g.listed = files
+func (b *bucketFake) Walk(_ context.Context, prefix string, visit func(s3client.Object) bool) error {
+	if b.listErr != nil {
+		return b.listErr
+	}
+	for _, k := range b.keys {
+		if !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		b.visited++
+		if !visit(s3client.Object{Key: k}) {
+			return nil
+		}
+	}
 	return nil
 }
 
-func (g *fakeGate) Open(_ context.Context, taskName string) (bool, error) {
-	g.task = taskName
-	return g.open, g.err
+func (b *bucketFake) Get(_ context.Context, key string) (io.ReadCloser, error) {
+	c, ok := b.content[key]
+	if !ok {
+		return nil, fmt.Errorf("get %q: %w", key, s3client.ErrObjectNotFound)
+	}
+	return io.NopCloser(strings.NewReader(c)), nil
 }
 
-// Un gate chiuso ferma il feed prima ancora di toccare S3 (il servizio inesistente non e' un errore);
-// un gate aperto lascia proseguire; un errore del gate e' l'esito del tick.
-func TestS3Feed_Feed_Gate(t *testing.T) {
-	reg, _ := s3client.NewRegistry(nil)
-	props := properties.Properties{"service": "nonexistent", "path": "in/", "pattern": "*"}
-
-	closed := &fakeGate{open: false}
-	items, err := newFeed(reg, closed).Feed(context.Background(), "CFLOW", props, 1)
-	if err != nil || len(items) != 0 {
-		t.Fatalf("gate chiuso: items=%d err=%v, want nessun item e nessun errore", len(items), err)
+func (b *bucketFake) Move(_ context.Context, src, dest string) error {
+	if b.moveErr != nil {
+		return b.moveErr
 	}
-	if closed.task != "CFLOW" {
-		t.Errorf("il gate ha ricevuto il task %q, want CFLOW", closed.task)
+	if b.moved == nil {
+		b.moved = map[string]string{}
+	}
+	b.moved[src] = dest
+	return nil
+}
+
+// servicesFake risolve un solo servizio, "main".
+type servicesFake struct{ b *bucketFake }
+
+func (s servicesFake) lookup(name string) (objectStore, bool) {
+	if name != "main" || s.b == nil {
+		return nil, false
+	}
+	return s.b, true
+}
+
+// storeFake implementa il solo InsertIfNotActive: l'interfaccia incorporata è nil, quindi ogni
+// altra chiamata panica — se il feed ne facesse una, il test lo direbbe.
+type storeFake struct {
+	store.IWorkItemStore
+	active   map[string]bool // ObjectId già attivi: InsertIfNotActive li scarta
+	inserted []*store.WorkItem
+	err      *core.Error
+}
+
+func (s *storeFake) InsertIfNotActive(_ context.Context, items []*store.WorkItem) (int, *core.Error) {
+	if s.err != nil {
+		return 0, s.err
+	}
+	n := 0
+	for _, it := range items {
+		if s.active[it.ObjectId] {
+			continue
+		}
+		s.inserted = append(s.inserted, it)
+		n++
+	}
+	return n, nil
+}
+
+func TestScan_FiltraOrdinaEFermaLElenco(t *testing.T) {
+	b := &bucketFake{keys: []string{
+		"in/", // segnaposto di cartella: non è un file
+		"in/a.csv",
+		"in/b.txt",
+		"in/c.csv",
+		"in/d.csv",
+		"in/e.csv",
+		"altro/x.csv",
+	}}
+	src := source{Service: "main", Path: "in/", Pattern: "*.csv", DestPath: "done"}
+
+	items, err := scan(context.Background(), servicesFake{b}, "import", src, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	for _, it := range items {
+		keys = append(keys, it.ObjectId)
+	}
+	if got := strings.Join(keys, ","); got != "in/a.csv,in/c.csv,in/d.csv" {
+		t.Fatalf("file accodati: %s", got)
+	}
+	// Trovati 3 file l'elenco si ferma: in/e.csv non viene nemmeno visitato.
+	if b.visited != 5 {
+		t.Errorf("oggetti visitati %d, attesi 5: l'elenco non si è fermato al limite", b.visited)
 	}
 
-	if _, err := newFeed(reg, &fakeGate{open: true}).Feed(context.Background(), "CFLOW", props, 1); err == nil {
-		t.Fatal("gate aperto: il feed deve proseguire e fallire sul servizio inesistente")
+	first := items[0]
+	if first.TaskName != "import" || first.Status != store.StatusPending || first.NextRunAt == nil {
+		t.Errorf("item incompleto per il claim: %+v", first)
 	}
+	if p, ok := first.Payload.(s3Payload); !ok || p != (s3Payload{Service: "main", Key: "in/a.csv", DestPath: "done"}) {
+		t.Errorf("payload: %#v", first.Payload)
+	}
+	// L'ordine dell'elenco deve sopravvivere al claim, che ordina per next_run_at e create_time.
+	for i := 1; i < len(items); i++ {
+		if !items[i].NextRunAt.After(*items[i-1].NextRunAt) || !items[i].CreateTime.After(items[i-1].CreateTime) {
+			t.Fatalf("item %d non scaglionato rispetto al precedente", i)
+		}
+	}
+}
 
-	if _, err := newFeed(reg, &fakeGate{err: context.DeadlineExceeded}).Feed(context.Background(), "CFLOW", props, 1); err == nil {
-		t.Fatal("errore del gate: atteso un errore")
+func TestScan_Errori(t *testing.T) {
+	b := &bucketFake{keys: []string{"in/a.csv"}}
+	if _, err := scan(context.Background(), servicesFake{b}, "t", source{Service: "nope"}, 10); err == nil {
+		t.Error("servizio sconosciuto: atteso errore")
+	}
+	if _, err := scan(context.Background(), servicesFake{b}, "t", source{Service: "main", Pattern: "[a-"}, 10); err == nil {
+		t.Error("pattern malformato: atteso errore")
+	}
+	b.listErr = errors.New("boom")
+	_, err := scan(context.Background(), servicesFake{b}, "t", source{Service: "main"}, 10)
+	if appErr, ok := errors.AsType[*core.Error](err); !ok || appErr.Code != "BATCH-S3-LIST" {
+		t.Errorf("elenco fallito: atteso BATCH-S3-LIST, ottenuto %v", err)
+	}
+}
+
+func TestS3Feed_UsaLePropertyDelJob(t *testing.T) {
+	b := &bucketFake{keys: []string{"in/a.csv", "in/b.txt"}}
+	f := &s3Feed{svcs: servicesFake{b}}
+	items, err := f.Feed(context.Background(), "import", properties.Properties{
+		"service": "main", "path": "in/", "pattern": "*.csv", "dest-path": "done",
+	}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].ObjectId != "in/a.csv" {
+		t.Fatalf("items: %+v", items)
 	}
 }
 
@@ -171,30 +202,6 @@ func TestDecodePayload_S3Payload(t *testing.T) {
 				t.Errorf("got %+v, want %+v", out, atteso)
 			}
 		})
-	}
-}
-
-// helpers to extract testable logic from Feed without needing a real S3 client
-
-func baseName(key string) string {
-	return pathBase(key)
-}
-
-func matchPattern(pattern, base string) (bool, error) {
-	return pathMatch(pattern, base)
-}
-
-func buildWorkItem(taskName, key, service, destPath string) *store.WorkItem {
-	return &store.WorkItem{
-		Id:       "test-id",
-		TaskName: taskName,
-		ObjectId: key,
-		Payload: s3Payload{
-			Service:  service,
-			Key:      key,
-			DestPath: destPath,
-		},
-		Status: store.StatusPending,
 	}
 }
 

@@ -34,6 +34,9 @@ const (
 	CodeQueryIdent = "BATCH-QUERY-IDENT" // identificatore SQL non valido nella query di feed
 
 	CodeJobProperties = "BATCH-JOB-PROPS" // property infrastrutturale mancante in jobs[].properties
+
+	CodeS3List = "BATCH-S3-LIST" // elenco del bucket fallito nel feed S3 (FeedS3Task, Feeder, DistribuiteTaskByS3File)
+	CodeS3Feed = "BATCH-S3-FEED" // Feeder.Feed su un job che non è un FeedS3Task della config
 )
 
 // Tech è il costruttore usato da tutto il modulo: errore tecnico con codice e libreria.

@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"strings"
 	"time"
 	"uuid"
 
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/s3client"
+	pub "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 )
 
@@ -20,27 +23,99 @@ type s3Payload struct {
 	DestPath string `json:"destPath" bson:"destPath"`
 }
 
-// Gate decide, a ogni tick, se il feed deve elencare i file del bucket. È facoltativo: senza un Gate
-// nel grafo fx il feed elenca sempre. Con un Gate che risponde false il tick non accoda nulla, ma i
-// work item già accodati continuano a essere reclamati ed eseguiti: il gate governa solo l'ingresso.
-// Serve a far partire l'elaborazione dei file solo quando un sistema esterno lo chiede.
-type Gate interface {
-	Open(ctx context.Context, taskName string) (bool, error)
-	// Listed è chiamato dopo ogni elenco del bucket andato a buon fine, con il numero di file che
-	// corrispondono al pattern (al più limit). Zero significa che non resta nulla da elaborare: è il
-	// segnale con cui chi apre il cancello lo richiude. Un errore diventa l'esito del tick.
-	Listed(ctx context.Context, taskName string, files int) error
+// source è il "dove guardare" di un feed S3: le property di un job FeedS3Task o
+// DistribuiteTaskByS3File.
+type source struct {
+	Service  string
+	Path     string
+	Pattern  string
+	DestPath string
+}
+
+func sourceFrom(p properties.Properties) source {
+	return source{
+		Service:  p.GetString(pub.PropService, ""),
+		Path:     p.GetString(pub.PropPath, ""),
+		Pattern:  p.GetString(pub.PropPattern, ""),
+		DestPath: p.GetString(pub.PropDestPath, ""),
+	}
+}
+
+// scan elenca il prefisso della sorgente e costruisce un work item per ogni file il cui basename
+// corrisponde al pattern, al più limit. È il feed S3, l'unico: lo usano il job FeedS3Task, il Feeder
+// che l'app chiama da API e il feed del job DistribuiteTaskByS3File.
+//
+// L'elenco si ferma appena trovati limit file: prima si elencava l'intero prefisso e si tagliava
+// dopo. Le chiavi che finiscono con "/" sono i segnaposto di cartella che le console S3 creano e non
+// sono file: con un pattern "*" venivano accodate ed elaborate come file vuoti.
+//
+// Gli item escono nell'ordine dell'elenco (lessicografico sulla chiave) e lo conservano in coda:
+// il claim ordina per next_run_at e poi per create_time, quindi i due istanti sono scaglionati di
+// un millisecondo per file — la risoluzione di una data Mongo —, altrimenti a pari istante l'ordine
+// in cui un SingleTask li prende sarebbe quello del database.
+func scan(ctx context.Context, svcs services, taskName string, src source, limit int) ([]*store.WorkItem, error) {
+	svc, ok := svcs.lookup(src.Service)
+	if !ok {
+		return nil, fmt.Errorf("s3feed: unknown service %q", src.Service)
+	}
+	if err := checkPattern(src.Pattern); err != nil {
+		return nil, err
+	}
+
+	var keys []string
+	err := svc.Walk(ctx, src.Path, func(obj s3client.Object) bool {
+		if strings.HasSuffix(obj.Key, "/") {
+			return true
+		}
+		if src.Pattern != "" {
+			if matched, _ := path.Match(src.Pattern, path.Base(obj.Key)); !matched {
+				return true
+			}
+		}
+		keys = append(keys, obj.Key)
+		return len(keys) < limit
+	})
+	if err != nil {
+		return nil, errs.Tech(errs.CodeS3List).WithCause(err)
+	}
+
+	now := time.Now()
+	items := make([]*store.WorkItem, len(keys))
+	for i, key := range keys {
+		at := now.Add(time.Duration(i) * time.Millisecond)
+		items[i] = &store.WorkItem{
+			Id:         uuid.NewV7().String(),
+			TaskName:   taskName,
+			ObjectId:   key,
+			Payload:    s3Payload{Service: src.Service, Key: key, DestPath: src.DestPath},
+			Status:     store.StatusPending,
+			CreateTime: at,
+			NextRunAt:  &at,
+		}
+	}
+	return items, nil
+}
+
+// checkPattern rifiuta un glob malformato prima di elencare: dentro la visita l'errore di path.Match
+// non ha dove risalire, e un pattern rotto non accoderebbe mai nulla senza dirlo.
+func checkPattern(pattern string) error {
+	if pattern == "" {
+		return nil
+	}
+	if _, err := path.Match(pattern, ""); err != nil {
+		return fmt.Errorf("s3feed: invalid pattern %q: %w", pattern, err)
+	}
+	return nil
 }
 
 // s3Feed implements distributedjob.IFeedSource by listing objects in an S3 bucket.
 type s3Feed struct {
-	reg  *s3client.Registry
-	gate Gate
+	svcs services
 }
 
-// newFeed creates an s3Feed backed by the given registry. gate può essere nil.
-func newFeed(reg *s3client.Registry, gate Gate) *s3Feed {
-	return &s3Feed{reg: reg, gate: gate}
+// newFeed creates an s3Feed backed by the given registry.
+func newFeed(reg *s3client.Registry) *s3Feed {
+	return &s3Feed{svcs: registryServices{reg}}
 }
 
 // Feed lists S3 objects matching the configured pattern and returns WorkItems.
@@ -51,71 +126,5 @@ func newFeed(reg *s3client.Registry, gate Gate) *s3Feed {
 //   - pattern:   glob pattern matched against the object key basename (e.g. "*.csv")
 //   - dest-path: destination prefix where files are moved after successful processing
 func (f *s3Feed) Feed(ctx context.Context, taskName string, props properties.Properties, limit int) ([]*store.WorkItem, error) {
-	serviceName := props.GetString("service", "")
-	prefix := props.GetString("path", "")
-	pattern := props.GetString("pattern", "")
-	destPath := props.GetString("dest-path", "")
-
-	if f.gate != nil {
-		open, err := f.gate.Open(ctx, taskName)
-		if err != nil {
-			return nil, fmt.Errorf("s3feed: gate: %w", err)
-		}
-		if !open {
-			return nil, nil
-		}
-	}
-
-	svc, ok := f.reg.Get(serviceName)
-	if !ok {
-		return nil, fmt.Errorf("s3feed: unknown service %q", serviceName)
-	}
-
-	objects, err := svc.List(ctx, prefix)
-	if err != nil {
-		return nil, fmt.Errorf("s3feed: list failed: %w", err)
-	}
-
-	var items []*store.WorkItem
-	now := time.Now()
-	for _, obj := range objects {
-		if len(items) >= limit {
-			break
-		}
-		base := path.Base(obj.Key)
-		if pattern != "" {
-			matched, matchErr := path.Match(pattern, base)
-			if matchErr != nil {
-				return nil, fmt.Errorf("s3feed: invalid pattern %q: %w", pattern, matchErr)
-			}
-			if !matched {
-				continue
-			}
-		}
-		items = append(items, &store.WorkItem{
-			Id:       uuid.NewV7().String(),
-			TaskName: taskName,
-			ObjectId: obj.Key,
-			Payload: s3Payload{
-				Service:  serviceName,
-				Key:      obj.Key,
-				DestPath: destPath,
-			},
-			Status:     store.StatusPending,
-			CreateTime: now,
-			NextRunAt:  &now,
-		})
-	}
-	if f.gate != nil {
-		if err := f.gate.Listed(ctx, taskName, len(items)); err != nil {
-			return nil, fmt.Errorf("s3feed: gate: %w", err)
-		}
-	}
-	return items, nil
+	return scan(ctx, f.svcs, taskName, sourceFrom(props), limit)
 }
-
-// pathBase and pathMatch are thin wrappers exposed for testability.
-var (
-	pathBase  = path.Base
-	pathMatch = path.Match
-)

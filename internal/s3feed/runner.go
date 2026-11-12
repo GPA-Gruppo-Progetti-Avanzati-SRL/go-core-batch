@@ -15,7 +15,7 @@ import (
 // fileRunner wraps a taskrunner.IFileRunner and handles S3 download/move lifecycle.
 // It implements runner.ITaskRunner so it can be registered in the mux.Runner.
 type fileRunner struct {
-	reg   *s3client.Registry
+	svcs  services
 	inner taskrunner.IFileRunner
 }
 
@@ -25,7 +25,7 @@ func (r *fileRunner) Run(ctx context.Context, item *store.WorkItem) error {
 		return fmt.Errorf("s3feed runner: decode payload for %q: %w", item.Id, err)
 	}
 
-	svc, ok := r.reg.Get(payload.Service)
+	svc, ok := r.svcs.lookup(payload.Service)
 	if !ok {
 		return fmt.Errorf("s3feed runner: unknown service %q", payload.Service)
 	}
@@ -74,5 +74,5 @@ func (r *fileRunner) Run(ctx context.Context, item *store.WorkItem) error {
 
 // newFileRunner creates a fileRunner that wraps the given IFileRunner with S3 lifecycle.
 func newFileRunner(reg *s3client.Registry, inner taskrunner.IFileRunner) *fileRunner {
-	return &fileRunner{reg: reg, inner: inner}
+	return &fileRunner{svcs: registryServices{reg}, inner: inner}
 }
