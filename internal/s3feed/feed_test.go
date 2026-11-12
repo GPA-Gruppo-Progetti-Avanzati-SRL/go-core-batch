@@ -12,6 +12,7 @@ import (
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/s3client"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/taskrunner"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/s3"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
 )
@@ -105,7 +106,7 @@ func TestScan_FiltraOrdinaEFermaLElenco(t *testing.T) {
 		"in/e.csv",
 		"altro/x.csv",
 	}}
-	src := source{Service: "main", Path: "in/", Pattern: "*.csv", DestPath: "done"}
+	src := s3.Source{Service: "main", Path: "in/", Pattern: "*.csv", DestPath: "done"}
 
 	items, err := scan(context.Background(), servicesFake{b}, "import", src, 3)
 	if err != nil {
@@ -140,14 +141,14 @@ func TestScan_FiltraOrdinaEFermaLElenco(t *testing.T) {
 
 func TestScan_Errori(t *testing.T) {
 	b := &bucketFake{keys: []string{"in/a.csv"}}
-	if _, err := scan(context.Background(), servicesFake{b}, "t", source{Service: "nope"}, 10); err == nil {
+	if _, err := scan(context.Background(), servicesFake{b}, "t", s3.Source{Service: "nope"}, 10); err == nil {
 		t.Error("servizio sconosciuto: atteso errore")
 	}
-	if _, err := scan(context.Background(), servicesFake{b}, "t", source{Service: "main", Pattern: "[a-"}, 10); err == nil {
+	if _, err := scan(context.Background(), servicesFake{b}, "t", s3.Source{Service: "main", Pattern: "[a-"}, 10); err == nil {
 		t.Error("pattern malformato: atteso errore")
 	}
 	b.listErr = errors.New("boom")
-	_, err := scan(context.Background(), servicesFake{b}, "t", source{Service: "main"}, 10)
+	_, err := scan(context.Background(), servicesFake{b}, "t", s3.Source{Service: "main"}, 10)
 	if appErr, ok := errors.AsType[*core.Error](err); !ok || appErr.Code != "BATCH-S3-LIST" {
 		t.Errorf("elenco fallito: atteso BATCH-S3-LIST, ottenuto %v", err)
 	}

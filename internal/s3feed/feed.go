@@ -11,6 +11,7 @@ import (
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/errs"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/s3client"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/s3"
 	pub "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
 )
@@ -23,17 +24,10 @@ type s3Payload struct {
 	DestPath string `json:"destPath" bson:"destPath"`
 }
 
-// source è il "dove guardare" di un feed S3: le property di un job FeedS3Task o
-// DistribuiteTaskByS3File.
-type source struct {
-	Service  string
-	Path     string
-	Pattern  string
-	DestPath string
-}
-
-func sourceFrom(p properties.Properties) source {
-	return source{
+// sourceFrom legge la sorgente dalle property di un job DistribuiteTaskByS3File, l'unico job che la
+// porta ancora sul job: gli altri flussi la dichiarano sul task (task.Config.S3).
+func sourceFrom(p properties.Properties) s3.Source {
+	return s3.Source{
 		Service:  p.GetString(pub.PropService, ""),
 		Path:     p.GetString(pub.PropPath, ""),
 		Pattern:  p.GetString(pub.PropPattern, ""),
@@ -42,8 +36,8 @@ func sourceFrom(p properties.Properties) source {
 }
 
 // scan elenca il prefisso della sorgente e costruisce un work item per ogni file il cui basename
-// corrisponde al pattern, al più limit. È il feed S3, l'unico: lo usano il job FeedS3Task, il Feeder
-// che l'app chiama da API e il feed del job DistribuiteTaskByS3File.
+// corrisponde al pattern, al più limit. È il feed S3, l'unico: lo usano il Feeder (che serve sia il job
+// FeedS3Task sia il trigger su richiesta) e il feed del job DistribuiteTaskByS3File.
 //
 // L'elenco si ferma appena trovati limit file: prima si elencava l'intero prefisso e si tagliava
 // dopo. Le chiavi che finiscono con "/" sono i segnaposto di cartella che le console S3 creano e non
@@ -53,7 +47,7 @@ func sourceFrom(p properties.Properties) source {
 // il claim ordina per next_run_at e poi per create_time, quindi i due istanti sono scaglionati di
 // un millisecondo per file — la risoluzione di una data Mongo —, altrimenti a pari istante l'ordine
 // in cui un SingleTask li prende sarebbe quello del database.
-func scan(ctx context.Context, svcs services, taskName string, src source, limit int) ([]*store.WorkItem, error) {
+func scan(ctx context.Context, svcs services, taskName string, src s3.Source, limit int) ([]*store.WorkItem, error) {
 	svc, ok := svcs.lookup(src.Service)
 	if !ok {
 		return nil, fmt.Errorf("s3feed: unknown service %q", src.Service)

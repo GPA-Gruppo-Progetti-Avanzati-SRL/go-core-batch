@@ -3,13 +3,13 @@ package s3feed
 import (
 	"testing"
 
-	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/distributedjob"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/s3client"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/taskrunner"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/s3"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
 	"go.uber.org/fx"
 )
 
@@ -20,16 +20,15 @@ import (
 //   - l'app, a root, inietta il Feeder;
 //   - il sottosistema chiuso vede la JobRegistration di FeedS3Task (batch_jobs), il runner avvolto
 //     (batch_runners) e il feed nominato di DistribuiteTaskByS3File;
-//   - il Registry resta privato.
+//   - Registry e implementazione del feeder restano privati.
 func TestWiring_FormaDiWithS3(t *testing.T) {
 	cfg := s3.Config{Services: map[string]*s3.ServiceConfig{"main": {Bucket: "b", Region: "eu-south-1"}}}
-	jobs := []scheduler.Config{{
-		Name: "feed-cflow", Type: JobTypeFeedS3Task, Disabled: true,
-		Properties: properties.Properties{"task": "cflow", "service": "main", "dest-path": "done"},
+	tasks := []task.Config{{
+		Name: "import", Type: "IMPORT", S3: &s3.Source{Service: "main", DestPath: "done"},
 	}}
 
 	var (
-		feeder  Feeder
+		feeder  s3.Feeder
 		seen    struct{ jobs, runners int }
 		hasFeed bool
 	)
@@ -45,15 +44,16 @@ func TestWiring_FormaDiWithS3(t *testing.T) {
 		// root: lo store e un runner su file registrato dall'app (runner.RegisterFile).
 		fx.Provide(func() store.IWorkItemStore { return &storeFake{} }),
 		fx.Provide(fx.Annotate(
-			func() *taskrunner.FileTaskRunner { return taskrunner.NewFile("cflow", &fileRunnerSpy{}) },
+			func() *taskrunner.FileTaskRunner { return taskrunner.NewFile("import", &fileRunnerSpy{}) },
 			fx.ResultTags(`group:"`+taskrunner.FileGroup+`"`))),
 		fx.Module("batch-s3",
 			fx.Supply(cfg, fx.Private),
-			fx.Supply(jobs, fx.Private),
+			fx.Supply(tasks, fx.Private),
 			fx.Provide(provideRegistry, fx.Private),
+			fx.Provide(newFeeder, fx.Private),
+			fx.Provide(provideFeeder),
 			fx.Provide(wrappedRunnersProvide()),
 			fx.Provide(feedSourceProvide()),
-			fx.Provide(newFeeder),
 			fx.Provide(fx.Annotate(registerFeedS3, fx.ResultTags(`group:"`+scheduler.JobGroup+`"`))),
 		),
 		fx.Module("batch",

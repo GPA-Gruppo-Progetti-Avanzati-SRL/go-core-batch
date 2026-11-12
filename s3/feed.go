@@ -1,7 +1,26 @@
 package s3
 
+import (
+	"context"
+
+	core "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app"
+)
+
+// Feeder esegue su richiesta il feed S3 di un task: lo stesso giro del tick del suo job FeedS3Task
+// — elenco del Source del task, un work item per file, ciò che è già in coda o in lavorazione non si
+// riaccoda. È il seam con cui go-core-trigger (o un'API dell'app) fa partire un flusso su file.
+//
+// Sta in questo package, che non porta dipendenze, perché chi lo inietta non debba importare l'SDK
+// AWS: l'implementazione la fornisce scheduler/distributedjob/s3feed, passato a batch.WithS3.
+type Feeder interface {
+	// Feed esegue un giro del feed del task. Un task senza blocco `s3:` è un errore.
+	Feed(ctx context.Context, task string) (FeedResult, *core.Error)
+	// Sources ritorna i task con un blocco `s3:`, per nome.
+	Sources() map[string]Source
+}
+
 // FeedResult è l'esito di un giro del feed S3 — il tick di un job FeedS3Task o una chiamata di
-// Feeder.Feed dall'API, che fanno la stessa cosa.
+// Feeder.Feed, che fanno la stessa cosa.
 type FeedResult struct {
 	// Found sono i file del bucket che corrispondono a path/pattern, al più `limit`.
 	Found int

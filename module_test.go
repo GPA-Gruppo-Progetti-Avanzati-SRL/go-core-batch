@@ -23,12 +23,12 @@ func TestActiveSet_ReferencedTuttiINomi(t *testing.T) {
 		JobsConfig: []scheduler.Config{
 			job("DistribuiteTaskByQuery", properties.Properties{"task": "BonifyInit"}),
 			job("FeedTask", properties.Properties{"task": "hello-nightly"}),
-			job("FeedS3Task", properties.Properties{"task": "cflow"}),
+			job("FeedS3Task", properties.Properties{"task": "import"}),
 		},
 		WorkersConfig: []worker.Config{{Name: "Default", Tasks: []string{"BonifyInit", "AggiornaLimiti"}}},
 	}
 	a := activeSet(cfg, newTopology(cfg), nil, nil)
-	for _, want := range []string{"BonifyInit", "hello-nightly", "cflow", "AggiornaLimiti"} {
+	for _, want := range []string{"BonifyInit", "hello-nightly", "import", "AggiornaLimiti"} {
 		if !slices.Contains(a.Referenced, want) {
 			t.Fatalf("%q deve essere un riferimento, ottenuto %v", want, a.Referenced)
 		}

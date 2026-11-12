@@ -1,5 +1,6 @@
 // Package s3feed è l'implementazione dei flussi su file S3: il feed (elenco del bucket → un work
-// item per file), il job FeedS3Task che lo esegue a cron, il Feeder con cui l'app lo esegue da API,
+// item per file, dal blocco s3: del task), il job FeedS3Task che lo esegue a cron, il s3.Feeder con
+// cui go-core-trigger (o l'app) lo esegue su richiesta,
 // il feed del job DistribuiteTaskByS3File e l'avvolgimento dei file runner (runner.RegisterFile) col
 // ciclo download/spostamento del file. I file runner arrivano dal gruppo batch_file_runners e,
 // avvolti, finiscono nel gruppo batch_runners, da cui li instradano SingleTask e i dispatcher. Il
@@ -48,11 +49,11 @@ func feedSourceProvide() any {
 	)
 }
 
-// Module registra i flussi su file S3: il job FeedS3Task, il Feeder, il feed di
-// DistribuiteTaskByS3File e l'avvolgimento dei file runner. Il Registry S3 è privato al modulo: è
-// l'ingranaggio di tutti e quattro, non un servizio dell'app. È il corpo di
+// Module registra i flussi su file S3: il job FeedS3Task, il s3.Feeder, il feed di
+// DistribuiteTaskByS3File e l'avvolgimento dei file runner. Registry e implementazione del feeder
+// sono privati al modulo: sono ingranaggi, e all'app arriva il solo seam s3.Feeder. È il corpo di
 // scheduler/distributedjob/s3feed.Module; la s3.Config (e la sezione jobs:, per il Feeder) la
-// supplisce batch.Module.
+// supplisce batch.Module, con la sezione tasks: (i blocchi s3: dei task).
 //
 // Tutto è lazy: il job si costruisce solo dove gira lo scheduler, l'avvolgimento solo dove qualcuno
 // esegue i runner, il Feeder solo se l'app lo inietta. È ciò che permette a batch.WithS3 di
@@ -61,6 +62,7 @@ func Module(modes ...string) {
 	core.Private(func() { core.Provide(provideRegistry, modes...) })
 	core.Provide(wrappedRunnersProvide(), modes...)
 	core.Provide(feedSourceProvide(), modes...)
-	core.Provide(newFeeder, modes...)
+	core.Private(func() { core.Provide(newFeeder, modes...) })
+	core.Provide(provideFeeder, modes...)
 	scheduler.ProvideJob(registerFeedS3, modes...)
 }

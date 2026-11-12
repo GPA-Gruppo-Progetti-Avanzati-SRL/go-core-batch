@@ -323,15 +323,15 @@ func Module(cfg *Config, register func(), opts ...Option) {
 	corelock.Module(&cfg.Lock, corelock.WithBackend(o.locker))
 
 	// Flussi su file S3: a ROOT e senza mode gate, perché il Feeder è un seam pubblico (vedi
-	// WithS3). Dentro un core.Module aperto: la s3.Config e la sezione jobs: — che il Feeder legge
-	// per risolvere il job per nome — restano private, i servizi sono esportati, e i value group
+	// WithS3). Dentro un core.Module aperto: la s3.Config e la sezione tasks: — i blocchi s3: che il
+	// feed legge — restano private, i servizi sono esportati, e i value group
 	// (batch_jobs, batch_runners) li raccolgono lo scheduler e i runner del sottosistema.
 	if o.s3 != nil {
 		core.Module("batch-s3", func() {
 			if len(cfg.S3.Services) > 0 {
 				core.Supply(cfg.S3)
 			}
-			core.Supply(cfg.JobsConfig)
+			core.Supply(cfg.TasksConfig)
 			o.s3()
 		})
 	}
@@ -363,6 +363,7 @@ func Module(cfg *Config, register func(), opts ...Option) {
 		// WithModule, la forma che precede WithS3.
 		if len(cfg.S3.Services) > 0 && o.s3 == nil {
 			core.Supply(cfg.S3, sched...)
+			core.Supply(cfg.TasksConfig, sched...)
 		}
 		if cfg.Grpc.Server.Port != 0 {
 			core.Supply(&cfg.Grpc.Server, work...)

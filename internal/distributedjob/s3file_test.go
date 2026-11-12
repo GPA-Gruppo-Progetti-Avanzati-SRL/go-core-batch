@@ -48,17 +48,17 @@ func TestRegisterByS3File_SenzaFeed(t *testing.T) {
 		}
 		return got.Jobs[0]
 	}
-	cfg := scheduler.Config{Name: "cflow-exec", Type: JobTypeByS3File,
-		Properties: properties.Properties{"task": "cflow", "limit": 1}}
+	cfg := scheduler.Config{Name: "import-exec", Type: JobTypeByS3File,
+		Properties: properties.Properties{"task": "import", "limit": 1}}
 
-	err := build().Check("cflow-exec", cfg)
+	err := build().Check("import-exec", cfg)
 	if err == nil || !strings.Contains(err.Error(), "batch.WithS3") {
 		t.Fatalf("senza feed: atteso un errore che nomini batch.WithS3, ottenuto %v", err)
 	}
 
 	withFeed := build(fx.Provide(fx.Annotate(func() IFeedSource { return feedStub{} },
 		fx.ResultTags(`name:"`+S3FeedName+`"`))))
-	if err := withFeed.Check("cflow-exec", cfg); err != nil {
+	if err := withFeed.Check("import-exec", cfg); err != nil {
 		t.Fatalf("col feed: %v", err)
 	}
 }

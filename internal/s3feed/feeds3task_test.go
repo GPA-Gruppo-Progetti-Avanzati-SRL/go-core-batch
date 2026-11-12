@@ -12,125 +12,108 @@ import (
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/internal/scheduler"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/s3"
 	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/store"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/task"
 )
+
+func importTasks() []task.Config {
+	return []task.Config{
+		{Name: "import", Type: "IMPORT", S3: &s3.Source{Service: "main", Path: "inbox/", Pattern: "*", DestPath: "archive"}},
+		{Name: "selftest", Type: "SELFTEST"},
+	}
+}
 
 func feedJob(name string, props properties.Properties) scheduler.Config {
 	return scheduler.Config{Name: name, Type: JobTypeFeedS3Task, ScheduledCron: "0 0 22 * * *", Properties: props}
 }
 
-func cflowProps() properties.Properties {
-	return properties.Properties{
-		"task": "cflow", "service": "main", "path": "cflow/todo/", "pattern": "*", "dest-path": "cflow/done",
-	}
-}
-
-// Un giro accoda i file nuovi, non riaccoda quelli già attivi, e l'esito dice allo script cosa fare.
-func TestFeedOnce_Esiti(t *testing.T) {
-	spec, err := specFrom("feed-cflow", feedJob("feed-cflow", cflowProps()))
+func newTestFeeder(t *testing.T, b *bucketFake, st *storeFake) *feeder {
+	t.Helper()
+	f, err := buildFeeder(importTasks(), servicesFake{b}, st)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return f
+}
 
-	vuoto := &bucketFake{}
-	res, err := feedOnce(context.Background(), servicesFake{vuoto}, &storeFake{}, spec)
-	if err != nil || res.Outcome() != s3.NothingToDo {
-		t.Fatalf("bucket vuoto: %+v %v, atteso NOTHINGTODO", res, err)
+// Un giro accoda i file nuovi, non riaccoda quelli già attivi, e l'esito dice allo script cosa fare.
+func TestFeeder_Esiti(t *testing.T) {
+	vuoto := newTestFeeder(t, &bucketFake{}, &storeFake{})
+	res, appErr := vuoto.Feed(context.Background(), "import")
+	if appErr != nil || res.Outcome() != s3.NothingToDo {
+		t.Fatalf("bucket vuoto: %+v %v, atteso NOTHINGTODO", res, appErr)
 	}
 
-	b := &bucketFake{keys: []string{"cflow/todo/1.dat", "cflow/todo/2.dat"}}
+	b := &bucketFake{keys: []string{"inbox/1.dat", "inbox/2.dat"}}
 	st := &storeFake{}
-	res, err = feedOnce(context.Background(), servicesFake{b}, st, spec)
-	if err != nil || res != (s3.FeedResult{Found: 2, Queued: 2}) || res.Outcome() != s3.Queued {
-		t.Fatalf("primo giro: %+v %v, atteso QUEUED 2/2", res, err)
+	f := newTestFeeder(t, b, st)
+	res, appErr = f.Feed(context.Background(), "IMPORT") // il task si risolve case-insensitive
+	if appErr != nil || res != (s3.FeedResult{Found: 2, Queued: 2}) {
+		t.Fatalf("primo giro: %+v %v, atteso QUEUED 2/2", res, appErr)
 	}
-	if st.inserted[0].TaskName != "cflow" {
-		t.Errorf("accodato su %q, atteso il task del job", st.inserted[0].TaskName)
+	if st.inserted[0].TaskName != "import" {
+		t.Errorf("accodato su %q, atteso il nome del task come scritto in config", st.inserted[0].TaskName)
 	}
 
 	// I file sono ancora nel bucket (in lavorazione): il giro successivo non riaccoda nulla.
-	st.active = map[string]bool{"cflow/todo/1.dat": true, "cflow/todo/2.dat": true}
-	res, err = feedOnce(context.Background(), servicesFake{b}, st, spec)
-	if err != nil || res.Outcome() != s3.InProgress {
-		t.Fatalf("file già attivi: %+v %v, atteso INPROGRESS", res, err)
+	st.active = map[string]bool{"inbox/1.dat": true, "inbox/2.dat": true}
+	if res, _ = f.Feed(context.Background(), "import"); res.Outcome() != s3.InProgress {
+		t.Fatalf("file già attivi: %+v, atteso INPROGRESS", res)
 	}
 
 	st.err = core.TechnicalError().WithCode("BATCH-INSERT")
-	if _, err := feedOnce(context.Background(), servicesFake{b}, st, spec); err == nil {
-		t.Fatal("insert fallita: atteso errore")
+	if _, appErr = f.Feed(context.Background(), "import"); appErr == nil || appErr.Code != "BATCH-INSERT" {
+		t.Fatalf("insert fallita: atteso BATCH-INSERT, ottenuto %v", appErr)
+	}
+
+	b.listErr = errors.New("boom")
+	st.err = nil
+	if _, appErr = f.Feed(context.Background(), "import"); appErr == nil || appErr.Code != "BATCH-S3-LIST" {
+		t.Fatalf("elenco fallito: atteso BATCH-S3-LIST, ottenuto %v", appErr)
+	}
+
+	_, appErr = f.Feed(context.Background(), "selftest")
+	if appErr == nil || appErr.Code != "BATCH-S3-FEED" || !strings.Contains(appErr.Message, "import") {
+		t.Fatalf("task senza s3: atteso BATCH-S3-FEED con i task che lo hanno, ottenuto %v", appErr)
+	}
+	if got := f.Sources(); len(got) != 1 || got["import"].Path != "inbox/" {
+		t.Fatalf("Sources: %+v", got)
 	}
 }
 
-func TestSpecFrom_PropertyObbligatorie(t *testing.T) {
-	for _, manca := range []string{"task", "service", "dest-path"} {
-		props := cflowProps()
-		delete(props, manca)
-		_, err := specFrom("feed-cflow", feedJob("feed-cflow", props))
-		if err == nil || !strings.Contains(err.Error(), manca) {
-			t.Errorf("senza %q: atteso un errore che la nomini, ottenuto %v", manca, err)
-		}
+// La validazione dei blocchi s3: avviene alla costruzione: un errore ferma l'avvio.
+func TestBuildFeeder_Validazione(t *testing.T) {
+	casi := map[string]s3.Source{
+		"senza service":           {DestPath: "done"},
+		"senza dest-path":         {Service: "main"},
+		"pattern malformato":      {Service: "main", DestPath: "done", Pattern: "[a-"},
+		"servizio non dichiarato": {Service: "altro", DestPath: "done"},
 	}
-
-	props := cflowProps()
-	props["pattern"] = "[a-"
-	if _, err := specFrom("feed-cflow", feedJob("feed-cflow", props)); err == nil {
-		t.Error("pattern malformato: atteso errore al boot")
-	}
-
-	spec, err := specFrom("feed-cflow", feedJob("feed-cflow", cflowProps()))
-	if err != nil || spec.limit != defaultFeedLimit {
-		t.Errorf("limit assente: atteso il default %d, ottenuto %+v %v", defaultFeedLimit, spec, err)
+	for nome, src := range casi {
+		t.Run(nome, func(t *testing.T) {
+			_, err := buildFeeder([]task.Config{{Name: "x", Type: "X", S3: &src}}, servicesFake{&bucketFake{}}, &storeFake{})
+			if err == nil || !strings.Contains(err.Error(), `task "x"`) {
+				t.Fatalf("atteso un errore che nomini il task, ottenuto %v", err)
+			}
+		})
 	}
 }
 
 func TestFeedS3Registration_Check(t *testing.T) {
-	reg := feedS3Registration(&storeFake{}, servicesFake{&bucketFake{}})
+	reg := registerFeedS3(newTestFeeder(t, &bucketFake{}, &storeFake{}))
 	if reg.Type != JobTypeFeedS3Task {
 		t.Fatalf("type %q", reg.Type)
 	}
-	if err := reg.Check("feed-cflow", feedJob("feed-cflow", cflowProps())); err != nil {
+	if err := reg.Check("feed-import", feedJob("feed-import", properties.Properties{"task": "import"})); err != nil {
 		t.Fatalf("config valida rifiutata: %v", err)
 	}
-	props := cflowProps()
-	props["service"] = "sconosciuto"
-	if err := reg.Check("feed-cflow", feedJob("feed-cflow", props)); err == nil {
-		t.Error("servizio non dichiarato in s3.services: atteso errore al boot")
-	}
-}
-
-func TestFeeder(t *testing.T) {
-	b := &bucketFake{keys: []string{"cflow/todo/1.dat"}}
-	st := &storeFake{}
-	solaAPI := feedJob("feed-cflow", cflowProps())
-	solaAPI.Disabled = true // flusso alimentato solo da API: la voce c'è, il cron no
-	jobs := []scheduler.Config{
-		{Name: "altro", Type: "SingleTask", Properties: properties.Properties{"task": "x"}},
-		solaAPI,
-	}
-	f, err := buildFeeder(jobs, servicesFake{b}, st)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	res, appErr := f.Feed(context.Background(), "FEED-CFLOW") // il nome si confronta case-insensitive
-	if appErr != nil || res.Outcome() != s3.Queued || len(st.inserted) != 1 {
-		t.Fatalf("Feed: %+v %v", res, appErr)
-	}
-
-	_, appErr = f.Feed(context.Background(), "altro")
-	if appErr == nil || appErr.Code != "BATCH-S3-FEED" || !strings.Contains(appErr.Message, "feed-cflow") {
-		t.Fatalf("job che non è un FeedS3Task: atteso BATCH-S3-FEED con i nomi dichiarati, ottenuto %v", appErr)
-	}
-
-	b.listErr = errors.New("boom")
-	if _, appErr = f.Feed(context.Background(), "feed-cflow"); appErr == nil || appErr.Code != "BATCH-S3-LIST" {
-		t.Fatalf("elenco fallito: atteso BATCH-S3-LIST, ottenuto %v", appErr)
-	}
-
-	// La validazione avviene alla costruzione, anche sulle voci disabilitate.
-	rotto := feedJob("feed-rotto", properties.Properties{"task": "x", "service": "main"})
-	rotto.Disabled = true
-	if _, err := buildFeeder([]scheduler.Config{rotto}, servicesFake{b}, st); err == nil {
-		t.Error("voce senza dest-path: atteso errore alla costruzione del Feeder")
+	for nome, props := range map[string]properties.Properties{
+		"senza task":          {},
+		"task senza s3":       {"task": "selftest"},
+		"task non dichiarato": {"task": "nessuno"},
+	} {
+		if err := reg.Check("feed", feedJob("feed", props)); err == nil {
+			t.Errorf("%s: atteso errore al boot", nome)
+		}
 	}
 }
 
@@ -150,13 +133,12 @@ func (r *fileRunnerSpy) Run(_ context.Context, key string, content io.Reader) er
 // file viene spostato: il runner non elenca, non scarica e non sposta.
 func TestFileRunner_RiceveIlFileAccodatoDalFeed(t *testing.T) {
 	b := &bucketFake{
-		keys:    []string{"cflow/todo/1.dat"},
-		content: map[string]string{"cflow/todo/1.dat": "riga1\n"},
+		keys:    []string{"inbox/1.dat"},
+		content: map[string]string{"inbox/1.dat": "riga1\n"},
 	}
-	spec, _ := specFrom("feed-cflow", feedJob("feed-cflow", cflowProps()))
 	st := &storeFake{}
-	if _, err := feedOnce(context.Background(), servicesFake{b}, st, spec); err != nil {
-		t.Fatal(err)
+	if _, appErr := newTestFeeder(t, b, st).Feed(context.Background(), "import"); appErr != nil {
+		t.Fatal(appErr)
 	}
 
 	spy := &fileRunnerSpy{}
@@ -164,10 +146,10 @@ func TestFileRunner_RiceveIlFileAccodatoDalFeed(t *testing.T) {
 	if err := fr.Run(context.Background(), st.inserted[0]); err != nil {
 		t.Fatal(err)
 	}
-	if spy.key != "cflow/todo/1.dat" || spy.content != "riga1\n" {
+	if spy.key != "inbox/1.dat" || spy.content != "riga1\n" {
 		t.Errorf("il runner ha ricevuto %q / %q", spy.key, spy.content)
 	}
-	if b.moved["cflow/todo/1.dat"] != "cflow/done/1.dat" {
+	if b.moved["inbox/1.dat"] != "archive/1.dat" {
 		t.Errorf("spostamenti: %v", b.moved)
 	}
 

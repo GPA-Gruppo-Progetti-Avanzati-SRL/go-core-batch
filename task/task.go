@@ -30,7 +30,10 @@
 // nel grafo fx.
 package task
 
-import "github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
+import (
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-app/properties"
+	"github.com/GPA-Gruppo-Progetti-Avanzati-SRL/go-core-batch/s3"
+)
 
 // Config è una voce della sezione `tasks:`: un'istanza di task type, con la sua configurazione
 // applicativa. Le Properties sono mappate sui campi `prop:` della struct del runner (properties.BindProps).
@@ -56,6 +59,11 @@ type Config struct {
 	// consuma quindi un tentativo, anche se il runner non ha mai fallito.
 	MaxRetry   *int                  `yaml:"max-retry" mapstructure:"max-retry" json:"max-retry"`
 	Properties properties.Properties `yaml:"properties" mapstructure:"properties" json:"properties"`
+	// S3 è la sorgente S3 del task: con questo blocco il task è alimentato dal feed S3 (job FeedS3Task
+	// o Feeder su richiesta), che accoda un work item per file. Il runner è un runner.RegisterFile.
+	// Sta accanto a Properties e non dentro perché è INFRASTRUTTURALE — la legge il framework, non il
+	// runner — e un campo tipizzato si valida da sé invece di finire fra le chiavi non reclamate.
+	S3 *s3.Source `yaml:"s3" mapstructure:"s3" json:"s3,omitempty"`
 }
 
 // ResolveMaxRetry applica la convenzione dell'assenza: nessun valore configurato significa
